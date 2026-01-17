@@ -1,0 +1,17 @@
+# Node
+node_modules
+.next
+dist
+
+# Rust
+target
+
+# OS
+.DS_Store
+
+# Env
+.env
+.env.local
+
+# Tauri
+src-tauri/target
