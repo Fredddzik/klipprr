@@ -2,11 +2,20 @@
 
 import { useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
+import type { AuthResponse } from "@supabase/supabase-js";
+import type { Session } from "@supabase/supabase-js";
+import type { PostgrestSingleResponse } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+function createSupabaseClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!url || !key) {
+    throw new Error("Missing Supabase env vars");
+  }
+
+  return createClient(url, key);
+}
 
 type License = {
   plan: string;
@@ -28,26 +37,39 @@ export default function UpgradePage() {
   const [installingToAgent, setInstallingToAgent] = useState(false);
   const [installedToAgent, setInstalledToAgent] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [supabase, setSupabase] = useState<any>(null);
+
+  useEffect(() => {
+    try {
+      const client = createSupabaseClient();
+      setSupabase(client);
+    } catch (e) {
+      console.error("[Upgrade] Supabase init failed:", e);
+    }
+  }, []);
 
   // Get session on load + listen for auth changes
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
+    if (!supabase) return;
+  
+    supabase.auth.getSession().then((res: AuthResponse) => {
+      setSession(res.data.session);
     });
-
+  
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
+    } = supabase.auth.onAuthStateChange((_event: string, session: Session | null) => {
+         setSession(session);
     });
-
+  
     setMounted(true);
-
+  
     return () => subscription.unsubscribe();
-  }, []);
+  }, [supabase]);
 
   // Fetch license when logged in
   useEffect(() => {
+    if (!supabase) return;
     if (!session?.user?.id) return;
 
     supabase
@@ -55,7 +77,8 @@ export default function UpgradePage() {
       .select("plan, expires_at, active")
       .eq("user_id", session.user.id)
       .maybeSingle()
-      .then(({ data }) => {
+      .then((res: PostgrestSingleResponse<any>) => {
+        const data = res.data;
         if (!data || data.active !== true) {
           console.log("[Upgrade] No active license in Supabase");
           setLicense(null);
@@ -68,7 +91,7 @@ export default function UpgradePage() {
           setLicense(null);
         }
       });
-  }, [session]);
+  }, [supabase, session]);
 
   // If already Pro (e.g. re-subscribed), (re)install license into the local app
   useEffect(() => {
@@ -123,26 +146,29 @@ export default function UpgradePage() {
   }
 
   const sendMagicLink = async () => {
+    if (!supabase) return;
+  
     setLoading(true);
     setStatus(null);
-
+  
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: {
         emailRedirectTo: window.location.origin + "/upgrade",
       },
     });
-
+  
     if (error) {
       setStatus(error.message);
     } else {
       setStatus("Check your email for the login link.");
     }
-
+  
     setLoading(false);
   };
 
   const redeemCode = async () => {
+    if (!supabase) return;
     if (!code.trim()) return;
 
     setLoading(true);
@@ -211,7 +237,8 @@ export default function UpgradePage() {
         .select("plan, expires_at")
         .eq("user_id", session.user.id)
         .maybeSingle()
-        .then(({ data }) => {
+        .then((res: PostgrestSingleResponse<any>) => {
+          const data = res.data;
           if (!data) {
             setLicense(null);
             return;
