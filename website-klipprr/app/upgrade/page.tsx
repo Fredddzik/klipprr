@@ -34,8 +34,6 @@ export default function UpgradePage() {
   const [code, setCode] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [installingToAgent, setInstallingToAgent] = useState(false);
-  const [installedToAgent, setInstalledToAgent] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [supabase, setSupabase] = useState<any>(null);
 
@@ -93,54 +91,6 @@ export default function UpgradePage() {
       });
   }, [supabase, session]);
 
-  // If already Pro (e.g. re-subscribed), (re)install license into the local app
-  useEffect(() => {
-    if (!session?.user?.email) return;
-    if (!license?.plan) return;
-    if (!license) return;
-    if (installedToAgent) return;
-
-    let cancelled = false;
-
-    (async () => {
-      try {
-        setInstallingToAgent(true);
-
-        const res = await fetch("http://localhost:4000/license", {
-          method: "POST",
-          mode: "cors",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            email: session.user.email,
-            plan: license.plan,
-	    exp: toUnix(license.expires_at),
-          }),
-        });
-
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          console.error("[Upgrade] Auto-install failed:", res.status, text);
-          return;
-        }
-
-        if (!cancelled) {
-          setInstalledToAgent(true);
-          console.log("[Upgrade] Auto-installed license into ClipAgent");
-        }
-      } catch (e) {
-        console.error("[Upgrade] Auto-install fetch failed:", e);
-      } finally {
-        if (!cancelled) setInstallingToAgent(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [session, license, installedToAgent]);
-
   if (!mounted) {
     return null;
   }
@@ -195,39 +145,6 @@ export default function UpgradePage() {
       if (!freshLicense || freshLicense.active !== true) {
         setStatus("Activation succeeded, but subscription is not active yet. Please refresh.");
         setLoading(false);
-        return;
-      }
-
-      try {
-        console.log("[Upgrade] Installing license into local ClipAgent…");
-
-        const res = await fetch("http://localhost:4000/license", {
-          method: "POST",
-          mode: "cors",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            email: session.user.email,
-            plan: freshLicense.plan,
-          }),
-        });
-
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          console.error("[Upgrade] POST /license failed:", res.status, text);
-          setStatus(
-            "License activated, but the app is not running. Please open ClipAgent and come back to this page."
-          );
-          return;
-        }
-
-        console.log("[Upgrade] License successfully sent to ClipAgent");
-      } catch (e) {
-        console.error("[Upgrade] Failed to reach ClipAgent:", e);
-        setStatus(
-          "License activated, but ClipAgent is not reachable. Make sure the app is running, then refresh this page."
-        );
         return;
       }
 
@@ -288,7 +205,7 @@ export default function UpgradePage() {
               ClipAgent Pro is active.
             </p>
             <p className="text-sm text-zinc-500">
-              You can close this page and return to the app.
+            Your license is active. Open ClipAgent and log in to unlock Pro features.
             </p>
           </>
         )}
