@@ -65,6 +65,20 @@ export default function UpgradePage() {
     return () => subscription.unsubscribe();
   }, [supabase]);
 
+  // 🔑 Redirect back to the app after successful login (deep link handoff)
+useEffect(() => {
+  if (!supabase) return;
+  if (!session) return;
+
+  const params = new URLSearchParams(window.location.search);
+  const redirectTo = params.get("redirectTo");
+
+  if (redirectTo) {
+    console.log("[Upgrade] Redirecting back to app:", redirectTo);
+    window.location.href = redirectTo;
+  }
+}, [supabase, session]);
+
   // Fetch license when logged in
   useEffect(() => {
     if (!supabase) return;
