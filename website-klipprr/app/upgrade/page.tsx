@@ -5,6 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 import type { AuthResponse } from "@supabase/supabase-js";
 import type { Session } from "@supabase/supabase-js";
 import type { PostgrestSingleResponse } from "@supabase/supabase-js";
+import type { AuthError } from "@supabase/supabase-js";
 
 function createSupabaseClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -70,8 +71,12 @@ useEffect(() => {
   if (!supabase) return;
   if (!session) return;
 
-  const params = new URLSearchParams(window.location.search);
-  const redirectTo = params.get("redirectTo");
+  // redirectTo may be in query (original) or hash (supabase flow)
+  const searchParams = new URLSearchParams(window.location.search);
+  const hashParams = new URLSearchParams(window.location.hash.replace("#", ""));
+
+  const redirectTo =
+    searchParams.get("redirectTo") || hashParams.get("redirectTo");
 
   if (redirectTo) {
     console.log("[Upgrade] Redirecting back to app:", redirectTo);
@@ -110,26 +115,41 @@ useEffect(() => {
   }
 
   const sendMagicLink = async () => {
-    if (!supabase) return;
-  
-    setLoading(true);
-    setStatus(null);
-  
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: {
-        emailRedirectTo: window.location.origin + "/upgrade",
-      },
-    });
-  
+  if (!supabase) return;
+
+  setLoading(true);
+  setStatus(null);
+
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const redirectTo = params.get("redirectTo");
+
+    const redirectUrl = redirectTo
+      ? `${window.location.origin}/upgrade?redirectTo=${encodeURIComponent(
+          redirectTo
+        )}`
+      : `${window.location.origin}/upgrade`;
+
+    const { error }: { error: AuthError | null } =
+      await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          emailRedirectTo: redirectUrl,
+        },
+      });
+
     if (error) {
       setStatus(error.message);
     } else {
       setStatus("Check your email for the login link.");
     }
-  
+  } catch (e) {
+    console.error("[Upgrade] signInWithOtp failed:", e);
+    setStatus("Login failed. Check console logs.");
+  } finally {
     setLoading(false);
-  };
+  }
+};
 
   const redeemCode = async () => {
     if (!supabase) return;
