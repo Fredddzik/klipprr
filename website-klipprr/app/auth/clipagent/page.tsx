@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
-export default function ClipAgentAuthPage() {
+function ClipAgentAuthInner() {
   const searchParams = useSearchParams();
   const redirect =
     searchParams.get("redirect") ?? "clipagent://auth-callback";
@@ -116,6 +116,15 @@ export default function ClipAgentAuthPage() {
         </button>
       </div>
     </div>
+  );
+
+}
+
+export default function ClipAgentAuthPage() {
+  return (
+    <Suspense fallback={null}>
+      <ClipAgentAuthInner />
+    </Suspense>
   );
 }
 
