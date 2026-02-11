@@ -1,9 +1,10 @@
 "use client";
 
+import { Suspense } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
-export default function ClipAgentCallbackPage() {
+function CallbackInner() {
   const searchParams = useSearchParams();
   const redirect = searchParams.get("redirect") ?? "clipagent://auth-callback";
 
@@ -19,7 +20,8 @@ export default function ClipAgentCallbackPage() {
     const params = new URLSearchParams(hash);
     const accessToken = params.get("access_token");
     const refreshToken = params.get("refresh_token");
-    const expiresAt = params.get("expires_at") ?? params.get("expires_in") ?? "";
+    const expiresAt =
+      params.get("expires_at") ?? params.get("expires_in") ?? "";
 
     if (accessToken && refreshToken) {
       const link = `${redirect}#access_token=${encodeURIComponent(
@@ -39,7 +41,9 @@ export default function ClipAgentCallbackPage() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-black text-white px-4">
         <div className="w-full max-w-md rounded-xl border border-gray-800 bg-gray-950 p-6 shadow-xl">
-          <h1 className="text-2xl font-semibold mb-2">Something went wrong</h1>
+          <h1 className="text-2xl font-semibold mb-2">
+            Something went wrong
+          </h1>
           <p className="text-sm text-gray-400 mb-4">
             We couldn&apos;t find a login session in this callback.
           </p>
@@ -76,3 +80,10 @@ export default function ClipAgentCallbackPage() {
   );
 }
 
+export default function Page() {
+  return (
+    <Suspense fallback={null}>
+      <CallbackInner />
+    </Suspense>
+  );
+}
