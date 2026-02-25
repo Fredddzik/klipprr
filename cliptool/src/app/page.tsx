@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
+import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 import {
   resolveVideo,
@@ -28,6 +30,48 @@ export default function HomePage() {
   const [showUpgrade, setShowUpgrade] = useState(false);
   const [session, setSession] = useState<any>(null);
   const [license, setLicense] = useState<{ plan: string; active: boolean } | null>(null);
+
+  const [email, setEmail] = useState<string | null>(null);
+  const [plan, setPlan] = useState<"Free" | "Pro">("Free");
+  const [accountLoading, setAccountLoading] = useState(true);
+
+  async function loadAuthAndPlan() {
+    const { data } = await supabase.auth.getSession();
+    const session = data.session;
+
+    if (session?.user?.email) {
+      setEmail(session.user.email);
+    } else {
+      setEmail(null);
+    }
+
+    try {
+      const caps = await invoke<any>("get_capabilities");
+      setPlan(caps?.pro ? "Pro" : "Free");
+    } catch (e) {
+      console.error("Failed to get capabilities", e);
+    }
+
+    setAccountLoading(false);
+  }
+
+  useEffect(() => {
+    loadAuthAndPlan();
+
+    const sub = supabase.auth.onAuthStateChange(() => {
+      loadAuthAndPlan();
+    });
+
+    const unlistenPromise = listen("license-updated", () => {
+      loadAuthAndPlan();
+    });
+
+    return () => {
+      sub.data.subscription.unsubscribe();
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
   useEffect(() => {
     if (!session?.user?.id) return;
 
@@ -40,6 +84,43 @@ export default function HomePage() {
         setLicense(data ?? null);
       });
   }, [session]);
+
+  useEffect(() => {
+    console.log("[FRONTEND] Checking for pending auth tokens...");
+
+    invoke<[string, string] | null>("consume_auth_tokens")
+      .then(async (tokens) => {
+        console.log("[FRONTEND] consume_auth_tokens result:", tokens);
+
+        if (!tokens) {
+          console.log("[FRONTEND] No tokens found");
+          return;
+        }
+
+        const [accessToken, refreshToken] = tokens;
+        console.log("[FRONTEND] Tokens received, setting session...");
+
+        await supabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        });
+
+        await invoke("set_supabase_session", {
+          accessToken,
+          refreshToken,
+        });
+
+        console.log("[FRONTEND] Session set, syncing license...");
+
+        await invoke("sync_license_from_supabase");
+
+        await refreshCapabilities();
+        console.log("[FRONTEND] Sync finished");
+      })
+      .catch((err) => {
+        console.error("[FRONTEND] Error in auth flow:", err);
+      });
+  }, []);
 
 useEffect(() => {
   const video = (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null;
@@ -74,6 +155,7 @@ useEffect(() => {
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [prevVideoId, setPrevVideoId] = useState<string | null>(null);
   const [exportHQ, setExportHQ] = useState(false);
+  const [exportCodec, setExportCodec] = useState<"universal" | "original">("universal");
   const [keepWholeVideo, setKeepWholeVideo] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
@@ -274,6 +356,63 @@ useEffect(() => {
   };
 }, []);
 
+// Shared handler: set Supabase session from tokens and refresh license/caps
+async function handleAuthTokens(access_token: string, refresh_token: string) {
+  if (!access_token || !refresh_token) return;
+
+  const { data, error } = await supabase.auth.setSession({
+    access_token,
+    refresh_token,
+  });
+
+  if (error || !data.session) {
+    console.error("Failed to set Supabase session:", error);
+    return;
+  }
+
+  await invoke("set_supabase_session", {
+    accessToken: access_token,
+    refreshToken: refresh_token,
+  });
+
+  await invoke("sync_license_from_supabase");
+  await syncLicenseFromSupabase();
+  await refreshCapabilities();
+}
+
+// auth-success: emitted when backend hands off tokens (e.g. second instance)
+useEffect(() => {
+  const unlistenAuth = listen<any>("auth-success", async (event) => {
+    const { access_token, refresh_token } = event.payload ?? {};
+    await handleAuthTokens(access_token, refresh_token);
+  });
+
+  return () => {
+    unlistenAuth.then((fn) => fn());
+  };
+}, []);
+
+// deep-link: second instance receives URL string; parse fragment and run same flow
+useEffect(() => {
+  const unlistenDeep = listen<string>("deep-link", async (event) => {
+    const url = event.payload;
+    if (!url || typeof url !== "string") return;
+    const hashIndex = url.indexOf("#");
+    if (hashIndex === -1) return;
+    const fragment = url.slice(hashIndex + 1);
+    const params = new URLSearchParams(fragment);
+    const access_token = params.get("access_token");
+    const refresh_token = params.get("refresh_token");
+    if (access_token && refresh_token) {
+      await handleAuthTokens(access_token, refresh_token);
+    }
+  });
+
+  return () => {
+    unlistenDeep.then((fn) => fn());
+  };
+}, []);
+
 
   // --- License enforcement (Supabase → local ClipAgent) ---
   // Extracted license sync logic
@@ -367,6 +506,16 @@ async function syncLicenseFromSupabase() {
   syncLicenseFromSupabase();
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, []);
+
+  // Periodic sync on window focus so subscription expiry is picked up without restart
+  useEffect(() => {
+    const onFocus = () => {
+      syncLicenseFromSupabase().then(() => refreshCapabilities());
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
 
   useEffect(() => {
@@ -531,6 +680,73 @@ useEffect(() => {
 
   return (
   <div className="min-h-screen bg-black text-white p-6">
+    {/* Top Account Bar */}
+    <div className="w-full mb-6 px-4 py-3 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-between">
+      {accountLoading ? (
+        <span className="text-sm text-zinc-400">Loading account…</span>
+      ) : email ? (
+        <>
+          <div className="flex flex-col">
+            <span className="text-sm text-zinc-400">{email}</span>
+            <span
+              className={`text-xs font-semibold ${
+                plan === "Pro" ? "text-green-400" : "text-zinc-500"
+              }`}
+            >
+              {plan === "Pro" ? "Pro Plan" : "Free Plan"}
+            </span>
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              onClick={async () => {
+                await invoke("sync_license_from_supabase");
+                await loadAuthAndPlan();
+              }}
+              className="text-xs px-3 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 transition"
+            >
+              Sync
+            </button>
+
+            <button
+              onClick={async () => {
+                await supabase.auth.signOut();
+                await invoke("clear_license_cmd");
+                await loadAuthAndPlan();
+              }}
+              className="text-xs px-3 py-1 rounded-md bg-red-600 hover:bg-red-700 transition"
+            >
+              Logout
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <span className="text-sm text-zinc-500">Not logged in</span>
+
+          <button
+            onClick={async () => {
+              const emailInput = prompt("Enter your email");
+              if (!emailInput) return;
+
+              const { error } = await supabase.auth.signInWithOtp({
+                email: emailInput,
+                options: { shouldCreateUser: true },
+              });
+
+              if (error) {
+                console.error("Login failed:", error);
+                alert("Login failed. Check console.");
+              }
+            }}
+            className="text-xs px-4 py-1 rounded-md bg-blue-600 hover:bg-blue-700 transition font-semibold"
+          >
+            Login
+          </button>
+        </>
+      )}
+    </div>
+
     <UpgradeModal
   open={showUpgrade}
   onClose={() => setShowUpgrade(false)}
@@ -548,7 +764,7 @@ useEffect(() => {
         {undoToast}
       </div>
     )}
-    <h1 className="text-3xl font-bold mb-6 text-center">ClipTool</h1>
+    <h1 className="text-3xl font-bold mb-6 text-center">Klipprr</h1>
 
     {/* URL BAR */}
     <div className="max-w-5xl mx-auto flex gap-4 mb-6">
@@ -793,6 +1009,8 @@ useEffect(() => {
             videoData={videoData}
             exportHQ={exportHQ}
             setExportHQ={setExportHQ}
+            exportCodec={exportCodec}
+            setExportCodec={setExportCodec}
             keepWholeVideo={keepWholeVideo}
             setKeepWholeVideo={setKeepWholeVideo}
             fastCap={fastCap}
