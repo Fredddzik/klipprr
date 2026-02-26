@@ -5,6 +5,11 @@ mod http;
 mod storage;
 mod license;
 
+/// Supabase URL and anon key embedded at build from cliptool/.env.local (fallback when frontend has none).
+mod supabase_embed {
+    include!(concat!(env!("OUT_DIR"), "/supabase_embed.rs"));
+}
+
 use crate::commands::download::handle_download_all;
 use crate::commands::ping::handle_ping;
 use crate::http::{with_cors, json_response, text_response, handle_http};
@@ -13,6 +18,7 @@ use tauri_plugin_single_instance::init as single_instance;
 use tauri::Emitter;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use serde_json::json;
 use url;
 
 pub static PENDING_AUTH: Lazy<Mutex<Option<(String, String)>>> =
@@ -324,6 +330,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(single_instance(|app, argv, _cwd| {
             for arg in argv {
@@ -336,6 +343,7 @@ fn main() {
             }
         }))
         .invoke_handler(tauri::generate_handler![
+            commands::download::get_default_export_dir,
             commands::license_commands::get_license_status,
             commands::license_commands::get_capabilities,
             commands::license_commands::activate_license,
@@ -344,6 +352,7 @@ fn main() {
             commands::license_commands::set_supabase_session,
             commands::license_commands::sync_license_from_supabase,
             commands::license_commands::consume_auth_tokens,
+            commands::license_commands::get_stored_session_tokens,
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();           
@@ -383,7 +392,11 @@ fn main() {
 
                                 append_file_log("[DEEP LINK] Session stored in backend");
 
-                                if let Err(e) = crate::commands::license_commands::sync_license_from_supabase(app_for_async.clone()).await {
+                                if let Err(e) = crate::commands::license_commands::sync_license_from_supabase(
+                                    app_for_async.clone(),
+                                    None,
+                                    None,
+                                ).await {
                                     append_file_log(&format!("[DEEP LINK] License sync failed: {:?}", e));
                                 } else {
                                     append_file_log("[DEEP LINK] License sync successful");
@@ -391,9 +404,14 @@ fn main() {
 
                                 // Hand off tokens to frontend so it can setSession and avoid clearing license on load
                                 if let Ok(mut guard) = crate::PENDING_AUTH.lock() {
-                                    *guard = Some((access_clone, refresh_clone));
+                                    *guard = Some((access_clone.clone(), refresh_clone.clone()));
                                     append_file_log("[DEEP LINK] Tokens stored in PENDING_AUTH for frontend");
                                 }
+                                // Notify already-open frontend so it can setSession and refresh (app-already-open flow)
+                                let _ = app_for_async.emit("auth-success", json!({
+                                    "access_token": access_clone,
+                                    "refresh_token": refresh_clone,
+                                }));
                             });
                         }
                     }
