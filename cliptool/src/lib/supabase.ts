@@ -8,3 +8,14 @@ export const supabase = createClient(
   supabaseUrl,
   supabaseAnonKey
 );
+
+/** Passed to the desktop backend for sync_license_from_supabase when the process has no env vars. */
+export function getSupabaseConfigForBackend(): {
+  supabase_url: string;
+  supabase_anon_key: string;
+} {
+  return {
+    supabase_url: supabaseUrl ?? "",
+    supabase_anon_key: supabaseAnonKey ?? "",
+  };
+}

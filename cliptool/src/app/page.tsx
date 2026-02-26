@@ -1,7 +1,7 @@
  "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { supabase } from "@/lib/supabase";
+import { supabase, getSupabaseConfigForBackend } from "@/lib/supabase";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -47,7 +47,9 @@ export default function HomePage() {
 
     try {
       const caps = await invoke<any>("get_capabilities");
-      setPlan(caps?.pro ? "Pro" : "Free");
+      const isPro =
+        caps?.canRenameClips || caps?.canSetCustomExportPath || caps?.can_rename_clips || caps?.can_set_custom_export_path;
+      setPlan(isPro ? "Pro" : "Free");
     } catch (e) {
       console.error("Failed to get capabilities", e);
     }
@@ -85,41 +87,43 @@ export default function HomePage() {
       });
   }, [session]);
 
+  // Run consume first so cold-start from magic link doesn't get cleared by sync (no session yet)
   useEffect(() => {
-    console.log("[FRONTEND] Checking for pending auth tokens...");
+    let cancelled = false;
+    (async () => {
+      console.log("[FRONTEND] Checking for pending auth tokens...");
+      let tokens: [string, string] | null = null;
+      try {
+        tokens = await invoke<[string, string] | null>("consume_auth_tokens");
+      } catch (err) {
+        console.error("[FRONTEND] consume_auth_tokens error:", err);
+      }
+      console.log("[FRONTEND] consume_auth_tokens result:", tokens);
 
-    invoke<[string, string] | null>("consume_auth_tokens")
-      .then(async (tokens) => {
-        console.log("[FRONTEND] consume_auth_tokens result:", tokens);
-
-        if (!tokens) {
-          console.log("[FRONTEND] No tokens found");
-          return;
-        }
-
+      if (cancelled) return;
+      if (tokens) {
         const [accessToken, refreshToken] = tokens;
         console.log("[FRONTEND] Tokens received, setting session...");
-
         await supabase.auth.setSession({
           access_token: accessToken,
           refresh_token: refreshToken,
         });
-
-        await invoke("set_supabase_session", {
-          accessToken,
-          refreshToken,
-        });
-
-        console.log("[FRONTEND] Session set, syncing license...");
-
-        await invoke("sync_license_from_supabase");
-
+        if (cancelled) return;
+        await invoke("set_supabase_session", { accessToken, refreshToken });
+        await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
         await refreshCapabilities();
-        console.log("[FRONTEND] Sync finished");
-      })
-      .catch((err) => {
-        console.error("[FRONTEND] Error in auth flow:", err);
-      });
+        console.log("[FRONTEND] Auth flow finished (from pending tokens)");
+        return;
+      }
+      // No pending tokens: sync from current session (or clear if not logged in)
+      await syncLicenseFromSupabase();
+    })().catch((err) => {
+      console.error("[FRONTEND] Error in auth/sync flow:", err);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
 useEffect(() => {
@@ -170,6 +174,7 @@ useEffect(() => {
   // Fast resolution picker state
   const [fastCap, setFastCap] = useState<number | null>(null); // null = Auto
   const [exportPath, setExportPath] = useState("");
+  const [defaultExportDir, setDefaultExportDir] = useState("");
   const {
     undo,
     redo,
@@ -235,6 +240,9 @@ async function refreshCapabilities() {
     const backendCaps = await tauriInvoke<Capabilities>("get_capabilities");
     if (backendCaps) {
       setCaps(backendCaps);
+      setPlan(
+        backendCaps.canRenameClips || backendCaps.canSetCustomExportPath ? "Pro" : "Free"
+      );
       return;
     }
   } catch {
@@ -243,7 +251,12 @@ async function refreshCapabilities() {
 
   // 2) Fallback to local HTTP agent (works even when Tauri invoke is stale/broken)
   const httpCaps = await fetchCapabilitiesHttp();
-  if (httpCaps) setCaps(httpCaps);
+  if (httpCaps) {
+    setCaps(httpCaps);
+    setPlan(
+      httpCaps.canRenameClips || httpCaps.canSetCustomExportPath ? "Pro" : "Free"
+    );
+  }
 }
 
   // Load video metadata from ClipAgent
@@ -375,7 +388,7 @@ async function handleAuthTokens(access_token: string, refresh_token: string) {
     refreshToken: refresh_token,
   });
 
-  await invoke("sync_license_from_supabase");
+  await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
   await syncLicenseFromSupabase();
   await refreshCapabilities();
 }
@@ -419,28 +432,54 @@ useEffect(() => {
 async function syncLicenseFromSupabase() {
   console.log("[License][SYNC] invoked");
 
-  const {
+  let {
     data: { session: currentSession },
-    error: sessionError,
   } = await supabase.auth.getSession();
 
-  console.log("[License][SYNC] current session:", currentSession);
+  // If frontend lost the session (e.g. after focus when refreshSession failed and cleared storage),
+  // restore from backend-stored tokens so we stay logged in and keep Pro.
+  if (!currentSession?.user && (window as any).__TAURI__) {
+    try {
+      const tokens = await invoke<[string, string] | null>("get_stored_session_tokens");
+      if (tokens) {
+        const [accessToken, refreshToken] = tokens;
+        await supabase.auth.setSession({
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        });
+        const next = await supabase.auth.getSession();
+        currentSession = next.data.session;
+        console.log("[License][SYNC] Restored session from backend");
+      }
+    } catch (e) {
+      console.warn("[License][SYNC] get_stored_session_tokens failed:", e);
+    }
+  }
 
-  // 🔒 Logout = revoke
   if (!currentSession?.user) {
+    // Still no session: try backend sync for caps only, then clear
+    if ((window as any).__TAURI__) {
+      try {
+        await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
+        const caps = await tauriInvoke<Capabilities>("get_capabilities");
+        if (caps && (caps.canRenameClips || caps.canSetCustomExportPath)) {
+          setCaps(caps);
+          return;
+        }
+      } catch {
+        // Backend not logged in or sync failed
+      }
+    }
     console.log("[License][SYNC] No Supabase session → clearing local license");
-
     if ((window as any).__TAURI__) {
       await tauriInvoke("clear_license_cmd");
     }
-
     setCaps({
       canRenameClips: false,
       canEditClipRange: false,
       canSetCustomExportPath: false,
       hasWatermark: true,
     });
-
     return;
   }
 
@@ -451,8 +490,7 @@ async function syncLicenseFromSupabase() {
 
   try {
     console.log("[License][SYNC] Checking Supabase license…");
-
-    await supabase.auth.refreshSession();
+    // Don't call refreshSession() here: on failure it can clear the session and cause "logout" on next focus.
 
     const { data, error } = await supabase
       .from("licenses")
@@ -489,9 +527,11 @@ async function syncLicenseFromSupabase() {
 
       return;
     }
-    // 🔓 POSITIVE CASE — active license → INSTALL / REFRESH
-    console.log("[License][SYNC] Active license found → installing");
-
+    // 🔓 POSITIVE CASE — active license → ensure backend has it, then refresh caps
+    console.log("[License][SYNC] Active license found → syncing backend and refreshing caps");
+    if ((window as any).__TAURI__) {
+      await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
+    }
     const caps = await tauriInvoke<Capabilities>("get_capabilities");
     if (caps) {
       setCaps(caps);
@@ -501,22 +541,8 @@ async function syncLicenseFromSupabase() {
   }
 }
 
-  useEffect(() => {
-  console.log("[License][SYNC] startup enforcement");
-  syncLicenseFromSupabase();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, []);
-
-  // Periodic sync on window focus so subscription expiry is picked up without restart
-  useEffect(() => {
-    const onFocus = () => {
-      syncLicenseFromSupabase().then(() => refreshCapabilities());
-    };
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
+  // Startup sync is done inside the consume effect above (after consume, if no tokens).
+  // No sync on window focus; use the Sync button or re-login to refresh license.
 
   useEffect(() => {
     if (!videoData) return;
@@ -585,22 +611,6 @@ function fmtRes(h: number) {
     })();
   }, []);
 
-  useEffect(() => {
-  async function onFocus() {
-    console.log("[License][SYNC] focus enforcement");
-
-    if (typeof window === "undefined" || !(window as any).__TAURI__) {
-      return;
-    }
-
-    await syncLicenseFromSupabase();
-    await refreshCapabilities();
-  }
-
-  window.addEventListener("focus", onFocus);
-  return () => window.removeEventListener("focus", onFocus);
-}, []);
-
   // Helper to format timestamps for UI: hides leading zero hours/minutes, no ms
   function formatTime(t: number) {
     if (!isFinite(t)) return "0:00";
@@ -655,6 +665,15 @@ useEffect(() => {
   setEditTarget(null);
 }, [clips]);
 
+  // Resolve default export dir (e.g. ~/Downloads) when running in Tauri for display
+  useEffect(() => {
+    if (typeof window !== "undefined" && (window as any).__TAURI__) {
+      invoke<string>("get_default_export_dir")
+        .then(setDefaultExportDir)
+        .catch(() => setDefaultExportDir(""));
+    }
+  }, []);
+
   // --- Sanitize export path for macOS quoted path handling ---
   function sanitizeExportPath(input: string): string | null {
     if (!input) return null;
@@ -700,8 +719,8 @@ useEffect(() => {
           <div className="flex gap-3">
             <button
               onClick={async () => {
-                await invoke("sync_license_from_supabase");
-                await loadAuthAndPlan();
+                await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
+                await refreshCapabilities();
               }}
               className="text-xs px-3 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 transition"
             >
@@ -1026,6 +1045,7 @@ useEffect(() => {
             setIsExporting={setIsExporting}
             exportPath={exportPath}
             setExportPath={setExportPath}
+            defaultExportDir={defaultExportDir}
             sanitizeExportPath={sanitizeExportPath}
             canEditExportPath={caps.canSetCustomExportPath}
             onUpgradeRequested={() => setShowUpgrade(true)}

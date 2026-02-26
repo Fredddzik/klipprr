@@ -1,6 +1,7 @@
 "use client";
 
 import { downloadAll, type AgentResult } from "../lib/clipagent";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 
 interface Clip {
   id: string;
@@ -24,6 +25,9 @@ interface ExportPanelProps {
   exportHQ: boolean;
   setExportHQ: (v: boolean) => void;
 
+  exportCodec: "universal" | "original";
+  setExportCodec: (v: "universal" | "original") => void;
+
   keepWholeVideo: boolean;
   setKeepWholeVideo: (v: boolean) => void;
 
@@ -45,6 +49,7 @@ interface ExportPanelProps {
 
   exportPath: string;
   setExportPath: (v: string) => void;
+  defaultExportDir: string;
 
   sanitizeExportPath: (input: string) => string | null;
 
@@ -59,6 +64,12 @@ function fmtRes(h: number) {
   return h > 0 ? `${h}p` : "—";
 }
 
+/** Show path with capped length, prioritizing the end (e.g. "...Clips/Experiment clips"). */
+function truncatePathEnd(path: string, maxLen: number = 40): string {
+  if (path.length <= maxLen) return path;
+  return "..." + path.slice(-(maxLen - 3));
+}
+
 export default function ExportPanel({
   clips,
   selectedClipIds,
@@ -66,6 +77,8 @@ export default function ExportPanel({
   videoData,
   exportHQ,
   setExportHQ,
+  exportCodec,
+  setExportCodec,
   keepWholeVideo,
   setKeepWholeVideo,
   fastCap,
@@ -81,11 +94,28 @@ export default function ExportPanel({
   setIsExporting,
   exportPath,
   setExportPath,
+  defaultExportDir,
   sanitizeExportPath,
   canEditExportPath,
   onUpgradeRequested,
   onBeforeExport,
 }: ExportPanelProps) {
+  const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI__;
+  const displayPath =
+    (exportPath && exportPath.trim()) ? exportPath : (defaultExportDir || "~/Downloads");
+
+  async function chooseExportFolder() {
+    if (!isTauri || !canEditExportPath) return;
+    try {
+      const selected = await openFolderDialog({
+        directory: true,
+        multiple: false,
+      });
+      if (selected) setExportPath(selected);
+    } catch (e) {
+      console.warn("Folder dialog failed:", e);
+    }
+  }
   async function doExport(selectedOnly: boolean) {
     const chosen = selectedOnly
       ? clips.filter((c) => selectedClipIds.includes(c.id))
@@ -125,6 +155,7 @@ export default function ExportPanel({
       video_id: videoData?.id ?? null,
       export_path: sanitizeExportPath(exportPath),
       has_watermark: !canEditExportPath,
+      codec: exportCodec,
     });
 
     setIsExporting(false);
@@ -139,10 +170,12 @@ export default function ExportPanel({
 
   return (
     <div className="bg-gray-900 p-4 rounded border border-gray-700 space-y-4">
-      <p className="text-xs text-gray-400">
+      <p className="text-xs text-gray-400 min-w-0 max-w-[14rem]">
         Files will save to:
         <br />
-        <span className="text-white font-mono">~/Downloads/ClipTool</span>
+        <span className="text-white font-mono block truncate" title={displayPath}>
+          {truncatePathEnd(displayPath)}
+        </span>
       </p>
 
       {/* CAPABILITIES */}
@@ -195,6 +228,42 @@ export default function ExportPanel({
         </label>
       )}
 
+      <div className="space-y-1">
+        <label className="text-xs text-gray-400">Video format</label>
+
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setExportCodec("universal")}
+            className={`flex-1 py-1 rounded text-sm ${
+              exportCodec === "universal"
+                ? "bg-blue-600 text-white"
+                : "bg-gray-800 border border-gray-700"
+            }`}
+          >
+            MP4 – Universal
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setExportCodec("original")}
+            className={`flex-1 py-1 rounded text-sm ${
+              exportCodec === "original"
+                ? "bg-blue-600 text-white"
+                : "bg-gray-800 border border-gray-700"
+            }`}
+          >
+            AV1 – Original
+          </button>
+        </div>
+
+        {exportCodec === "original" && (
+          <p className="text-xs text-yellow-400 mt-1">
+            AV1 may not play in QuickTime on older Macs.
+          </p>
+        )}
+      </div>
+
       {!exportHQ && fastMax > 0 && (
         <select
           value={fastCap ?? "auto"}
@@ -238,29 +307,39 @@ export default function ExportPanel({
       <div className="space-y-1 relative group">
         <label className="text-xs text-gray-400">Export folder</label>
 
-        <input
-          type="text"
-          value={exportPath}
-          disabled={!canEditExportPath}
-          onChange={(e) => canEditExportPath && setExportPath(e.target.value)}
-          className={`w-full rounded px-2 py-1 text-sm font-mono
+        <div
+          className={`flex gap-2 items-center rounded border min-w-0 max-w-full
             ${canEditExportPath
-              ? "bg-gray-800 border border-gray-700"
-              : "bg-gray-900 border border-gray-800 text-gray-500 cursor-not-allowed"
+              ? "bg-gray-800 border-gray-700"
+              : "bg-gray-900 border-gray-800"
             }`}
-        />
-
-        {!canEditExportPath && (
-          <button
-            type="button"
-            onClick={() => onUpgradeRequested?.()}
-            className="absolute inset-0 hidden group-hover:flex
-              items-center justify-center bg-black/40 rounded
-              text-sm cursor-pointer"
+        >
+          <span
+            className={`flex-1 min-w-0 max-w-[14rem] py-1 px-2 text-sm font-mono truncate block
+              ${canEditExportPath ? "text-white" : "text-gray-500"}
+            `}
+            title={displayPath}
           >
-            🔒 Pro feature
-          </button>
-        )}
+            {truncatePathEnd(displayPath)}
+          </span>
+          {canEditExportPath && isTauri ? (
+            <button
+              type="button"
+              onClick={chooseExportFolder}
+              className="shrink-0 py-1 px-2 rounded text-sm bg-gray-700 hover:bg-gray-600 text-white"
+            >
+              Choose folder…
+            </button>
+          ) : !canEditExportPath ? (
+            <button
+              type="button"
+              onClick={() => onUpgradeRequested?.()}
+              className="shrink-0 py-1 px-2 rounded text-sm bg-gray-700 hover:bg-gray-600"
+            >
+              🔒 Pro
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <button
