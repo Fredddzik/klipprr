@@ -3,12 +3,25 @@
 import { Suspense } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { supabase } from "@/lib/supabase";
+
+function buildDeepLink(
+  redirect: string,
+  accessToken: string,
+  refreshToken: string,
+  expiresAt?: string
+): string {
+  let link = `${redirect}#access_token=${encodeURIComponent(accessToken)}&refresh_token=${encodeURIComponent(refreshToken)}`;
+  if (expiresAt) link += `&expires_at=${encodeURIComponent(expiresAt)}`;
+  return link;
+}
 
 function CallbackInner() {
   const searchParams = useSearchParams();
   const redirect = searchParams.get("redirect") ?? "clipagent://auth-callback";
 
   const [deepLink, setDeepLink] = useState<string | null>(null);
+  const [noSession, setNoSession] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -24,20 +37,40 @@ function CallbackInner() {
       params.get("expires_at") ?? params.get("expires_in") ?? "";
 
     if (accessToken && refreshToken) {
-      const link = `${redirect}#access_token=${encodeURIComponent(
-        accessToken
-      )}&refresh_token=${encodeURIComponent(
-        refreshToken
-      )}&expires_at=${encodeURIComponent(expiresAt)}`;
-
+      const link = buildDeepLink(redirect, accessToken, refreshToken, expiresAt || undefined);
       setDeepLink(link);
       window.location.href = link;
+      return;
     }
+
+    // No hash (e.g. user clicked "Continue as X" on login page) — use current session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.access_token && session?.refresh_token) {
+        const link = buildDeepLink(
+          redirect,
+          session.access_token,
+          session.refresh_token,
+          session.expires_at ? String(session.expires_at) : undefined
+        );
+        setDeepLink(link);
+        window.location.href = link;
+      } else {
+        setNoSession(true);
+      }
+    });
   }, [redirect]);
 
   const hasTokens = useMemo(() => !!deepLink, [deepLink]);
 
-  if (!hasTokens) {
+  if (!hasTokens && !noSession) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-black text-white px-4">
+        <p className="text-gray-400">Redirecting…</p>
+      </div>
+    );
+  }
+
+  if (!hasTokens && noSession) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-black text-white px-4">
         <div className="w-full max-w-md rounded-xl border border-gray-800 bg-gray-950 p-6 shadow-xl">
@@ -45,13 +78,13 @@ function CallbackInner() {
             Something went wrong
           </h1>
           <p className="text-sm text-gray-400 mb-4">
-            We couldn&apos;t find a login session in this callback.
+            We couldn&apos;t find a login session. Sign in first, then try again.
           </p>
           <a
-            href="/auth/clipagent"
+            href={`/login?redirect=${encodeURIComponent(redirect)}`}
             className="inline-flex items-center rounded-lg bg-yellow-500 px-4 py-2 text-sm font-semibold text-black hover:brightness-110"
           >
-            Try logging in again
+            Sign in
           </a>
         </div>
       </div>
