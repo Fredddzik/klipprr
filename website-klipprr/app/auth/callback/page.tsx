@@ -39,7 +39,6 @@ function CallbackInner() {
     if (accessToken && refreshToken) {
       const link = buildDeepLink(redirect, accessToken, refreshToken, expiresAt || undefined);
       setDeepLink(link);
-      window.location.href = link;
       return;
     }
 
@@ -53,12 +52,22 @@ function CallbackInner() {
           session.expires_at ? String(session.expires_at) : undefined
         );
         setDeepLink(link);
-        window.location.href = link;
       } else {
         setNoSession(true);
       }
     });
   }, [redirect]);
+
+  // Try opening the app once the deep link is ready. Many browsers block
+  // programmatic redirects to custom schemes; the "Open ClipAgent" button
+  // provides a user gesture so the app can open if this fails.
+  useEffect(() => {
+    if (!deepLink) return;
+    const t = setTimeout(() => {
+      window.location.href = deepLink;
+    }, 200);
+    return () => clearTimeout(t);
+  }, [deepLink]);
 
   const hasTokens = useMemo(() => !!deepLink, [deepLink]);
 
@@ -95,10 +104,10 @@ function CallbackInner() {
     <div className="min-h-screen flex items-center justify-center bg-black text-white px-4">
       <div className="w-full max-w-md rounded-xl border border-gray-800 bg-gray-950 p-6 shadow-xl">
         <h1 className="text-2xl font-semibold mb-2">
-          Redirecting to ClipAgent...
+          Open ClipAgent
         </h1>
         <p className="text-sm text-gray-400 mb-4">
-          If your app doesn&apos;t open automatically, use the button below.
+          Click the button below to open the app and log in. Your browser may not open it automatically.
         </p>
         {deepLink && (
           <a
