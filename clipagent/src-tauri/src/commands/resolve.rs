@@ -1,8 +1,28 @@
+use std::fs::{create_dir_all, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use serde_json::Value;
 use urlencoding::decode;
 
 use crate::paths::yt_dlp_path;
+
+fn log_to_file(msg: &str) {
+    if let Some(mut dir) = dirs::home_dir() {
+        dir.push("Library/Logs/ClipAgent/clipagent.log");
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&dir) {
+            let _ = writeln!(file, "{}", msg);
+        }
+    } else {
+        let fallback = PathBuf::from("/tmp/ClipAgent/clipagent.log");
+        if let Some(parent) = fallback.parent() {
+            let _ = create_dir_all(parent);
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&fallback) {
+            let _ = writeln!(file, "{}", msg);
+        }
+    }
+}
 
 pub fn handle_resolve(url: String) -> String {
     let decoded_url = match decode(&url) {
@@ -10,13 +30,18 @@ pub fn handle_resolve(url: String) -> String {
         Err(_) => url.clone(),
     };
 
-    let output = Command::new(yt_dlp_path())
-        .args([
-            "--dump-single-json",
-            "--no-warnings",
-            "--no-progress",
-            &decoded_url,
-        ])
+    let yt_dlp_exe = yt_dlp_path();
+    let yt_dlp_exe_str = yt_dlp_exe.to_string_lossy().to_string();
+    let arg0 = "--dump-single-json";
+    let arg1 = "--no-warnings";
+    let arg2 = "--no-progress";
+
+    log_to_file("[RESOLVE] starting");
+    log_to_file(&format!("[RESOLVE] yt_dlp_path: {}", yt_dlp_exe_str));
+    log_to_file(&format!("[RESOLVE] args: {} {} {} {}", arg0, arg1, arg2, decoded_url));
+
+    let output = Command::new(&yt_dlp_exe)
+        .args([arg0, arg1, arg2, decoded_url.as_str()])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output();
@@ -31,8 +56,20 @@ pub fn handle_resolve(url: String) -> String {
         }
     };
 
-    let stdout_raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let stderr_raw = String::from_utf8_lossy(&out.stderr).to_string();
+    log_to_file(&format!("[RESOLVE] exit status: {:?}", out.status));
+    let stdout_sample = String::from_utf8_lossy(&out.stdout);
+    let stderr_sample = String::from_utf8_lossy(&out.stderr);
+    log_to_file(&format!(
+        "[RESOLVE] stdout (first 2000): {}",
+        stdout_sample.chars().take(2000).collect::<String>()
+    ));
+    log_to_file(&format!(
+        "[RESOLVE] stderr (first 2000): {}",
+        stderr_sample.chars().take(2000).collect::<String>()
+    ));
+
+    let stdout_raw = stdout_sample.trim().to_string();
+    let stderr_raw = stderr_sample.to_string();
 
     if !out.status.success() {
         return format!(
@@ -41,16 +78,25 @@ pub fn handle_resolve(url: String) -> String {
         );
     }
 
-    let parsed: Value = match serde_json::from_str(&stdout_raw) {
-        Ok(v) => v,
-        Err(e) => {
-            return format!(
-                r#"{{"error":"invalid_json_from_yt_dlp","details":"{}","sample":"{}"}}"#,
-                e,
-                stdout_raw.chars().take(200).collect::<String>()
-            );
-        }
-    };
+    let json_start = stdout_raw.find('{');
+let json_end = stdout_raw.rfind('}');
+
+let json_str = match (json_start, json_end) {
+    (Some(start), Some(end)) if end > start => &stdout_raw[start..=end],
+    _ => {
+        return r#"{"error":"resolve_bad_json"}"#.to_string();
+    }
+};
+
+let parsed: Value = match serde_json::from_str(json_str) {
+    Ok(v) => v,
+    Err(e) => {
+        return format!(
+            r#"{{"error":"invalid_json_from_yt_dlp","details":"{}"}}"#,
+            e
+        );
+    }
+};
 
     let empty_formats: Vec<Value> = Vec::new();
     let formats = parsed["formats"].as_array().unwrap_or(&empty_formats);
@@ -89,6 +135,11 @@ pub fn handle_resolve(url: String) -> String {
         .filter(|f| {
             f["acodec"] != "none"
                 && f["vcodec"] != "none"
+                && f["ext"].as_str() == Some("mp4")
+                && f["vcodec"]
+                    .as_str()
+                    .map(|v| v.starts_with("avc1"))
+                    .unwrap_or(false)
                 && f["height"].as_i64().unwrap_or(0) > 0
         })
         .collect();

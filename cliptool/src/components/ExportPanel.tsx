@@ -20,6 +20,8 @@ interface ExportPanelProps {
   selectedClipIds: string[];
 
   videoUrl: string;
+  /** When set, export uses this local file path instead of videoUrl (desktop only). */
+  localFilePath?: string | null;
   videoData: VideoData | null;
 
   exportHQ: boolean;
@@ -55,6 +57,9 @@ interface ExportPanelProps {
 
   canEditExportPath: boolean;
 
+  /** When user picks a folder (Pro), persist it via Tauri. */
+  onExportPathChosen?: (path: string) => void;
+
   onUpgradeRequested?: () => void;
 
   onBeforeExport?: () => Promise<boolean>;
@@ -74,6 +79,7 @@ export default function ExportPanel({
   clips,
   selectedClipIds,
   videoUrl,
+  localFilePath,
   videoData,
   exportHQ,
   setExportHQ,
@@ -97,6 +103,7 @@ export default function ExportPanel({
   defaultExportDir,
   sanitizeExportPath,
   canEditExportPath,
+  onExportPathChosen,
   onUpgradeRequested,
   onBeforeExport,
 }: ExportPanelProps) {
@@ -111,7 +118,10 @@ export default function ExportPanel({
         directory: true,
         multiple: false,
       });
-      if (selected) setExportPath(selected);
+      if (selected) {
+        setExportPath(selected);
+        onExportPathChosen?.(selected);
+      }
     } catch (e) {
       console.warn("Folder dialog failed:", e);
     }
@@ -128,7 +138,7 @@ export default function ExportPanel({
       return;
     }
 
-    if (shouldWarnQuality) {
+    if (shouldWarnQuality && !localFilePath) {
       const ok = window.confirm(
         "High Quality mode downloads the entire video first.\n\n" +
           "For long or 4K videos this can take several minutes and may time out.\n\n" +
@@ -146,7 +156,8 @@ export default function ExportPanel({
     setIsExporting(true);
 
     const result = await downloadAll({
-      url: videoUrl.trim(),
+      url: localFilePath ? "" : videoUrl.trim(),
+      local_path: localFilePath ?? undefined,
       clips: chosen,
       mode: exportHQ ? "quality" : "speed",
       fast_max_height: exportHQ ? null : fastCap,
@@ -170,14 +181,6 @@ export default function ExportPanel({
 
   return (
     <div className="bg-gray-900 p-4 rounded border border-gray-700 space-y-4">
-      <p className="text-xs text-gray-400 min-w-0 max-w-[14rem]">
-        Files will save to:
-        <br />
-        <span className="text-white font-mono block truncate" title={displayPath}>
-          {truncatePathEnd(displayPath)}
-        </span>
-      </p>
-
       {/* CAPABILITIES */}
       <div className="text-xs text-gray-300/80 space-y-1">
         <div>
@@ -315,7 +318,7 @@ export default function ExportPanel({
             }`}
         >
           <span
-            className={`flex-1 min-w-0 max-w-[14rem] py-1 px-2 text-sm font-mono truncate block
+            className={`flex-1 min-w-0 max-w-[14rem] py-1 px-2 text-sm font-mono block overflow-hidden text-ellipsis whitespace-nowrap
               ${canEditExportPath ? "text-white" : "text-gray-500"}
             `}
             title={displayPath}

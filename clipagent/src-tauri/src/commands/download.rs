@@ -8,8 +8,10 @@ use tauri::AppHandle;
 use tauri::Manager;
 use std::os::unix::process::ExitStatusExt;
 
-use crate::output::unique_output_path;
-use crate::paths::{yt_dlp_path, ffmpeg_path};
+use crate::output::{unique_output_path, unique_output_path_with_ext};
+use crate::paths::{yt_dlp_path, ffmpeg_path, ffprobe_path};
+use crate::storage;
+use tauri::Emitter;
 
 /// Returns the default export directory path (e.g. ~/Downloads) for the UI to display.
 #[tauri::command]
@@ -18,6 +20,100 @@ pub fn get_default_export_dir() -> String {
         .unwrap_or_else(std::env::temp_dir)
         .display()
         .to_string()
+}
+
+/// Load persisted export path; None if missing or invalid (e.g. directory removed).
+#[tauri::command]
+pub fn get_export_path(app: AppHandle) -> Option<String> {
+    storage::load_export_path(&app)
+}
+
+/// Persist export path for next launch. Call when user picks a folder (Pro only).
+#[tauri::command]
+pub fn set_export_path(app: AppHandle, path: String) -> Result<(), String> {
+    let p = path.trim();
+    if p.is_empty() {
+        storage::clear_export_path(&app)?;
+        return Ok(());
+    }
+    let candidate = PathBuf::from(p);
+    if !candidate.is_dir() {
+        return Err("path is not a directory".to_string());
+    }
+    storage::save_export_path(&app, p)
+}
+
+/// Clear persisted export path (e.g. when user switches to Free).
+#[tauri::command]
+pub fn clear_export_path(app: AppHandle) -> Result<(), String> {
+    storage::clear_export_path(&app)
+}
+
+/// Get duration and video codec of a local file via ffprobe (for local file load + same-format export).
+#[tauri::command]
+pub fn get_local_video_info(path: String) -> Result<(f64, Option<String>), String> {
+    let p = PathBuf::from(path.trim());
+    if !p.is_file() {
+        return Err("not a file".to_string());
+    }
+    let path_str = p.to_string_lossy();
+
+    let out_duration = Command::new(ffprobe_path())
+        .args([
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path_str.as_ref(),
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let duration: f64 = String::from_utf8_lossy(&out_duration.stdout)
+        .trim()
+        .parse()
+        .map_err(|_| "could not parse duration".to_string())?;
+
+    let out_codec = Command::new(ffprobe_path())
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path_str.as_ref(),
+        ])
+        .output();
+    let codec_name = out_codec
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        });
+
+    Ok((duration, codec_name))
+}
+
+/// Open the given path in the system file manager (Finder on macOS, Explorer on Windows, etc.).
+#[tauri::command]
+pub fn open_export_folder(path: String) -> Result<(), String> {
+    let p = path.trim();
+    if p.is_empty() {
+        return Err("path is empty".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(p).status()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer").arg(p).status()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open").arg(p).status()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn log_to_file(msg: &str) {
@@ -50,9 +146,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
     };
 
     let url = parsed.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    if url.is_empty() {
-        return r#"{"error":"missing_url"}"#.to_string();
-    }
+    let local_path_opt = parsed.get("local_path").and_then(|x| x.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
     let clips = parsed.get("clips").and_then(|c| c.as_array());
     if clips.is_none() || clips.unwrap().is_empty() {
@@ -91,7 +185,128 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
     let _ = fs::create_dir_all(&base_dir);
 
-    // FAST MODE
+    // -------- LOCAL FILE SOURCE: no yt-dlp, ffmpeg only, same format (stream copy unless watermark or lower quality) --------
+    if let Some(ref local_path_str) = local_path_opt {
+        let local_path = PathBuf::from(local_path_str);
+        if !local_path.is_file() {
+            return r#"{"error":"local_file_not_found"}"#.to_string();
+        }
+        let ext = local_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("mp4");
+        let local_str = local_path.to_string_lossy().to_string();
+        let base_str = base_dir.display().to_string();
+
+        let source_codec = Command::new(ffprobe_path())
+            .args([
+                "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1",
+                local_str.as_str(),
+            ])
+            .output()
+            .ok()
+            .and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            });
+
+        let mut results = vec![];
+        for (i, c) in clips.iter().enumerate() {
+            let start = c.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let end = c.get("end").and_then(|x| x.as_f64()).unwrap_or(start);
+            let name = c.get("name").and_then(|x| x.as_str()).unwrap_or("clip");
+            if end <= start {
+                results.push(serde_json::json!({"index": i, "name": name, "ok": false, "reason": "invalid_range"}));
+                continue;
+            }
+            let safe: String = name.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect();
+            let out_path = unique_output_path_with_ext(&base_dir, &safe, ext);
+            let out_str = out_path.to_string_lossy().to_string();
+
+            let (success, written_path) = if has_watermark {
+                use tauri::path::BaseDirectory;
+                let watermark = app.path().resolve("assets/watermark.png", BaseDirectory::Resource).expect("watermark");
+                let wm_str = watermark.to_string_lossy().to_string();
+                let is_av1 = source_codec.as_deref() == Some("av1");
+                let (vcodec, pix_fmt, out_ext) = if is_av1 {
+                    ("libaom-av1", "yuv420p", "webm")
+                } else {
+                    ("h264_videotoolbox", "yuv420p", ext)
+                };
+                let out_path_wm = if out_ext != ext {
+                    unique_output_path_with_ext(&base_dir, &safe, out_ext)
+                } else {
+                    out_path.clone()
+                };
+                let out_str_wm = out_path_wm.to_string_lossy().to_string();
+                let ok = Command::new(ffmpeg_path())
+                    .current_dir(&base_dir)
+                    .args([
+                        "-ss", &format!("{:.3}", start),
+                        "-to", &format!("{:.3}", end),
+                        "-i", &local_str,
+                        "-i", &wm_str,
+                        "-filter_complex", "[1:v]scale=iw*0.35:-1[wm];[0:v][wm]overlay=W-w-30:H-h-30",
+                        "-c:v", vcodec,
+                        "-pix_fmt", pix_fmt,
+                        "-b:v", if is_av1 { "2M" } else { "6M" },
+                        "-c:a", if is_av1 { "libopus" } else { "aac" },
+                        "-y", &out_str_wm,
+                    ])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                (ok, out_str_wm)
+            } else if let Some(h) = fast_cap {
+                let h = h as i32;
+                let ok = Command::new(ffmpeg_path())
+                    .current_dir(&base_dir)
+                    .args([
+                        "-ss", &format!("{:.3}", start),
+                        "-to", &format!("{:.3}", end),
+                        "-i", &local_str,
+                        "-vf", &format!("scale=-2:min({},ih)", h),
+                        "-c:v", "h264_videotoolbox",
+                        "-pix_fmt", "yuv420p",
+                        "-c:a", "aac",
+                        "-y", &out_str,
+                    ])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                (ok, out_str.clone())
+            } else {
+                let ok = Command::new(ffmpeg_path())
+                    .current_dir(&base_dir)
+                    .args([
+                        "-ss", &format!("{:.3}", start),
+                        "-to", &format!("{:.3}", end),
+                        "-i", &local_str,
+                        "-c", "copy",
+                        "-y", &out_str,
+                    ])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                (ok, out_str.clone())
+            };
+
+            if success {
+                results.push(serde_json::json!({"index": i, "name": name, "ok": true, "path": written_path}));
+                let _ = app.emit("export-clip-done", serde_json::json!({"clip_name": name, "export_dir": base_str}));
+            } else {
+                results.push(serde_json::json!({"index": i, "name": name, "ok": false}));
+            }
+        }
+        return serde_json::json!({ "ok": true, "results": results }).to_string();
+    }
+
+    if url.is_empty() {
+        return r#"{"error":"missing_url"}"#.to_string();
+    }
+
+    // FAST MODE (URL source)
     if mode == "speed" {
         let mut results = vec![];
 
@@ -254,13 +469,20 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 }
             };
 
+            let base_str = base_dir.display().to_string();
             match status {
-                Ok(s) if s.success() => results.push(serde_json::json!({
-                    "index": i,
-                    "name": name,
-                    "ok": true,
-                    "path": out_str
-                })),
+                Ok(s) if s.success() => {
+                    results.push(serde_json::json!({
+                        "index": i,
+                        "name": name,
+                        "ok": true,
+                        "path": out_str
+                    }));
+                    let _ = app.emit("export-clip-done", serde_json::json!({
+                        "clip_name": name,
+                        "export_dir": base_str,
+                    }));
+                }
                 _ => results.push(serde_json::json!({
                     "index": i,
                     "name": name,
@@ -352,12 +574,20 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 .status()
         };
 
+        let ok = status.as_ref().map(|s| s.success()).unwrap_or(false);
         results.push(serde_json::json!({
             "index": i,
             "name": name,
-            "ok": status.map(|s| s.success()).unwrap_or(false),
+            "ok": ok,
             "path": out_str
         }));
+        if ok {
+            let base_str = base_dir.display().to_string();
+            let _ = app.emit("export-clip-done", serde_json::json!({
+                "clip_name": name,
+                "export_dir": base_str,
+            }));
+        }
     }
 
     if !keep_full {

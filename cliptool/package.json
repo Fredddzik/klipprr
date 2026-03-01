@@ -4,13 +4,16 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && rm -rf ../clipagent/ui/out && mkdir -p ../clipagent/ui && mv out ../clipagent/ui/out",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.90.1",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.3.4",
+    "@tauri-apps/plugin-updater": "^2.10.0",
     "next": "^16.1.1",
     "react": "19.2.0",
     "react-dom": "19.2.0"

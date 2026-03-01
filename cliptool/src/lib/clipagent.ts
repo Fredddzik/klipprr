@@ -5,8 +5,6 @@ export const CLIPAGENT_HTTP = "http://localhost:4000";
 export const CLIPAGENT_HTTPS = "https://localhost:4001";
 
 
-let ACTIVE_BASE: string | null = null;
-
 // Dev UI detection: allow HTTP in dev (localhost), require HTTPS in prod (Vercel)
 const IS_DEV_UI =
   typeof window !== "undefined" &&
@@ -66,84 +64,20 @@ export async function pingAgent(): Promise<{
   base?: string;
   error?: string;
 }> {
-  // --- Correct detection order ---
-  // HTTP answers the only question we can reliably ask:
-  //   "Is anything listening on localhost?"
-  // Only after HTTP succeeds does it make sense to talk about HTTPS trust.
-
-  // 1) Try HTTP first
   try {
-    const httpRes = await fetchWithTimeout(`${CLIPAGENT_HTTP}/ping`, {
+    const res = await fetchWithTimeout(`${CLIPAGENT_HTTP}/ping`, {
       method: "GET",
       cache: "no-store",
       timeoutMs: 1500,
     });
 
-    if (!httpRes.ok) {
-      // Something is listening, but it isn't a healthy agent.
-      return {
-        ok: false,
-        state: "offline",
-        base: CLIPAGENT_HTTP,
-        error: `ping_http_${httpRes.status}`,
-      };
+    if (!res.ok) {
+      return { ok: false, state: "offline", error: `ping_http_${res.status}` };
     }
 
-    // Agent is definitely running (at least via HTTP). Now test HTTPS.
-
-    try {
-      const httpsRes = await fetchWithTimeout(`${CLIPAGENT_HTTPS}/ping`, {
-        method: "GET",
-        cache: "no-store",
-        timeoutMs: 1200,
-      });
-
-      if (httpsRes.ok) {
-        ACTIVE_BASE = CLIPAGENT_HTTPS;
-        return { ok: true, state: "online", base: CLIPAGENT_HTTPS };
-      }
-
-      // HTTPS reachable but not OK — treat as offline-ish, but we still know agent is running.
-      // In practice this should be rare; keep state offline to avoid misleading "trust" prompts.
-      return {
-        ok: false,
-        state: "offline",
-        base: CLIPAGENT_HTTPS,
-        error: `ping_https_${httpsRes.status}`,
-      };
-    } catch {
-      // HTTPS threw (very commonly: cert not trusted). Since HTTP was OK, the agent IS running.
-      return {
-        ok: false,
-        state: "untrusted",
-        base: CLIPAGENT_HTTPS,
-        error: "https_untrusted_or_blocked",
-      };
-    }
+    return { ok: true, state: "online", base: CLIPAGENT_HTTP };
   } catch {
-    // 2) If HTTP fails, still allow HTTPS-only agents (edge case)
-    try {
-      const httpsRes = await fetchWithTimeout(`${CLIPAGENT_HTTPS}/ping`, {
-        method: "GET",
-        cache: "no-store",
-        timeoutMs: 1500,
-      });
-
-      if (httpsRes.ok) {
-        ACTIVE_BASE = CLIPAGENT_HTTPS;
-        return { ok: true, state: "online", base: CLIPAGENT_HTTPS };
-      }
-
-      return {
-        ok: false,
-        state: "offline",
-        base: CLIPAGENT_HTTPS,
-        error: `ping_https_${httpsRes.status}`,
-      };
-    } catch {
-      // Both failed: nothing is listening.
-      return { ok: false, state: "offline", error: "ping_failed" };
-    }
+    return { ok: false, state: "offline", error: "ping_failed" };
   }
 }
 
@@ -211,7 +145,7 @@ function normalizeResolve(raw: ResolveResponse): ResolvedVideo | null {
 export async function resolveVideo(url: string): Promise<AgentResult<ResolvedVideo>> {
   try {
     // Always use HTTPS base for resolve, unless in dev UI
-    const base = IS_DEV_UI ? CLIPAGENT_HTTP : CLIPAGENT_HTTPS;
+    const base = CLIPAGENT_HTTP;
     const res = await fetchWithTimeout(
       `${base}/resolve?url=${encodeURIComponent(url)}`,
       { method: "GET", timeoutMs: 20000 }
@@ -263,6 +197,8 @@ export interface ClipSpec {
 
 export interface DownloadAllPayload {
   url: string;
+  /** When set, backend uses this file as source instead of url (local file clipping). */
+  local_path?: string | null;
   clips: ClipSpec[];
   mode: "speed" | "quality";
   fast_max_height: number | null;
@@ -271,6 +207,7 @@ export interface DownloadAllPayload {
   video_id: string | null;
   export_path: string | null;
   has_watermark?: boolean;
+  codec?: "universal" | "original";
 }
 
 export interface DownloadAllResponse {
@@ -283,7 +220,7 @@ export async function downloadAll(
   payload: DownloadAllPayload
 ): Promise<AgentResult<DownloadAllResponse>> {
   try {
-    const base = IS_DEV_UI ? CLIPAGENT_HTTP : CLIPAGENT_HTTPS;
+    const base = CLIPAGENT_HTTP;
     const res = await fetchWithTimeout(`${base}/download-all`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

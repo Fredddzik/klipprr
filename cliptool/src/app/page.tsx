@@ -4,6 +4,11 @@ import { useEffect, useState, useRef } from "react";
 import { supabase, getSupabaseConfigForBackend } from "@/lib/supabase";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { open as openExternal } from "@tauri-apps/plugin-shell";
+import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 import {
   resolveVideo,
@@ -22,6 +27,7 @@ import type { Capabilities } from "@/lib/capabilities";
 
 export default function HomePage() {
   const [videoUrl, setVideoUrl] = useState("");
+  const [localFilePath, setLocalFilePath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [videoData, setVideoData] = useState<ResolvedVideo | null>(null);
   const [markIn, setMarkIn] = useState<number | null>(null);
@@ -34,6 +40,12 @@ export default function HomePage() {
   const [email, setEmail] = useState<string | null>(null);
   const [plan, setPlan] = useState<"Free" | "Pro">("Free");
   const [accountLoading, setAccountLoading] = useState(true);
+
+  const [updateStatus, setUpdateStatus] = useState<
+    "idle" | "checking" | "latest" | "available" | "downloading" | "error"
+  >("idle");
+  const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null);
+  const updateRef = useRef<Awaited<ReturnType<typeof checkForUpdate>> | null>(null);
 
   async function loadAuthAndPlan() {
     const { data } = await supabase.auth.getSession();
@@ -175,6 +187,8 @@ useEffect(() => {
   const [fastCap, setFastCap] = useState<number | null>(null); // null = Auto
   const [exportPath, setExportPath] = useState("");
   const [defaultExportDir, setDefaultExportDir] = useState("");
+  const [exportToasts, setExportToasts] = useState<{ id: number; clipName: string; exportDir: string }[]>([]);
+  const exportToastIdRef = useRef(0);
   const {
     undo,
     redo,
@@ -309,6 +323,11 @@ async function refreshCapabilities() {
     setResolveError(null);
     setFastCap(null);
     setEditTarget(null);
+    setLocalFilePath(null);
+    setClips([]);
+    setMarkIn(null);
+    setMarkOut(null);
+    setCurrentTime(0);
 
     try {
       const reqId = ++resolveReqRef.current;
@@ -349,6 +368,56 @@ const looksProtected =
     }
 
     setLoading(false);
+  }
+
+  async function loadLocalFile() {
+    if (typeof window === "undefined" || !(window as any).__TAURI__) return;
+    setResolveError(null);
+    try {
+      const selected = await openFileDialog({
+        directory: false,
+        multiple: false,
+        filters: [
+          { name: "Video", extensions: ["mp4", "mov", "avi", "webm", "mkv", "m4v"] },
+        ],
+      });
+      if (!selected) return;
+      setLoading(true);
+      setLocalFilePath(selected);
+      const [duration, _codec] = await invoke<[number, string | null]>("get_local_video_info", {
+        path: selected,
+      });
+      const previewUrl = convertFileSrc(selected);
+      const title = selected.split(/[/\\]/).pop() ?? "Local video";
+      const localId = "local-" + selected.replace(/[/\\:]/g, "_").slice(-64);
+      const data: ResolvedVideo = {
+        id: localId,
+        title,
+        duration: Number(duration) || 0,
+        thumbnail: null,
+        previewUrl,
+        capabilities: {
+          fastMaxHeight: 1080,
+          trueMaxHeight: 1080,
+          trueMaxRequiresReencode: false,
+        },
+        raw: {
+          id: localId,
+          title,
+          duration: Number(duration) || 0,
+          preview: { url: previewUrl },
+          capabilities: { fast_max_height: 1080, true_max_height: 1080, true_max_requires_reencode: false },
+        },
+      };
+      setVideoData(data);
+    } catch (e) {
+      console.warn("Load local file failed:", e);
+      setResolveError("Could not load the selected file.");
+      setVideoData(null);
+      setLocalFilePath(null);
+    } finally {
+      setLoading(false);
+    }
   }
 
 useEffect(() => {
@@ -674,6 +743,36 @@ useEffect(() => {
     }
   }, []);
 
+  // Sync persisted export path with plan: load when Pro, clear when Free
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).__TAURI__ || caps == null) return;
+    if (caps.canSetCustomExportPath) {
+      invoke<string | null>("get_export_path")
+        .then((p) => setExportPath(p ?? ""))
+        .catch(() => setExportPath(""));
+    } else {
+      invoke("clear_export_path").catch(() => {});
+      setExportPath("");
+    }
+  }, [caps]);
+
+  // Per-clip export done toasts (top right)
+  useEffect(() => {
+    if (typeof window === "undefined" || !(window as any).__TAURI__) return;
+    const unlisten = listen<{ clip_name: string; export_dir: string }>("export-clip-done", (event) => {
+      const { clip_name, export_dir } = event.payload ?? {};
+      if (!clip_name || !export_dir) return;
+      const id = ++exportToastIdRef.current;
+      setExportToasts((prev) => [...prev, { id, clipName: clip_name, exportDir: export_dir }]);
+      setTimeout(() => {
+        setExportToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 8000);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
   // --- Sanitize export path for macOS quoted path handling ---
   function sanitizeExportPath(input: string): string | null {
     if (!input) return null;
@@ -697,8 +796,88 @@ useEffect(() => {
     setShowUpgrade(true);
   }
 
+  async function openExportFolder(path: string) {
+    try {
+      await invoke("open_export_folder", { path });
+    } catch (e) {
+      console.warn("Open folder failed:", e);
+    }
+  }
+
+  function dismissExportToast(id: number) {
+    setExportToasts((prev) => prev.filter((t) => t.id !== id));
+  }
+
+  async function handleCheckForUpdates() {
+    if (typeof window === "undefined" || !(window as any).__TAURI__) return;
+    setUpdateStatus("checking");
+    setUpdateInfo(null);
+    updateRef.current = null;
+    try {
+      const update = await checkForUpdate();
+      if (update) {
+        updateRef.current = update;
+        setUpdateInfo({ version: update.version, body: update.body ?? undefined });
+        setUpdateStatus("available");
+      } else {
+        setUpdateStatus("latest");
+        setTimeout(() => setUpdateStatus("idle"), 3000);
+      }
+    } catch (err) {
+      console.error("Update check failed:", err);
+      setUpdateStatus("error");
+      setTimeout(() => setUpdateStatus("idle"), 4000);
+    }
+  }
+
+  async function handleInstallUpdate() {
+    const update = updateRef.current;
+    if (!update) return;
+    setUpdateStatus("downloading");
+    try {
+      await update.downloadAndInstall(() => {});
+      await relaunch();
+    } catch (err) {
+      console.error("Update install failed:", err);
+      setUpdateStatus("error");
+      setTimeout(() => setUpdateStatus("idle"), 4000);
+    }
+  }
+
   return (
   <div className="min-h-screen bg-black text-white p-6">
+    {/* Export clip toasts — top right */}
+    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+      {exportToasts.map((t) => (
+        <div
+          key={t.id}
+          className="flex items-center gap-2 rounded-lg border border-zinc-600 bg-zinc-900 px-3 py-2 text-sm shadow-lg"
+        >
+          <span className="flex-1 truncate text-white" title={t.clipName}>
+            {t.clipName} ✅
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              openExportFolder(t.exportDir);
+              dismissExportToast(t.id);
+            }}
+            className="shrink-0 rounded px-2 py-0.5 text-xs font-medium bg-zinc-700 hover:bg-zinc-600"
+          >
+            Open folder
+          </button>
+          <button
+            type="button"
+            onClick={() => dismissExportToast(t.id)}
+            className="shrink-0 text-zinc-400 hover:text-white"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+
     {/* Top Account Bar */}
     <div className="w-full mb-6 px-4 py-3 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-between">
       {accountLoading ? (
@@ -709,14 +888,14 @@ useEffect(() => {
             <span className="text-sm text-zinc-400">{email}</span>
             <span
               className={`text-xs font-semibold ${
-                plan === "Pro" ? "text-green-400" : "text-zinc-500"
+                (caps?.canSetCustomExportPath || caps?.canRenameClips) ? "text-green-400" : "text-zinc-500"
               }`}
             >
-              {plan === "Pro" ? "Pro Plan" : "Free Plan"}
+              {(caps?.canSetCustomExportPath || caps?.canRenameClips) ? "Pro Plan" : "Free Plan"}
             </span>
           </div>
 
-          <div className="flex gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={async () => {
                 await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
@@ -727,10 +906,42 @@ useEffect(() => {
               Sync
             </button>
 
+            {(window as any).__TAURI__ && (
+              <>
+                {(updateStatus === "available" || updateStatus === "downloading") && updateInfo ? (
+                  <span className="flex items-center gap-2 text-xs">
+                    <span className="text-green-400">Update {updateInfo.version} available</span>
+                    <button
+                      onClick={handleInstallUpdate}
+                      disabled={updateStatus === "downloading"}
+                      className="rounded-md bg-green-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-green-500 disabled:opacity-50"
+                    >
+                      {updateStatus === "downloading" ? "Downloading…" : "Install"}
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={handleCheckForUpdates}
+                    disabled={updateStatus === "checking"}
+                    className="text-xs px-3 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 transition disabled:opacity-50"
+                  >
+                    {updateStatus === "checking" ? "Checking…" : "Check for updates"}
+                  </button>
+                )}
+                {updateStatus === "latest" && (
+                  <span className="text-xs text-gray-500">Up to date</span>
+                )}
+                {updateStatus === "error" && (
+                  <span className="text-xs text-red-400">Update check failed</span>
+                )}
+              </>
+            )}
+
             <button
               onClick={async () => {
                 await supabase.auth.signOut();
                 await invoke("clear_license_cmd");
+                await refreshCapabilities();
                 await loadAuthAndPlan();
               }}
               className="text-xs px-3 py-1 rounded-md bg-red-600 hover:bg-red-700 transition"
@@ -743,25 +954,44 @@ useEffect(() => {
         <>
           <span className="text-sm text-zinc-500">Not logged in</span>
 
-          <button
-            onClick={async () => {
-              const emailInput = prompt("Enter your email");
-              if (!emailInput) return;
-
-              const { error } = await supabase.auth.signInWithOtp({
-                email: emailInput,
-                options: { shouldCreateUser: true },
-              });
-
-              if (error) {
-                console.error("Login failed:", error);
-                alert("Login failed. Check console.");
-              }
-            }}
-            className="text-xs px-4 py-1 rounded-md bg-blue-600 hover:bg-blue-700 transition font-semibold"
-          >
-            Login
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            {(window as any).__TAURI__ && updateStatus !== "available" && (
+              <button
+                onClick={handleCheckForUpdates}
+                disabled={updateStatus === "checking"}
+                className="text-xs px-3 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 transition disabled:opacity-50"
+              >
+                {updateStatus === "checking" ? "Checking…" : "Check for updates"}
+              </button>
+            )}
+            {(window as any).__TAURI__ && (updateStatus === "available" || updateStatus === "downloading") && updateInfo && (
+              <span className="flex items-center gap-2 text-xs">
+                <span className="text-green-400">Update {updateInfo.version} available</span>
+                <button
+                  onClick={handleInstallUpdate}
+                  disabled={updateStatus === "downloading"}
+                  className="rounded-md bg-green-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-green-500 disabled:opacity-50"
+                >
+                  {updateStatus === "downloading" ? "Downloading…" : "Install"}
+                </button>
+              </span>
+            )}
+            <button
+              onClick={async () => {
+                try {
+                  await openExternal(
+                    "https://klipprr.com/login?redirect=" +
+                      encodeURIComponent("clipagent://auth-callback")
+                  );
+                } catch (err) {
+                  console.error("Failed to open login page:", err);
+                }
+              }}
+              className="text-xs px-4 py-1 rounded-md bg-blue-600 hover:bg-blue-700 transition font-semibold"
+            >
+              Login
+            </button>
+          </div>
         </>
       )}
     </div>
@@ -772,6 +1002,16 @@ useEffect(() => {
   onUpgraded={async () => {
     await refreshCapabilities();
     setShowUpgrade(false);
+  }}
+  isLoggedIn={!!email}
+  onRedeemCode={async (code) => {
+    const { error } = await supabase.functions.invoke("redeem_activation_code", {
+      body: { code },
+    });
+    if (error) return { error: error.message ?? "Activation failed." };
+    await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
+    await refreshCapabilities();
+    return {};
   }}
 />
     {undoToast && (
@@ -797,13 +1037,24 @@ useEffect(() => {
       />
       <button
         onClick={loadVideo}
-        className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded font-semibold"
+        disabled={loading}
+        className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded font-semibold disabled:opacity-50"
       >
         <span className={`inline-flex items-center gap-2 ${loading ? "animate-pulse" : ""}`}>
           {loading && <span className="inline-block w-2 h-2 rounded-full bg-white animate-bounce" />}
           {loading ? "Loading…" : "Load"}
         </span>
       </button>
+      {typeof window !== "undefined" && (window as any).__TAURI__ && (
+        <button
+          type="button"
+          onClick={loadLocalFile}
+          disabled={loading}
+          className="px-6 py-3 bg-zinc-700 hover:bg-zinc-600 rounded font-semibold disabled:opacity-50"
+        >
+          Load local file
+        </button>
+      )}
     </div>
 
     {resolveError && (
@@ -828,6 +1079,8 @@ useEffect(() => {
           <VideoViewport
             src={videoData.previewUrl}
             videoKey={videoData.id}
+            currentTime={currentTime}
+            onTimeUpdate={(t) => setCurrentTime(t)}
           />
 
           <Timeline
@@ -1025,6 +1278,7 @@ useEffect(() => {
             clips={clips}
             selectedClipIds={selectedClipIds}
             videoUrl={videoUrl}
+            localFilePath={localFilePath}
             videoData={videoData}
             exportHQ={exportHQ}
             setExportHQ={setExportHQ}
@@ -1048,6 +1302,13 @@ useEffect(() => {
             defaultExportDir={defaultExportDir}
             sanitizeExportPath={sanitizeExportPath}
             canEditExportPath={caps.canSetCustomExportPath}
+            onExportPathChosen={async (path) => {
+              try {
+                await invoke("set_export_path", { path });
+              } catch (e) {
+                console.warn("Persist export path failed:", e);
+              }
+            }}
             onUpgradeRequested={() => setShowUpgrade(true)}
           />
         </div>
