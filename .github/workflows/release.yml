@@ -1,0 +1,47 @@
+# Build ClipAgent and create a GitHub Release with updater artifacts (latest.json + .sig).
+# Trigger: push a version tag, e.g.  git tag v0.1.0 && git push origin v0.1.0
+#
+# Required secret: TAURI_SIGNING_PRIVATE_KEY (contents of your ~/.tauri/clipagent.key)
+# See doc/UPDATES.md for setup.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build frontend
+        run: |
+          cd cliptool && npm ci && npm run build
+
+      - name: Tauri build and release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        with:
+          projectPath: clipagent
+          tagName: v__VERSION__
+          releaseName: 'ClipAgent v__VERSION__'
+          releaseBody: 'See the assets to download this version.'
+          releaseDraft: true
+          args: '--target aarch64-apple-darwin'
