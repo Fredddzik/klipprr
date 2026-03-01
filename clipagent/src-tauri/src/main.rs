@@ -331,6 +331,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(single_instance(|app, argv, _cwd| {
             for arg in argv {
@@ -344,6 +345,11 @@ fn main() {
         }))
         .invoke_handler(tauri::generate_handler![
             commands::download::get_default_export_dir,
+            commands::download::get_export_path,
+            commands::download::set_export_path,
+            commands::download::clear_export_path,
+            commands::download::open_export_folder,
+            commands::download::get_local_video_info,
             commands::license_commands::get_license_status,
             commands::license_commands::get_capabilities,
             commands::license_commands::activate_license,
