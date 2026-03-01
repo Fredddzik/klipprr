@@ -5,17 +5,36 @@ mod http;
 mod storage;
 mod license;
 
+/// Supabase URL and anon key embedded at build from cliptool/.env.local (fallback when frontend has none).
+mod supabase_embed {
+    include!(concat!(env!("OUT_DIR"), "/supabase_embed.rs"));
+}
+
 use crate::commands::download::handle_download_all;
 use crate::commands::ping::handle_ping;
 use crate::http::{with_cors, json_response, text_response, handle_http};
+use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_single_instance::init as single_instance;
+use tauri::Emitter;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+use serde_json::json;
+use url;
+
+pub static PENDING_AUTH: Lazy<Mutex<Option<(String, String)>>> =
+    Lazy::new(|| Mutex::new(None));
 
 // =============================================================
 // HTTP SERVER BOOTSTRAP (plain HTTP)
 // =============================================================
 async fn start_http_server(app: tauri::AppHandle) {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 4000))
-        .await
-        .expect("Failed to bind ClipAgent HTTP server");
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", 4000)).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("ClipAgent HTTP failed to bind 127.0.0.1:4000: {e}");
+            return;
+        }
+    };
     println!("ClipAgent HTTP running at http://localhost:4000");
     loop {
         let (tcp, _) = match listener.accept().await {
@@ -181,11 +200,13 @@ async fn handle_request(req: Request<Body>, app: tauri::AppHandle) -> Result<Res
             None => return Ok(text_response(500, "no_preview_url")),
         };
 
-        let mut res = Response::new(Body::empty());
-        *res.status_mut() = hyper::StatusCode::FOUND;
-        res.headers_mut()
-            .insert(hyper::header::LOCATION, preview_url.parse().unwrap());
-        return Ok(with_cors(res));
+        return Ok(with_cors(
+            Response::builder()
+                .status(302)
+                .header("Location", preview_url)
+                .body(Body::empty())
+                .unwrap(),
+        ));
     }
 
     // POST /download-all
@@ -213,9 +234,13 @@ async fn start_https_server(app: tauri::AppHandle) {
 
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
-    let listener = TcpListener::bind(("127.0.0.1", 4001))
-        .await
-        .expect("Failed to bind ClipAgent HTTPS server");
+    let listener = match TcpListener::bind(("127.0.0.1", 4001)).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("ClipAgent HTTPS failed to bind 127.0.0.1:4001: {e}");
+            return;
+        }
+    };
 
     println!("🔒 ClipAgent HTTPS running at https://localhost:4001");
 
@@ -256,57 +281,166 @@ async fn start_https_server(app: tauri::AppHandle) {
 
 
 
+use std::fs::{create_dir_all, OpenOptions};
+use std::io::Write;
+
+fn init_file_logger() {
+    let mut log_dir = dirs::home_dir().unwrap_or(PathBuf::from("/tmp"));
+    log_dir.push("Library/Logs/ClipAgent");
+
+    let _ = create_dir_all(&log_dir);
+
+    let mut log_path = log_dir.clone();
+    log_path.push("clipagent.log");
+
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(file, "\n--- ClipAgent Started ---");
+    }
+}
+
+fn append_file_log(msg: &str) {
+    let mut log_dir = dirs::home_dir().unwrap_or(PathBuf::from("/tmp"));
+    log_dir.push("Library/Logs/ClipAgent");
+    let mut log_path = log_dir.clone();
+    log_path.push("clipagent.log");
+
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(file, "{msg}");
+    }
+}
+
 // =============================================================
 // MAIN ENTRYPOINT
 // =============================================================
-#[tokio::main]
-async fn main() {
-    // Start the local HTTP and HTTPS servers in the background.
-    // (each runs an infinite accept loop)
-
+fn main() {
     println!("ClipAgent started.");
+    init_file_logger();
+    std::fs::write(
+        "/tmp/clipagent_proof.txt",
+        "MAIN EXECUTED\n"
+    ).ok();
 
-tauri::Builder::default()
+    tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(single_instance(|app, argv, _cwd| {
+            for arg in argv {
+                if arg.starts_with("clipagent://") {
+                    let msg = format!("[SECOND INSTANCE] URL: {arg}");
+                    println!("{msg}");
+                    append_file_log(&msg);
+                    let _ = app.emit("deep-link", arg);
+                }
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
+            commands::download::get_default_export_dir,
+            commands::download::get_export_path,
+            commands::download::set_export_path,
+            commands::download::clear_export_path,
+            commands::download::open_export_folder,
+            commands::download::get_local_video_info,
             commands::license_commands::get_license_status,
             commands::license_commands::get_capabilities,
             commands::license_commands::activate_license,
             commands::license_commands::clear_license_cmd,
-	    commands::license_commands::set_license_from_server,
-
+            commands::license_commands::set_license_from_server,
+            commands::license_commands::set_supabase_session,
+            commands::license_commands::sync_license_from_supabase,
+            commands::license_commands::consume_auth_tokens,
+            commands::license_commands::get_stored_session_tokens,
         ])
         .setup(|app| {
+            let app_handle = app.handle().clone();           
+            // Forward deep link URLs to the frontend via a simple event, and handle Supabase magic links.
+            let deep_link_handle = app_handle.clone();
+            app.deep_link().on_open_url(move |event| {
+                if let Some(url) = event.urls().first() {
+                    let raw = url.to_string();
+                    append_file_log(&format!("[DEEP LINK] RAW URL: {}", raw));
 
-let app_handle = app.handle().clone();
+                    if let Some(fragment) = raw.split('#').nth(1) {
+                        append_file_log(&format!("[DEEP LINK] FRAGMENT: {}", fragment));
 
-std::thread::spawn(move || {
-    tauri::async_runtime::block_on(async {
-        start_http_server(app_handle).await;
-    });
-});
+                        let params: std::collections::HashMap<_, _> =
+                            url::form_urlencoded::parse(fragment.as_bytes())
+                                .into_owned()
+                                .collect();
 
-let https_handle = app.handle().clone();
+                        if let (Some(access), Some(refresh)) =
+                            (params.get("access_token"), params.get("refresh_token"))
+                        {
+                            append_file_log("[DEEP LINK] Access + Refresh tokens received");
 
-std::thread::spawn(move || {
-    tauri::async_runtime::block_on(async {
-        start_https_server(https_handle).await;
-    });
-});
+                            let app_for_async = deep_link_handle.clone();
+                            let access_clone = access.clone();
+                            let refresh_clone = refresh.clone();
 
-            // Enable auto-start on login using Tauri 2 autostart plugin replacement (macOS only)
-            #[cfg(target_os = "macos")]
-            {
-                let _ = app.handle().plugin(
-                    tauri_plugin_autostart::init(
-                        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-                        None,
-                    )
-                );
-            }
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(e) = crate::commands::license_commands::set_supabase_session(
+                                    app_for_async.clone(),
+                                    access_clone.clone(),
+                                    refresh_clone.clone(),
+                                ) {
+                                    append_file_log(&format!("[DEEP LINK] Failed to set session: {:?}", e));
+                                    return;
+                                }
 
+                                append_file_log("[DEEP LINK] Session stored in backend");
+
+                                if let Err(e) = crate::commands::license_commands::sync_license_from_supabase(
+                                    app_for_async.clone(),
+                                    None,
+                                    None,
+                                ).await {
+                                    append_file_log(&format!("[DEEP LINK] License sync failed: {:?}", e));
+                                } else {
+                                    append_file_log("[DEEP LINK] License sync successful");
+                                }
+
+                                // Hand off tokens to frontend so it can setSession and avoid clearing license on load
+                                if let Ok(mut guard) = crate::PENDING_AUTH.lock() {
+                                    *guard = Some((access_clone.clone(), refresh_clone.clone()));
+                                    append_file_log("[DEEP LINK] Tokens stored in PENDING_AUTH for frontend");
+                                }
+                                // Notify already-open frontend so it can setSession and refresh (app-already-open flow)
+                                let _ = app_for_async.emit("auth-success", json!({
+                                    "access_token": access_clone,
+                                    "refresh_token": refresh_clone,
+                                }));
+                            });
+                        }
+                    }
+                }
+            });
+
+            // HTTP
+            let http_handle = app_handle.clone();
+            std::thread::spawn(move || {
+                tauri::async_runtime::block_on(async {
+                    start_http_server(http_handle).await;
+                });
+            });
+
+            // HTTPS
+            let https_handle = app_handle.clone();
+            std::thread::spawn(move || {
+                tauri::async_runtime::block_on(async {
+                    start_https_server(https_handle).await;
+                });
+            });
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("Error running ClipAgent");
+        .expect("error while building tauri application");
 }

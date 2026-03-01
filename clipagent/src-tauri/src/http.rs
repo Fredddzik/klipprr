@@ -1,9 +1,7 @@
 use hyper::{Body, Response, StatusCode};
 use hyper::body::to_bytes;
 use hyper::{Method, Request};
-use serde::Deserialize;
 use tauri::AppHandle;
-use crate::commands::license_commands;
 use crate::commands::download;
 
 pub fn with_cors(mut res: Response<Body>) -> Response<Body> {
@@ -32,14 +30,6 @@ pub fn text_response(status: u16, body: &str) -> Response<Body> {
     let mut res = Response::new(Body::from(body.to_string()));
     *res.status_mut() = StatusCode::from_u16(status).unwrap();
     with_cors(res)
-}
-
-#[derive(Deserialize)]
-struct LicenseRequest {
-  email: String,
-  plan: String,
-  #[serde(default)]
-  exp: Option<u64>,
 }
 
 pub async fn handle_http(
@@ -88,40 +78,6 @@ pub async fn handle_http(
 
         let json = crate::commands::resolve::handle_resolve(url);
         return Ok(json_response(200, json));
-    }
-
-    if method == Method::POST && path == "/license" {
-        let body_bytes = to_bytes(req.into_body()).await?;
-        let parsed: LicenseRequest = match serde_json::from_slice(&body_bytes) {
-            Ok(v) => v,
-            Err(_) => {
-                return Ok(json_response(400, "{\"error\":\"invalid_json\"}".to_string()));
-            }
-        };
-
-        println!(
-            "[License] HTTP install request received for {} ({})",
-            parsed.email, parsed.plan
-        );
-
-        match license_commands::set_license_from_server(
-	    app.clone(),
-	    parsed.email,
-	    parsed.plan,
-	    parsed.exp,
-	) {
-            Ok(_) => {
-                println!("[License] License installed successfully");
-                return Ok(json_response(200, "{\"ok\":true}".to_string()));
-            }
-            Err(e) => {
-                println!("[License] License install failed: {}", e);
-                return Ok(json_response(
-                    500,
-                    format!("{{\"error\":\"{}\"}}", e),
-                ));
-            }
-        }
     }
 
     if method == Method::POST && path == "/download-all" {
