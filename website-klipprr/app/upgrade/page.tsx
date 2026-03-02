@@ -205,28 +205,28 @@ useEffect(() => {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 dark:bg-black">
-      <main className="w-full max-w-md rounded-lg border border-zinc-200 bg-white p-8 text-center shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-        <h1 className="mb-4 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
-          Upgrade ClipAgent
+    <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-zinc-100 px-4">
+      <main className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900/80 p-8 text-center shadow-xl">
+        <h1 className="mb-4 text-2xl font-semibold text-white">
+          Upgrade Klipprr
         </h1>
 
         {!session && (
           <>
-            <p className="mb-4 text-sm text-zinc-600 dark:text-zinc-400">
-              Log in to manage your ClipAgent license.
+            <p className="mb-4 text-sm text-zinc-400">
+              Log in to manage your Klipprr license.
             </p>
             <input
               type="email"
               placeholder="you@example.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="mb-3 w-full rounded border px-3 py-2 text-sm"
+              className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
             />
             <button
               onClick={sendMagicLink}
               disabled={loading}
-              className="w-full rounded bg-yellow-500 py-2 text-sm font-medium text-black"
+              className="w-full rounded-full bg-violet-600 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-60 transition"
             >
               Send login link
             </button>
@@ -235,18 +235,18 @@ useEffect(() => {
 
         {session && license && (
           <>
-            <p className="mb-4 text-sm text-green-600">
-              ClipAgent Pro is active.
+            <p className="mb-4 text-sm text-emerald-400">
+              Klipprr Pro is active.
             </p>
-            <p className="text-sm text-zinc-500">
-            Your license is active. Open ClipAgent and log in to unlock Pro features.
+            <p className="text-sm text-zinc-400">
+              Your license is active. Open Klipprr and log in to unlock Pro features.
             </p>
           </>
         )}
 
         {session && !license && (
           <>
-            <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
+            <p className="mb-3 text-sm text-zinc-400">
               Enter your activation code.
             </p>
             <input
@@ -254,12 +254,12 @@ useEffect(() => {
               placeholder="BETA-CLIP-001"
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              className="mb-3 w-full rounded border px-3 py-2 text-sm"
+              className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
             />
             <button
               onClick={redeemCode}
               disabled={loading}
-              className="w-full rounded bg-yellow-500 py-2 text-sm font-medium text-black"
+              className="w-full rounded-full bg-violet-600 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-60 transition"
             >
               Activate
             </button>
@@ -267,7 +267,7 @@ useEffect(() => {
         )}
 
         {status && (
-          <p className="mt-4 text-sm text-zinc-500">{status}</p>
+          <p className="mt-4 text-sm text-zinc-400">{status}</p>
         )}
       </main>
     </div>

@@ -59,7 +59,7 @@ function CallbackInner() {
   }, [redirect]);
 
   // Try opening the app once the deep link is ready. Many browsers block
-  // programmatic redirects to custom schemes; the "Open ClipAgent" button
+  // programmatic redirects to custom schemes; the "Open Klipprr" button
   // provides a user gesture so the app can open if this fails.
   useEffect(() => {
     if (!deepLink) return;
@@ -73,25 +73,25 @@ function CallbackInner() {
 
   if (!hasTokens && !noSession) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-black text-white px-4">
-        <p className="text-gray-400">Redirecting…</p>
+      <div className="min-h-screen flex items-center justify-center bg-zinc-950 text-zinc-100 px-4">
+        <p className="text-zinc-400">Redirecting…</p>
       </div>
     );
   }
 
   if (!hasTokens && noSession) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-black text-white px-4">
-        <div className="w-full max-w-md rounded-xl border border-gray-800 bg-gray-950 p-6 shadow-xl">
-          <h1 className="text-2xl font-semibold mb-2">
+      <div className="min-h-screen flex items-center justify-center bg-zinc-950 text-zinc-100 px-4">
+        <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6 shadow-xl">
+          <h1 className="text-2xl font-semibold text-white mb-2">
             Something went wrong
           </h1>
-          <p className="text-sm text-gray-400 mb-4">
+          <p className="text-sm text-zinc-400 mb-4">
             We couldn&apos;t find a login session. Sign in first, then try again.
           </p>
           <a
             href={`/login?redirect=${encodeURIComponent(redirect)}`}
-            className="inline-flex items-center rounded-lg bg-yellow-500 px-4 py-2 text-sm font-semibold text-black hover:brightness-110"
+            className="inline-flex items-center rounded-full bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500 transition"
           >
             Sign in
           </a>
@@ -101,20 +101,20 @@ function CallbackInner() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-black text-white px-4">
-      <div className="w-full max-w-md rounded-xl border border-gray-800 bg-gray-950 p-6 shadow-xl">
-        <h1 className="text-2xl font-semibold mb-2">
-          Open ClipAgent
+    <div className="min-h-screen flex items-center justify-center bg-zinc-950 text-zinc-100 px-4">
+      <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6 shadow-xl">
+        <h1 className="text-2xl font-semibold text-white mb-2">
+          Open Klipprr
         </h1>
-        <p className="text-sm text-gray-400 mb-4">
+        <p className="text-sm text-zinc-400 mb-4">
           Click the button below to open the app and log in. Your browser may not open it automatically.
         </p>
         {deepLink && (
           <a
             href={deepLink}
-            className="inline-flex items-center rounded-lg bg-yellow-500 px-4 py-2 text-sm font-semibold text-black hover:brightness-110"
+            className="inline-flex items-center rounded-full bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 transition"
           >
-            Open ClipAgent
+            Open Klipprr
           </a>
         )}
       </div>
