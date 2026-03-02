@@ -92,8 +92,8 @@ function LoginInner() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-black text-white">
-        <p className="text-gray-400">Loading…</p>
+      <div className="min-h-screen flex items-center justify-center bg-zinc-950 text-zinc-100">
+        <p className="text-zinc-400">Loading…</p>
       </div>
     );
   }
@@ -101,10 +101,10 @@ function LoginInner() {
   const isDesktopFlow = !!redirect;
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-black text-white px-4 py-8">
-      <div className="w-full max-w-md rounded-xl border border-gray-800 bg-gray-950 p-6 shadow-xl">
-        <h1 className="text-2xl font-semibold mb-1">Klipprr</h1>
-        <p className="text-sm text-gray-400 mb-6">
+    <div className="min-h-screen flex items-center justify-center bg-zinc-950 text-zinc-100 px-4 py-8">
+      <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900/80 p-6 shadow-xl">
+        <h1 className="text-2xl font-semibold text-white mb-1">Klipprr</h1>
+        <p className="text-sm text-zinc-400 mb-6">
           {isDesktopFlow
             ? "Sign in to link your account with the desktop app."
             : "Sign in to your account."}
@@ -112,19 +112,19 @@ function LoginInner() {
 
         {session ? (
           <>
-            <p className="text-sm text-gray-300 mb-4">
-              Signed in as <strong>{session.user.email}</strong>
+            <p className="text-sm text-zinc-300 mb-4">
+              Signed in as <strong className="text-white">{session.user.email}</strong>
             </p>
             {isDesktopFlow ? (
               <button
                 type="button"
                 onClick={handleContinueToApp}
-                className="w-full rounded-lg bg-yellow-500 py-2.5 text-sm font-semibold text-black hover:brightness-110"
+                className="w-full rounded-full bg-violet-600 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 transition"
               >
                 Continue as {session.user.email} to Klipprr
               </button>
             ) : (
-              <p className="text-sm text-gray-500">You are logged in.</p>
+              <p className="text-sm text-zinc-500">You are logged in.</p>
             )}
             <button
               type="button"
@@ -132,7 +132,7 @@ function LoginInner() {
                 await supabase.auth.signOut();
                 setSession(null);
               }}
-              className="mt-3 w-full text-sm text-gray-400 hover:text-white"
+              className="mt-3 w-full text-sm text-zinc-400 hover:text-white transition"
             >
               Sign out
             </button>
@@ -145,7 +145,7 @@ function LoginInner() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
-                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-yellow-500 focus:outline-none focus:ring-1 focus:ring-yellow-500"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
                 required
                 autoComplete="email"
               />
@@ -154,7 +154,7 @@ function LoginInner() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Password"
-                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-yellow-500 focus:outline-none focus:ring-1 focus:ring-yellow-500"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
                 required
                 autoComplete={mode === "signin" ? "current-password" : "new-password"}
               />
@@ -167,7 +167,7 @@ function LoginInner() {
                 <button
                   type="submit"
                   disabled={authLoading}
-                  className="flex-1 rounded-lg bg-yellow-500 py-2 text-sm font-semibold text-black hover:brightness-110 disabled:opacity-60"
+                  className="flex-1 rounded-full bg-violet-600 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-60 transition"
                 >
                   {authLoading ? "…" : mode === "signin" ? "Sign in" : "Create account"}
                 </button>
@@ -177,7 +177,7 @@ function LoginInner() {
                     setMode((m) => (m === "signin" ? "signup" : "signin"));
                     setError(null);
                   }}
-                  className="rounded-lg border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+                  className="rounded-full border border-zinc-600 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 transition"
                 >
                   {mode === "signin" ? "Sign up" : "Sign in"}
                 </button>
@@ -185,16 +185,16 @@ function LoginInner() {
             </form>
 
             <div className="my-4 flex items-center gap-3">
-              <span className="flex-1 border-t border-gray-700" />
-              <span className="text-xs text-gray-500">or</span>
-              <span className="flex-1 border-t border-gray-700" />
+              <span className="flex-1 border-t border-zinc-700" />
+              <span className="text-xs text-zinc-500">or</span>
+              <span className="flex-1 border-t border-zinc-700" />
             </div>
 
             <button
               type="button"
               onClick={handleGoogleSignIn}
               disabled={authLoading}
-              className="w-full rounded-lg border border-gray-700 bg-gray-900 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-60"
+              className="w-full rounded-full border border-zinc-600 bg-zinc-800/50 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-60 transition"
             >
               Continue with Google
             </button>
