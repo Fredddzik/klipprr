@@ -16,6 +16,10 @@ export const metadata: Metadata = {
   title: "Klipprr — Create viral clips from any video in seconds",
   description:
     "Extract the best moments from YouTube, Twitch, or local videos. Precise trimming and lightning-fast exports for content creators.",
+  icons: {
+    icon: "/logo.png",
+    apple: "/logo.png",
+  },
 };
 
 export default function RootLayout({
