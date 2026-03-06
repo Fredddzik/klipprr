@@ -7,6 +7,8 @@ import type { Session } from "@supabase/supabase-js";
 import type { PostgrestSingleResponse } from "@supabase/supabase-js";
 import type { AuthError } from "@supabase/supabase-js";
 
+const STRIPE_CHECKOUT_API = "/api/stripe/checkout";
+
 function createSupabaseClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -37,6 +39,10 @@ export default function UpgradePage() {
   const [loading, setLoading] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [supabase, setSupabase] = useState<any>(null);
+  const [stripeLoading, setStripeLoading] = useState(false);
+  const [billingPlan, setBillingPlan] = useState<"monthly" | "yearly">("monthly");
+  const successParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("success") : null;
+  const canceledParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("canceled") : null;
 
   useEffect(() => {
     try {
@@ -84,31 +90,40 @@ useEffect(() => {
   }
 }, [supabase, session]);
 
-  // Fetch license when logged in
-  useEffect(() => {
-    if (!supabase) return;
-    if (!session?.user?.id) return;
-
+  // Fetch license when logged in (and after Stripe success)
+  const refreshLicense = () => {
+    if (!supabase || !session?.user?.id) return;
     supabase
       .from("licenses")
       .select("plan, expires_at, active")
       .eq("user_id", session.user.id)
+      .eq("active", true)
       .maybeSingle()
       .then((res: PostgrestSingleResponse<any>) => {
         const data = res.data;
-        if (!data || data.active !== true) {
-          console.log("[Upgrade] No active license in Supabase");
+        if (!data) {
           setLicense(null);
           return;
         }
-
         if (!data.expires_at || new Date(data.expires_at) > new Date()) {
           setLicense({ plan: data.plan, expires_at: data.expires_at });
         } else {
           setLicense(null);
         }
       });
+  };
+
+  useEffect(() => {
+    if (!supabase || !session?.user?.id) return;
+    refreshLicense();
   }, [supabase, session]);
+
+  // After Stripe redirect with ?success=1, refresh license once
+  useEffect(() => {
+    if (successParam === "1" && supabase && session?.user?.id) {
+      refreshLicense();
+    }
+  }, [successParam, supabase, session?.user?.id]);
 
   if (!mounted) {
     return null;
@@ -150,6 +165,37 @@ useEffect(() => {
     setLoading(false);
   }
 };
+
+  const subscribeWithStripe = async () => {
+    if (!session?.access_token) {
+      setStatus("Please log in first.");
+      return;
+    }
+    setStripeLoading(true);
+    setStatus(null);
+    try {
+      const res = await fetch(STRIPE_CHECKOUT_API, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ plan: billingPlan }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setStatus(data.error || "Could not start checkout.");
+        return;
+      }
+      if (data.url) window.location.href = data.url;
+      else setStatus("Missing checkout URL.");
+    } catch (e) {
+      console.error("[Upgrade] Stripe checkout failed:", e);
+      setStatus("Checkout failed. Try again.");
+    } finally {
+      setStripeLoading(false);
+    }
+  };
 
   const redeemCode = async () => {
     if (!supabase) return;
@@ -244,11 +290,63 @@ useEffect(() => {
           </>
         )}
 
+        {successParam === "1" && session && !license && (
+          <p className="mb-4 text-sm text-amber-400">
+            Payment successful. Refreshing your license…
+          </p>
+        )}
+
+        {canceledParam === "1" && (
+          <p className="mb-4 text-sm text-zinc-400">
+            Checkout was canceled. You can subscribe or use an activation code below.
+          </p>
+        )}
+
         {session && !license && (
           <>
             <p className="mb-3 text-sm text-zinc-400">
-              Enter your activation code.
+              Subscribe to Pro with Stripe, or enter an activation code.
             </p>
+            <div className="mb-3 flex overflow-visible rounded-lg border border-zinc-700 bg-zinc-800/80 p-1 pt-3">
+              <button
+                type="button"
+                onClick={() => setBillingPlan("monthly")}
+                className={`flex-1 rounded-md py-2 text-sm font-medium transition ${
+                  billingPlan === "monthly"
+                    ? "bg-violet-600 text-white"
+                    : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                $12 / month
+              </button>
+              <button
+                type="button"
+                onClick={() => setBillingPlan("yearly")}
+                className={`relative flex-1 rounded-md py-2 text-sm font-medium transition ${
+                  billingPlan === "yearly"
+                    ? "bg-violet-600 text-white"
+                    : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                $120 / year
+                <span className="absolute -top-2 right-2 rounded-full bg-emerald-500 px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm">
+                  2 months free
+                </span>
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={subscribeWithStripe}
+              disabled={stripeLoading}
+              className="mb-3 w-full rounded-full bg-violet-600 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-60 transition"
+            >
+              {stripeLoading
+                ? "Redirecting…"
+                : billingPlan === "yearly"
+                  ? "Subscribe to Pro — 2 months free"
+                  : "Subscribe to Pro — Monthly"}
+            </button>
+            <p className="mb-3 text-xs text-zinc-500">Or enter your activation code:</p>
             <input
               type="text"
               placeholder="BETA-CLIP-001"
