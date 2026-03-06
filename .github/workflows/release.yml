@@ -40,8 +40,15 @@ jobs:
         run: |
           cd cliptool && npm ci && npm run build
 
+      - name: Check for Apple signing
+        id: apple
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then echo "enabled=true" >> $GITHUB_OUTPUT; else echo "enabled=false" >> $GITHUB_OUTPUT; fi
+
       - name: Import Apple Developer Certificate
-        if: secrets.APPLE_CERTIFICATE != ''
+        if: steps.apple.outputs.enabled == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
