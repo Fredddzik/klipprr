@@ -47,8 +47,12 @@ export async function POST(req: Request) {
       }
       const status = sub.status;
       const active = status === "active" || status === "trialing";
-      const periodEnd = sub.current_period_end
-        ? new Date(sub.current_period_end * 1000).toISOString()
+      // Period: on newer Stripe API it's on the first item; on older it's on the subscription
+      const firstItem = sub.items?.data?.[0] as { current_period_end?: number } | undefined;
+      const subWithPeriod = sub as Stripe.Subscription & { current_period_end?: number };
+      const periodEndTs = firstItem?.current_period_end ?? subWithPeriod.current_period_end;
+      const periodEnd = periodEndTs
+        ? new Date(periodEndTs * 1000).toISOString()
         : null;
 
       const { data: existing } = await supabase
@@ -97,8 +101,8 @@ export async function POST(req: Request) {
     }
 
     case "invoice.payment_failed": {
-      const invoice = event.data.object as Stripe.Invoice;
-      const subId = invoice.subscription as string | null;
+      const invoice = event.data.object as Stripe.Invoice & { subscription?: string | null };
+      const subId = invoice.subscription ?? null;
       if (!subId) break;
 
       const sub = await stripe.subscriptions.retrieve(subId);
