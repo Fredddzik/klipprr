@@ -1,12 +1,37 @@
 import Image from "next/image";
 import Link from "next/link";
 
+const GITHUB_REPO = "Fredddzik/klipprr";
+const RELEASES_LATEST_URL = `https://github.com/${GITHUB_REPO}/releases/latest`;
+
+async function getLatestRelease(): Promise<{ version: string; dmgUrl: string } | null> {
+  try {
+    const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+      next: { revalidate: 60 },
+      headers: { Accept: "application/vnd.github.v3+json" },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      tag_name?: string;
+      assets?: { name: string; browser_download_url: string }[];
+    };
+    const version = data.tag_name?.replace(/^v/, "") ?? null;
+    const dmg = data.assets?.find((a) => a.name.endsWith(".dmg"));
+    if (!version || !dmg?.browser_download_url) return null;
+    return { version, dmgUrl: dmg.browser_download_url };
+  } catch {
+    return null;
+  }
+}
+
 export const metadata = {
   title: "Download Klipprr — macOS Beta",
   description: "Download the Klipprr desktop app for Mac. Create viral clips from YouTube, Twitch, and local videos.",
 };
 
-export default function DownloadPage() {
+export default async function DownloadPage() {
+  const release = await getLatestRelease();
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <header className="border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
@@ -33,16 +58,37 @@ export default function DownloadPage() {
         <p className="mt-4 text-lg text-zinc-400">
           macOS beta. Apple Silicon (M1/M2/M3) supported.
         </p>
-        <a
-          href="https://github.com/Fredddzik/klipprr/releases/latest"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-8 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 px-8 py-4 text-base font-semibold text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-fuchsia-500 transition"
-        >
-          Download from GitHub Releases
-        </a>
+        {release ? (
+          <>
+            <a
+              href={release.dmgUrl}
+              className="mt-8 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 px-8 py-4 text-base font-semibold text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-fuchsia-500 transition"
+            >
+              Download Klipprr v{release.version} (.dmg)
+            </a>
+            <p className="mt-4 text-sm text-zinc-500">
+              <a
+                href={RELEASES_LATEST_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-violet-400 hover:text-violet-300"
+              >
+                View all assets on GitHub →
+              </a>
+            </p>
+          </>
+        ) : (
+          <a
+            href={RELEASES_LATEST_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-8 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 px-8 py-4 text-base font-semibold text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-fuchsia-500 transition"
+          >
+            Download from GitHub Releases
+          </a>
+        )}
         <p className="mt-6 text-sm text-zinc-500">
-          You’ll get the latest release. Open the .dmg, drag Klipprr to Applications, then launch the app.
+          Open the .dmg, drag Klipprr to Applications, then launch the app.
           Existing installs can use <strong>Check for updates</strong> inside the app.
         </p>
         <Link
