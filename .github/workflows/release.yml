@@ -1,6 +1,9 @@
 # Build ClipAgent (signed + notarized on macOS), create GitHub Release, upload updater artifacts.
 # Trigger: push a version tag, e.g.  git tag v0.1.0 && git push origin v0.1.0
 #
+# Required repo variables (Settings → Secrets and variables → Actions → Variables):
+#   NEXT_PUBLIC_SUPABASE_URL      - Supabase project URL (for frontend build)
+#   NEXT_PUBLIC_SUPABASE_ANON_KEY - Supabase anon key (for frontend build)
 # Required secrets:
 #   TAURI_SIGNING_PRIVATE_KEY  - contents of ~/.tauri/clipagent.key (updater signature)
 #   APPLE_CERTIFICATE          - base64 of Developer ID Application .p12
@@ -37,6 +40,9 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Build frontend
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
         run: |
           cd cliptool && npm ci && npm run build
 
