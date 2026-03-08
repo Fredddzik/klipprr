@@ -102,6 +102,7 @@ jobs:
           projectPath: clipagent
           tagName: v__VERSION__
           releaseName: 'Klipprr v__VERSION__'
-          releaseBody: 'macOS beta. Download the .dmg or .app.tar.gz below.'
+          releaseBody: 'macOS beta. Download the .app or .app.tar.gz below.'
           releaseDraft: false
-          args: '--target aarch64-apple-darwin'
+          # --bundles app: skip DMG (bundle_dmg.sh often fails in CI); .app is signed/notarized and uploaded
+          args: '--target aarch64-apple-darwin --bundles app'
