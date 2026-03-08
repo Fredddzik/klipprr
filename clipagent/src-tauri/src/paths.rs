@@ -29,17 +29,14 @@ pub fn running_from_sandboxed_app() -> bool {
 
 /// Browser name for yt-dlp --cookies-from-browser (avoids YouTube "Sign in to confirm you're not a bot").
 /// Not used when running_from_sandboxed_app() is true, because the app cannot read browser cookie stores.
-#[cfg(target_os = "macos")]
 pub fn yt_dlp_cookies_browser() -> &'static str {
-    "safari"
-}
-#[cfg(target_os = "windows")]
-pub fn yt_dlp_cookies_browser() -> &'static str {
-    "chrome"
-}
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn yt_dlp_cookies_browser() -> &'static str {
-    "firefox"
+    if cfg!(target_os = "macos") {
+        "safari"
+    } else if cfg!(target_os = "windows") {
+        "chrome"
+    } else {
+        "firefox"
+    }
 }
 
 fn resolve_binary_path(binary: &str) -> PathBuf {
