@@ -20,6 +20,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.0). Must match tauri.conf.json. Ignored on tag push."
+        required: false
 
 jobs:
   release:
@@ -71,6 +76,18 @@ jobs:
           CERT_ID=$(echo "$CERT_INFO" | awk -F'"' '{print $2}')
           echo "CERT_ID=$CERT_ID" >> $GITHUB_ENV
           echo "Using signing identity: $CERT_ID"
+
+      - name: Sign resource binaries (for notarization)
+        if: steps.apple.outputs.enabled == 'true'
+        run: |
+          BIN_DIR="clipagent/src-tauri/bin"
+          for name in ffmpeg ffprobe yt-dlp; do
+            path="$BIN_DIR/$name"
+            if [ -f "$path" ]; then
+              echo "Signing $path"
+              codesign --force --options runtime --timestamp -s "$CERT_ID" -- "$path"
+            fi
+          done
 
       - name: Tauri build and release
         uses: tauri-apps/tauri-action@action-v0.6.1

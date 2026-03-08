@@ -100,6 +100,7 @@ pub fn save_supabase_session(app: &AppHandle, session: &SupabaseSession) -> Resu
 }
 
 /// Clear Supabase session from disk (e.g. on logout).
+#[allow(dead_code)]
 pub fn clear_supabase_session(app: &AppHandle) -> Result<(), String> {
     let dir = app_data_dir(app)?;
     let path = dir.join(SUPABASE_SESSION_FILE);

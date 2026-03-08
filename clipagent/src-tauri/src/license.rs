@@ -67,6 +67,7 @@ fn is_expired(exp: Option<u64>) -> bool {
 
 // ---------- Core logic ----------
 
+#[allow(dead_code)]
 pub fn effective_plan(app: &AppHandle) -> Plan {
     match storage::load_license(app) {
         Some(token) => match verify_license(&token) {
