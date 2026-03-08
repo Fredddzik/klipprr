@@ -18,6 +18,30 @@ pub fn ffprobe_path() -> PathBuf {
     resolve_binary_path("ffprobe")
 }
 
+/// True when running from a sandboxed .app bundle. In that case we cannot read browser cookies (macOS blocks access).
+pub fn running_from_sandboxed_app() -> bool {
+    if let Ok(exe) = env::current_exe() {
+        let path = exe.to_string_lossy();
+        return path.contains(".app/Contents/");
+    }
+    false
+}
+
+/// Browser name for yt-dlp --cookies-from-browser (avoids YouTube "Sign in to confirm you're not a bot").
+/// Not used when running_from_sandboxed_app() is true, because the app cannot read browser cookie stores.
+#[cfg(target_os = "macos")]
+pub fn yt_dlp_cookies_browser() -> &'static str {
+    "safari"
+}
+#[cfg(target_os = "windows")]
+pub fn yt_dlp_cookies_browser() -> &'static str {
+    "chrome"
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn yt_dlp_cookies_browser() -> &'static str {
+    "firefox"
+}
+
 fn resolve_binary_path(binary: &str) -> PathBuf {
     // 1. Always try resolving relative to the currently running executable.
     // This works for both:
