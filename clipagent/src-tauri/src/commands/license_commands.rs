@@ -74,8 +74,9 @@ pub fn activate_license(app: AppHandle, token: LicenseToken) -> Result<(), Strin
 
 #[tauri::command]
 pub fn clear_license_cmd(app: AppHandle) -> Result<(), String> {
-    println!("[License] Clearing local license (server says inactive)");
-    append_file_log("[License] Clearing local license (server says inactive)");
+    println!("[License] Clearing local license and session (logout or inactive)");
+    append_file_log("[License] Clearing local license and session");
+    let _ = storage::clear_supabase_session(&app);
     let res = core_clear_license(&app);
     println!("[License] Clear license result: {:?}", res);
     append_file_log(&format!("[License] Clear license result: {:?}", res));

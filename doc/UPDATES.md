@@ -19,7 +19,8 @@ Before shipping the first public beta:
 1. **Tauri updater keys** — Generate once (section 1), put public key in `tauri.conf.json`, add `TAURI_SIGNING_PRIVATE_KEY` to GitHub Actions secrets.
 2. **Apple signing + notarization** — Add the GitHub secrets below so the workflow produces a signed, notarized build. Without them, the workflow still runs but the build will be unsigned (Gatekeeper may block).
 3. **GitHub Actions secrets** (Settings → Secrets and variables → Actions):
-   - `TAURI_SIGNING_PRIVATE_KEY` — contents of `~/.tauri/clipagent.key`
+   - `TAURI_SIGNING_PRIVATE_KEY` — **base64** of the full key file when in CI (see section 1); e.g. `base64 -i ~/.tauri/clipagent.key | tr -d '\n'`
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — only if the key was generated with a password (Option A in section 1)
    - `APPLE_CERTIFICATE` — base64 of your Developer ID Application .p12 (see section 5)
    - `APPLE_CERTIFICATE_PASSWORD` — password for the .p12
    - `KEYCHAIN_PASSWORD` — any strong password for the temporary CI keychain
@@ -53,6 +54,16 @@ This creates:
 - **Public key:** printed in the terminal or in a `.pub` file — you’ll put this in config in the next step.
 
 Copy the **entire** public key string (starts with something like `dW50cnVzdGVk...`).
+
+**CI / GitHub Actions:** The Tauri CLI does **not** support unencrypted keys (no `-W`). Two options:
+
+- **Option A — Key with password:** Generate with a non-empty password:  
+  `cargo tauri signer generate -w ~/.tauri/clipagent.key -p "YourSecurePassword"`  
+  Add GitHub secret `TAURI_SIGNING_PRIVATE_KEY`: use **base64** of the key file (`base64 -i ~/.tauri/clipagent.key | tr -d '\n'`). Add `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (the same password). The release workflow passes both to the Tauri build.
+- **Option B — Unencrypted key:** Install [rsign2](https://github.com/jedisct1/rsign2) (`cargo install rsign2`; the binary is **`rsign`**), then:  
+  `rsign generate -W -s ~/.tauri/clipagent.key -p ~/.tauri/clipagent.key.pub`  
+  **Public key:** use the **base64** of the whole `.pub` file (both lines): `base64 -i ~/.tauri/clipagent.key.pub | tr -d '\n'` → put that string in `tauri.conf.json` → `plugins.updater.pubkey`.  
+  **Private key:** when using a secret (CI), Tauri expects the key **base64-encoded** (raw file contents have spaces/newlines and break decoding). Run `base64 -i ~/.tauri/clipagent.key | tr -d '\n'` and put that single string in GitHub secret `TAURI_SIGNING_PRIVATE_KEY`. Do **not** set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
 ---
 
@@ -106,7 +117,7 @@ So that **GitHub** can build and release signed updates:
    - Repo → **Settings** → **Secrets and variables** → **Actions**.
    - **New repository secret**
    - Name: `TAURI_SIGNING_PRIVATE_KEY`
-   - Value: **entire contents** of `~/.tauri/clipagent.key` (paste the whole string).
+   - Value: **base64** of the key file so CI decoding works: run `base64 -i ~/.tauri/clipagent.key | tr -d '\n'` and paste that single line (no newlines).
 
 2. **Add a workflow that builds and publishes a release**
 

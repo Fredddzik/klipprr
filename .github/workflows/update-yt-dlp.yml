@@ -1,0 +1,102 @@
+# When yt-dlp releases a new version: update the bundled binary, bump app version, and push a tag
+# so the Release workflow runs and publishes a Tauri update to users.
+#
+# Trigger: daily schedule (noon UTC) or manual "Run workflow".
+# Requires: default branch is main; GITHUB_TOKEN has contents: write (default in repo).
+
+name: Update yt-dlp
+
+on:
+  schedule:
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main
+
+      - name: Get latest yt-dlp release
+        id: ytdlp
+        run: |
+          API="https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
+          TAG=$(curl -sL "$API" | jq -r '.tag_name')
+          URL=$(curl -sL "$API" | jq -r '.assets[] | select(.name == "yt-dlp_macos") | .browser_download_url')
+          echo "tag_name=$TAG" >> $GITHUB_OUTPUT
+          echo "download_url=$URL" >> $GITHUB_OUTPUT
+          echo "Latest yt-dlp: $TAG"
+
+      - name: Skip if no new version
+        id: skip
+        run: |
+          LATEST="${{ steps.ytdlp.outputs.tag_name }}"
+          VERSION_FILE="clipagent/src-tauri/bin/yt-dlp.version"
+          CURRENT=""
+          if [ -f "$VERSION_FILE" ]; then
+            CURRENT=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+          fi
+          # Skip when we already have this version or something newer (version sort: YYYY.MM.DD)
+          if [ -n "$CURRENT" ]; then
+            NEWER=$(printf '%s\n' "$CURRENT" "$LATEST" | sort -V | tail -n1)
+            if [ "$NEWER" = "$CURRENT" ]; then
+              echo "Current ($CURRENT) is up to date or newer than latest ($LATEST), skipping"
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Download and replace yt-dlp
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          URL="${{ steps.ytdlp.outputs.download_url }}"
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "Could not get yt-dlp_macos download URL"
+            exit 1
+          fi
+          mkdir -p clipagent/src-tauri/bin
+          curl -sL -o clipagent/src-tauri/bin/yt-dlp "$URL"
+          chmod +x clipagent/src-tauri/bin/yt-dlp
+          echo "${{ steps.ytdlp.outputs.tag_name }}" > clipagent/src-tauri/bin/yt-dlp.version
+          ./clipagent/src-tauri/bin/yt-dlp --version || true
+
+      - name: Bump app version (patch)
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          cd clipagent/src-tauri
+          # tauri.conf.json
+          VER=$(jq -r '.version' tauri.conf.json)
+          MAJOR=$(echo "$VER" | cut -d. -f1)
+          MINOR=$(echo "$VER" | cut -d. -f2)
+          PATCH=$(echo "$VER" | cut -d. -f3)
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VER="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          jq --arg v "$NEW_VER" '.version = $v' tauri.conf.json > tauri.conf.json.tmp && mv tauri.conf.json.tmp tauri.conf.json
+          # Cargo.toml
+          sed -i '' "s/^version = \".*\"$/version = \"$NEW_VER\"/" Cargo.toml
+          echo "NEW_VERSION=$NEW_VER" >> $GITHUB_ENV
+          echo "Bumped to $NEW_VER"
+
+      - name: Commit and push
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add clipagent/src-tauri/bin/yt-dlp clipagent/src-tauri/bin/yt-dlp.version \
+            clipagent/src-tauri/tauri.conf.json clipagent/src-tauri/Cargo.toml
+          git diff --staged --quiet && exit 0 || true
+          git commit -m "chore: update yt-dlp to ${{ steps.ytdlp.outputs.tag_name }} [skip ci]"
+          git push origin main
+
+      - name: Create and push tag
+        if: steps.skip.outputs.skip != 'true'
+        run: |
+          git tag "v${{ env.NEW_VERSION }}"
+          git push origin "v${{ env.NEW_VERSION }}"

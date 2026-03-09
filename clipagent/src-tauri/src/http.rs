@@ -3,6 +3,7 @@ use hyper::body::to_bytes;
 use hyper::{Method, Request};
 use tauri::AppHandle;
 use crate::commands::download;
+use urlencoding::decode as url_decode;
 
 pub fn with_cors(mut res: Response<Body>) -> Response<Body> {
     let headers = res.headers_mut();
@@ -52,6 +53,70 @@ pub async fn handle_http(
         let body = serde_json::to_string(&caps)
             .unwrap_or_else(|_| "{}".to_string());
         return Ok(json_response(200, body));
+    }
+
+    // Proxy remote preview URLs so the video element can load them (avoids CORS; fixes Instagram/X audio and TikTok black screen)
+    if method == Method::GET && path == "/preview-stream" {
+        let query = req.uri().query().unwrap_or("");
+        let mut raw_url: Option<String> = None;
+        for part in query.split('&') {
+            let mut it = part.splitn(2, '=');
+            if it.next() == Some("url") {
+                raw_url = it.next().map(|s| s.to_string());
+                break;
+            }
+        }
+        let encoded = match raw_url {
+            Some(u) if !u.is_empty() => u,
+            _ => return Ok(json_response(400, "{\"error\":\"missing_url\"}".to_string())),
+        };
+        let decoded = match url_decode(&encoded) {
+            Ok(u) => u.into_owned(),
+            Err(_) => return Ok(text_response(400, "bad_url_encoding")),
+        };
+        if !decoded.starts_with("https://") && !decoded.starts_with("http://") {
+            return Ok(text_response(400, "url_must_be_http_or_https"));
+        }
+        let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .build();
+        let client = match client {
+            Ok(c) => c,
+            Err(_) => return Ok(text_response(500, "client_build")),
+        };
+        let mut proxy_req = client.get(&decoded);
+        if decoded.contains("youtube.com") || decoded.contains("youtu.be") {
+            proxy_req = proxy_req.header("Referer", "https://www.youtube.com/");
+        }
+        let upstream = match proxy_req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!(r#"{{"error":"proxy_fetch","details":"{}"}}"#, e.to_string().replace('"', "\\\""));
+                return Ok(json_response(502, msg));
+            }
+        };
+        if !upstream.status().is_success() {
+            return Ok(text_response(502, "upstream_error"));
+        }
+        let content_type = upstream
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("video/mp4")
+            .to_string();
+        let content_length = upstream.headers().get("content-length").cloned();
+        // Stream the body so the video can start playing as bytes arrive (no ~1 min wait for full download)
+        let body = Body::wrap_stream(upstream.bytes_stream());
+        let mut res = Response::new(body);
+        *res.status_mut() = StatusCode::OK;
+        res.headers_mut()
+            .insert("Content-Type", content_type.parse().unwrap());
+        if let Some(clen) = content_length {
+            res.headers_mut().insert("Content-Length", clen);
+        }
+        res.headers_mut()
+            .insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+        return Ok(res);
     }
 
     if method == Method::GET && path == "/resolve" {

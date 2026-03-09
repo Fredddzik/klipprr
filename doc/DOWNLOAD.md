@@ -14,7 +14,7 @@ So that builds are signed and notarized (macOS won’t block them):
   - Put the **public** key in `clipagent/src-tauri/tauri.conf.json` under `plugins.updater.pubkey`.  
   - Add the **private** key as a GitHub Actions secret:  
     **Settings → Secrets and variables → Actions → New repository secret**  
-    Name: `TAURI_SIGNING_PRIVATE_KEY`, Value: contents of `~/.tauri/clipagent.key`.
+    Name: `TAURI_SIGNING_PRIVATE_KEY`, Value: base64 of key file (`base64 -i ~/.tauri/clipagent.key | tr -d '\n'`).
 
 - **Apple signing + notarization** (optional but recommended)  
   Add these repository secrets (see **doc/UPDATES.md** for details):  
