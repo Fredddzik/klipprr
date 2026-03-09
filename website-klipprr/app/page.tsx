@@ -51,14 +51,12 @@ export default function Home() {
             lightning-fast exports — no AI, just you in control.
           </p>
           <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
-            <a
-              href="https://github.com/Fredddzik/klipprr/releases/latest"
-              target="_blank"
-              rel="noopener noreferrer"
+            <Link
+              href="/download"
               className="rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-fuchsia-500 transition"
             >
               Download for Mac
-            </a>
+            </Link>
             <Link
               href="/login"
               className="rounded-full border border-zinc-600 bg-zinc-900/50 px-6 py-3 text-sm font-medium text-white hover:border-zinc-500 hover:bg-zinc-800/50 transition"

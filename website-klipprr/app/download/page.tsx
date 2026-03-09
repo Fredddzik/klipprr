@@ -2,9 +2,12 @@ import Image from "next/image";
 import Link from "next/link";
 
 const GITHUB_REPO = "Fredddzik/klipprr";
-const RELEASES_LATEST_URL = `https://github.com/${GITHUB_REPO}/releases/latest`;
 
-async function getLatestRelease(): Promise<{ version: string; downloadUrl: string; downloadLabel: string } | null> {
+async function getLatestRelease(): Promise<{
+  version: string;
+  macUrl: string | null;
+  macLabel: string;
+} | null> {
   try {
     const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
       next: { revalidate: 60 },
@@ -21,20 +24,22 @@ async function getLatestRelease(): Promise<{ version: string; downloadUrl: strin
     const appTarGz = assets.find((a) => a.name.endsWith(".app.tar.gz"));
     const macAsset = dmg ?? appTarGz;
     if (!version || !macAsset?.browser_download_url) return null;
-    const label = dmg ? ".dmg" : ".app.tar.gz";
-    return { version, downloadUrl: macAsset.browser_download_url, downloadLabel: label };
+    const macLabel = dmg ? ".dmg" : ".app.tar.gz";
+    return { version, macUrl: macAsset.browser_download_url, macLabel };
   } catch {
     return null;
   }
 }
 
 export const metadata = {
-  title: "Download Klipprr — macOS Beta",
-  description: "Download the Klipprr desktop app for Mac. Create viral clips from YouTube, Twitch, and local videos.",
+  title: "Download Klipprr — Mac, Windows, Linux",
+  description:
+    "Download the Klipprr desktop app. Create viral clips from YouTube, Twitch, and local videos.",
 };
 
 export default async function DownloadPage() {
   const release = await getLatestRelease();
+  const macDirectUrl = process.env.NEXT_PUBLIC_MAC_DOWNLOAD_URL ?? null;
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -55,51 +60,61 @@ export default async function DownloadPage() {
         </nav>
       </header>
 
-      <main className="mx-auto max-w-2xl px-6 py-24 text-center">
-        <h1 className="text-3xl font-bold text-white sm:text-4xl">
-          Download Klipprr for Mac
+      <main className="mx-auto max-w-2xl px-6 py-16">
+        <h1 className="text-3xl font-bold text-white sm:text-4xl text-center">
+          Download Klipprr
         </h1>
-        <p className="mt-4 text-lg text-zinc-400">
-          macOS beta. Apple Silicon (M1/M2/M3) supported.
+        <p className="mt-2 text-lg text-zinc-400 text-center">
+          Pick your platform below.
         </p>
-        {release ? (
-          <>
-            <a
-              href={release.downloadUrl}
-              className="mt-8 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 px-8 py-4 text-base font-semibold text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-fuchsia-500 transition"
-            >
-              Download Klipprr v{release.version} ({release.downloadLabel})
-            </a>
-            <p className="mt-4 text-sm text-zinc-500">
-              <a
-                href={RELEASES_LATEST_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-violet-400 hover:text-violet-300"
-              >
-                View all assets on GitHub →
-              </a>
+
+        <div className="mt-12 space-y-8">
+          {/* Mac */}
+          <section className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6">
+            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+              <span className="text-2xl">🍎</span> macOS (Apple Silicon)
+            </h2>
+            <p className="mt-1 text-sm text-zinc-400">
+              M1/M2/M3. Extract the .app and drag to Applications, or open the .dmg.
             </p>
-          </>
-        ) : (
-          <a
-            href={RELEASES_LATEST_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mt-8 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 px-8 py-4 text-base font-semibold text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-fuchsia-500 transition"
-          >
-            Download from GitHub Releases
-          </a>
-        )}
-        <p className="mt-6 text-sm text-zinc-500">
-          {release?.downloadLabel === ".app.tar.gz"
-            ? "Extract the .app and drag it to Applications, then launch."
-            : "Open the .dmg, drag Klipprr to Applications, then launch the app."}
+            {(release?.macUrl ?? macDirectUrl) ? (
+              <a
+                href={(release?.macUrl ?? macDirectUrl)!}
+                className="mt-4 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-fuchsia-500 transition"
+              >
+                Download Klipprr
+                {release ? ` v${release.version} (${release.macLabel})` : ""}
+              </a>
+            ) : (
+              <p className="mt-4 text-sm text-zinc-500">
+                Releases are not publicly available. Build from source or request access.
+              </p>
+            )}
+          </section>
+
+          {/* Windows */}
+          <section className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 opacity-80">
+            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+              <span className="text-2xl">🪟</span> Windows
+            </h2>
+            <p className="mt-1 text-sm text-zinc-400">Coming soon.</p>
+          </section>
+
+          {/* Linux */}
+          <section className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 opacity-80">
+            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+              <span className="text-2xl">🐧</span> Linux
+            </h2>
+            <p className="mt-1 text-sm text-zinc-400">Coming soon.</p>
+          </section>
+        </div>
+
+        <p className="mt-8 text-sm text-zinc-500 text-center">
           Existing installs can use <strong>Check for updates</strong> inside the app.
         </p>
         <Link
           href="/"
-          className="mt-8 inline-block text-sm text-violet-400 hover:text-violet-300 transition"
+          className="mt-6 inline-block text-sm text-violet-400 hover:text-violet-300 transition"
         >
           ← Back to home
         </Link>
