@@ -119,7 +119,7 @@ jobs:
           args: '--target aarch64-apple-darwin --bundles app,dmg'
 
       - name: Mirror release to public repo (optional)
-        if: vars.RELEASES_PUBLIC_REPO != '' && secrets.RELEASES_PUBLIC_REPO_TOKEN != ''
+        if: vars.RELEASES_PUBLIC_REPO != ''
         env:
           GH_TOKEN: ${{ secrets.RELEASES_PUBLIC_REPO_TOKEN }}
           PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
