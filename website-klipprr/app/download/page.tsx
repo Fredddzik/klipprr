@@ -1,7 +1,8 @@
 import Image from "next/image";
 import Link from "next/link";
 
-const GITHUB_REPO = "Fredddzik/klipprr";
+const GITHUB_REPO =
+  (typeof process !== "undefined" && process.env.NEXT_PUBLIC_RELEASES_REPO) || "Fredddzik/klipprr";
 
 async function getLatestRelease(): Promise<{
   version: string;
@@ -75,7 +76,7 @@ export default async function DownloadPage() {
               <span className="text-2xl">🍎</span> macOS (Apple Silicon)
             </h2>
             <p className="mt-1 text-sm text-zinc-400">
-              M1/M2/M3. Extract the .app and drag to Applications, or open the .dmg.
+              M1/M2/M3. Open the .dmg and drag Klipprr to Applications (or use the .app.tar.gz and extract the .app).
             </p>
             {(release?.macUrl ?? macDirectUrl) ? (
               <a
