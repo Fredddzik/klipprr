@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect, useState, useRef } from "react";
 import { downloadAll, type AgentResult } from "../lib/clipagent";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 
 interface Clip {
   id: string;
@@ -63,6 +65,9 @@ interface ExportPanelProps {
   onUpgradeRequested?: () => void;
 
   onBeforeExport?: () => Promise<boolean>;
+
+  /** Called when export finishes successfully (count, exportDir). Replaces alert. */
+  onExportComplete?: (count: number, exportDir: string) => void;
 }
 
 function fmtRes(h: number) {
@@ -106,8 +111,62 @@ export default function ExportPanel({
   onExportPathChosen,
   onUpgradeRequested,
   onBeforeExport,
+  onExportComplete,
 }: ExportPanelProps) {
   const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI__;
+  const [exportProgress, setExportProgress] = useState<{
+    clipIndex: number;
+    totalClips: number;
+    clipsCompleted: number;
+  } | null>(null);
+  const [connectionLost, setConnectionLost] = useState(false);
+  const exportInProgressRef = useRef(false);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    const unlistenProgress = listen<{ clipIndex?: number; totalClips?: number; phase?: string }>(
+      "export-progress",
+      (event) => {
+        const p = event.payload;
+        const total = p?.totalClips != null ? Number(p.totalClips) : 0;
+        if (total > 0) {
+          setExportProgress((prev) => ({
+            clipIndex: typeof p?.clipIndex === "number" ? p.clipIndex : 0,
+            totalClips: total,
+            clipsCompleted: prev?.clipsCompleted ?? 0,
+          }));
+        }
+      }
+    );
+    const unlistenDone = listen<{ clip_name?: string }>("export-clip-done", () => {
+      setExportProgress((prev) =>
+        prev && prev.totalClips > 0
+          ? { ...prev, clipsCompleted: Math.min(prev.clipsCompleted + 1, prev.totalClips) }
+          : prev
+      );
+    });
+    const unlistenAllDone = listen<{ export_dir?: string; totalClips?: number }>(
+      "export-all-done",
+      () => {
+        if ((window as any).__exportSafetyTimeout != null) {
+          window.clearTimeout((window as any).__exportSafetyTimeout);
+          (window as any).__exportSafetyTimeout = null;
+        }
+        if (exportInProgressRef.current) {
+          exportInProgressRef.current = false;
+          setConnectionLost(false);
+          setIsExporting(false);
+          setExportProgress(null);
+        }
+      }
+    );
+    return () => {
+      unlistenProgress.then((fn) => fn());
+      unlistenDone.then((fn) => fn());
+      unlistenAllDone.then((fn) => fn());
+    };
+  }, [isTauri]);
+
   const displayPath =
     (exportPath && exportPath.trim()) ? exportPath : (defaultExportDir || "~/Downloads");
 
@@ -153,39 +212,76 @@ export default function ExportPanel({
       if (!ok) return;
     }
 
+    exportInProgressRef.current = true;
+    setConnectionLost(false);
     setIsExporting(true);
+    setExportProgress(null);
 
-    const result = await downloadAll({
-      url: localFilePath ? "" : videoUrl.trim(),
-      local_path: localFilePath ?? undefined,
-      clips: chosen,
-      mode: exportHQ ? "quality" : "speed",
-      fast_max_height: exportHQ ? null : fastCap,
-      keep_full: keepWholeVideo,
-      preview_url: videoData?.preview?.url ?? null,
-      video_id: videoData?.id ?? null,
-      export_path: sanitizeExportPath(exportPath),
-      has_watermark: !canEditExportPath,
-      codec: exportCodec,
-    });
+    try {
+      const result = await downloadAll({
+        url: localFilePath ? "" : videoUrl.trim(),
+        local_path: localFilePath ?? undefined,
+        clips: chosen,
+        mode: exportHQ ? "quality" : "speed",
+        fast_max_height: exportHQ ? null : fastCap,
+        keep_full: keepWholeVideo,
+        preview_url: videoData?.preview?.url ?? null,
+        video_id: videoData?.id ?? null,
+        export_path: sanitizeExportPath(exportPath),
+        has_watermark: !canEditExportPath,
+        codec: exportCodec,
+      });
 
-    setIsExporting(false);
+      if (!result.ok) {
+        exportInProgressRef.current = false;
+        setIsExporting(false);
+        setExportProgress(null);
+        alert("Export failed: " + result.error);
+        return;
+      }
 
-    if (!result.ok) {
-      alert("Export failed: " + result.error);
-      return;
+      const count = result.data?.results?.filter((r: any) => r?.ok).length ?? chosen.length;
+      const exportDir = result.data?.export_dir ?? "";
+      if (onExportComplete && exportDir) {
+        onExportComplete(count, exportDir);
+      } else {
+        alert(selectedOnly ? "Export successful!" : "All clips exported!");
+      }
+      // Fallback: clear loading if export-all-done never fires (e.g. old backend)
+      setTimeout(() => {
+        if (exportInProgressRef.current) {
+          exportInProgressRef.current = false;
+          setConnectionLost(false);
+          setIsExporting(false);
+          setExportProgress(null);
+        }
+      }, 2000);
+    } catch (e) {
+      // Do NOT clear loading here. The HTTP connection may have timed out or dropped
+      // while the backend is still exporting (long clips). We only clear when we
+      // receive export-all-done.
+      console.error("Export request failed (connection may have timed out):", e);
+      setConnectionLost(true);
+      const safetyTimeout = window.setTimeout(() => {
+        if (exportInProgressRef.current) {
+          exportInProgressRef.current = false;
+          setConnectionLost(false);
+          setIsExporting(false);
+          setExportProgress(null);
+          alert("Export may have failed. The connection was lost and no completion was received.");
+        }
+      }, 15 * 60 * 1000); // 15 minutes
+      (window as any).__exportSafetyTimeout = safetyTimeout;
     }
-
-    alert(selectedOnly ? "Export successful!" : "All clips exported!");
   }
 
   return (
-    <div className="bg-gray-900 p-4 rounded border border-gray-700 space-y-4">
+    <div className="space-y-4">
       {/* CAPABILITIES */}
-      <div className="text-xs text-gray-300/80 space-y-1">
+      <div className="text-xs text-zinc-600 dark:text-gray-300/80 space-y-1">
         <div>
-          Fast max: <span className="text-white">{fmtRes(fastMax)}</span>{" "}
-          • Max possible: <span className="text-white">{fmtRes(trueMax)}</span>
+          Fast max: <span className="text-zinc-900 dark:text-white">{fmtRes(fastMax)}</span>{" "}
+          • Max possible: <span className="text-zinc-900 dark:text-white">{fmtRes(trueMax)}</span>
         </div>
 
         {fastMax > 0 && trueMax > 0 && fastMax < trueMax && (
@@ -207,7 +303,7 @@ export default function ExportPanel({
       {/* QUALITY TOGGLE */}
       {(!fastReachesMax || showAdvancedExport) && (
         <label className="flex items-center gap-2 text-sm">
-          <span className={!exportHQ ? "text-white" : "text-gray-400"}>
+          <span className={!exportHQ ? "text-zinc-900 dark:text-white" : "text-zinc-500 dark:text-gray-400"}>
             Fast
           </span>
 
@@ -225,7 +321,7 @@ export default function ExportPanel({
             />
           </button>
 
-          <span className={exportHQ ? "text-white" : "text-gray-400"}>
+          <span className={exportHQ ? "text-zinc-900 dark:text-white" : "text-zinc-500 dark:text-gray-400"}>
             Quality
           </span>
         </label>
@@ -238,22 +334,22 @@ export default function ExportPanel({
           <button
             type="button"
             onClick={() => setExportCodec("universal")}
-            className={`flex-1 py-1 rounded text-sm ${
+            className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
               exportCodec === "universal"
-                ? "bg-blue-600 text-white"
-                : "bg-gray-800 border border-gray-700"
+                ? "btn-brand text-white"
+                : "bg-zinc-200 border border-zinc-300 text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-700"
             }`}
           >
-            MP4 – Universal
+            H.264 – Universal
           </button>
 
           <button
             type="button"
             onClick={() => setExportCodec("original")}
-            className={`flex-1 py-1 rounded text-sm ${
+            className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
               exportCodec === "original"
-                ? "bg-blue-600 text-white"
-                : "bg-gray-800 border border-gray-700"
+                ? "btn-brand text-white"
+                : "bg-zinc-200 border border-zinc-300 text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-700"
             }`}
           >
             AV1 – Original
@@ -268,14 +364,16 @@ export default function ExportPanel({
       </div>
 
       {!exportHQ && fastMax > 0 && (
-        <select
-          value={fastCap ?? "auto"}
-          onChange={(e) =>
-            setFastCap(e.target.value === "auto" ? null : Number(e.target.value))
-          }
-          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm"
-        >
-          <option value="auto">Auto (up to {fmtRes(fastMax)})</option>
+        <div className="space-y-1">
+          <label className="text-xs text-zinc-400">Resolution</label>
+          <select
+            value={fastCap ?? "auto"}
+            onChange={(e) =>
+              setFastCap(e.target.value === "auto" ? null : Number(e.target.value))
+            }
+            className="w-full rounded-lg bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-white text-sm px-3 py-2 focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none cursor-pointer"
+          >
+            <option value="auto">Auto (up to {fmtRes(fastMax)})</option>
           {[2160, 1440, 1080, 720, 480, 360]
             .filter((h) => h <= fastMax)
             .map((h) => (
@@ -283,7 +381,8 @@ export default function ExportPanel({
                 {h}p
               </option>
             ))}
-        </select>
+          </select>
+        </div>
       )}
 
       {fastReachesMax && !showAdvancedExport && (
@@ -307,19 +406,60 @@ export default function ExportPanel({
         </label>
       )}
 
+      {isExporting && (
+        <div className="rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-900/80 p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="inline-block w-5 h-5 border-2 border-violet-500 dark:border-violet-400 border-t-transparent rounded-full animate-spin" />
+            <span className="text-sm text-zinc-900 dark:text-white">
+              {exportProgress
+                ? exportProgress.clipsCompleted < exportProgress.totalClips
+                  ? `Exporting clip ${exportProgress.clipIndex + 1} of ${exportProgress.totalClips}…`
+                  : `Finishing…`
+                : "Preparing export…"}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+            {/* Real progress when we have events; otherwise indeterminate so bar always moves */}
+            {exportProgress && exportProgress.totalClips > 0 && exportProgress.clipsCompleted >= exportProgress.totalClips ? (
+              <div
+                className="h-full bg-violet-500 transition-all duration-300"
+                style={{
+                  width: `${Math.round(
+                    (exportProgress.clipsCompleted / exportProgress.totalClips) * 100
+                  )}%`,
+                }}
+              />
+            ) : (
+              <div
+                className="h-full bg-violet-500 animate-export-bar"
+                style={{ width: "0%" }}
+              />
+            )}
+          </div>
+          {connectionLost && (
+            <p className="text-xs text-amber-400">
+              Connection lost — export may still be running. You’ll see a notification when it finishes.
+            </p>
+          )}
+          <p className="text-xs text-zinc-400">
+            Long clips may take several minutes. Don’t close the app.
+          </p>
+        </div>
+      )}
+
       <div className="space-y-1 relative group">
-        <label className="text-xs text-gray-400">Export folder</label>
+        <label className="text-xs text-zinc-500 dark:text-gray-400">Export folder</label>
 
         <div
           className={`flex gap-2 items-center rounded border min-w-0 max-w-full
             ${canEditExportPath
-              ? "bg-gray-800 border-gray-700"
-              : "bg-gray-900 border-gray-800"
+              ? "bg-zinc-200 border-zinc-300 dark:bg-gray-800 dark:border-gray-700"
+              : "bg-zinc-100 border-zinc-200 dark:bg-gray-900 dark:border-gray-800"
             }`}
         >
           <span
             className={`flex-1 min-w-0 max-w-[14rem] py-1 px-2 text-sm font-mono block overflow-hidden text-ellipsis whitespace-nowrap
-              ${canEditExportPath ? "text-white" : "text-gray-500"}
+              ${canEditExportPath ? "text-zinc-900 dark:text-white" : "text-zinc-500 dark:text-gray-500"}
             `}
             title={displayPath}
           >
@@ -329,7 +469,7 @@ export default function ExportPanel({
             <button
               type="button"
               onClick={chooseExportFolder}
-              className="shrink-0 py-1 px-2 rounded text-sm bg-gray-700 hover:bg-gray-600 text-white"
+              className="shrink-0 py-1 px-2 rounded text-sm bg-zinc-600 hover:bg-zinc-500 text-white"
             >
               Choose folder…
             </button>
@@ -337,7 +477,7 @@ export default function ExportPanel({
             <button
               type="button"
               onClick={() => onUpgradeRequested?.()}
-              className="shrink-0 py-1 px-2 rounded text-sm bg-gray-700 hover:bg-gray-600"
+              className="shrink-0 py-1 px-2 rounded text-sm bg-zinc-500 hover:bg-zinc-600 text-white dark:bg-gray-700 dark:hover:bg-gray-600"
             >
               🔒 Pro
             </button>
@@ -348,17 +488,19 @@ export default function ExportPanel({
       <button
         disabled={selectedClipIds.length === 0 || isExporting}
         onClick={() => doExport(true)}
-        className="w-full py-2 rounded font-semibold bg-yellow-500 text-black disabled:opacity-40"
+        className="btn-brand-green w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2"
       >
-        Export selected
+        <span>↓</span>
+        Export selected {selectedClipIds.length > 0 && `(${selectedClipIds.length})`}
       </button>
 
       <button
         disabled={clips.length === 0 || isExporting}
         onClick={() => doExport(false)}
-        className="w-full py-2 rounded font-semibold bg-green-600 disabled:opacity-40"
+        className="btn-brand w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2"
       >
-        Export all
+        <span>↓</span>
+        Export all {clips.length > 0 && `(${clips.length})`}
       </button>
     </div>
   );

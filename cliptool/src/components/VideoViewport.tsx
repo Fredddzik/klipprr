@@ -24,6 +24,8 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
   const [showControls, setShowControls] = useState(false);
   const [showVolume, setShowVolume] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  /** Video intrinsic size so we can size the preview to the video (no letterboxing). */
+  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
 
   const hideTimer = useRef<number | null>(null);
   function clearHideTimer() {
@@ -96,6 +98,11 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
     };
   }, [src, videoKey]);
 
+  // Reset aspect when video source changes so we recalc on new load
+  useEffect(() => {
+    setAspectRatio(null);
+  }, [src, videoKey]);
+
   useEffect(() => {
     const v = videoRef.current;
     if (!v || currentTime == null) return;
@@ -127,7 +134,7 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
 
   return (
     <div
-      className="relative w-full"
+      className="relative w-full h-full min-h-0 flex items-center justify-center bg-zinc-900"
       onMouseMove={onMouseActivity}
       onMouseLeave={() => {
         clearHideTimer();
@@ -135,28 +142,41 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
         setShowVolume(false);
       }}
     >
-      <video
-        ref={bindVideoRef}
-        key={videoKey}
-        src={src}
-        controls={false}
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          togglePlay();
-        }}
-        onTimeUpdate={() => onTimeUpdate?.(videoRef.current?.currentTime ?? 0)}
-        onLoadedMetadata={() => {
-          const v = videoRef.current;
-          if (!v) return;
-          if (pendingSeekRef.current != null) {
-            v.currentTime = pendingSeekRef.current;
-            pendingSeekRef.current = null;
-          }
-        }}
-        className="w-full rounded border border-gray-700 bg-black cursor-pointer"
-      />
+      {/* Size the frame to the video's aspect ratio so there are no black bars (works for 16:9, 9:16 Shorts/Reels, etc.) */}
+      <div
+        className="max-w-full max-h-full flex items-center justify-center"
+        style={
+          aspectRatio != null
+            ? { aspectRatio: `${aspectRatio}`, width: aspectRatio >= 1 ? "100%" : "auto", height: aspectRatio >= 1 ? "auto" : "100%" }
+            : undefined
+        }
+      >
+        <video
+          ref={bindVideoRef}
+          key={videoKey}
+          src={src}
+          controls={false}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            togglePlay();
+          }}
+          onTimeUpdate={() => onTimeUpdate?.(videoRef.current?.currentTime ?? 0)}
+          onLoadedMetadata={() => {
+            const v = videoRef.current;
+            if (!v) return;
+            const w = v.videoWidth;
+            const h = v.videoHeight;
+            if (w > 0 && h > 0) setAspectRatio(w / h);
+            if (pendingSeekRef.current != null) {
+              v.currentTime = pendingSeekRef.current;
+              pendingSeekRef.current = null;
+            }
+          }}
+          className="w-full h-full max-h-full object-contain rounded border border-zinc-700 bg-black cursor-pointer"
+        />
 
+      </div>
       {showControls && (
         <div className="pointer-events-auto absolute bottom-2 left-2 right-2 flex items-end justify-between gap-3 transition-opacity duration-200">
           <button

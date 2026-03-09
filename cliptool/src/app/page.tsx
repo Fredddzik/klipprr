@@ -1,6 +1,6 @@
  "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { supabase, getSupabaseConfigForBackend } from "@/lib/supabase";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -13,6 +13,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import {
   resolveVideo,
   downloadAll,
+  CLIPAGENT_HTTP,
   type ResolvedVideo,
 } from "@/lib/clipagent";
 import { useUndoRedo } from "@/hooks/useUndoRedo";
@@ -22,8 +23,20 @@ import VideoViewport from "@/components/VideoViewport";
 import Timeline from "@/components/Timeline";
 import ClipsPanel from "@/components/ClipsPanel";
 import ExportPanel from "@/components/ExportPanel";
+import LeftSidebar from "@/components/LeftSidebar";
 import UpgradeModal from "@/components/UpgradeModal";
+import SettingsModal, {
+  type ThemePreference,
+  type ClipSortOption,
+  type DefaultExportFormat,
+} from "@/components/SettingsModal";
 import type { Capabilities } from "@/lib/capabilities";
+
+const SETTINGS_KEYS = {
+  theme: "klipprr-theme",
+  clipSort: "klipprr-clip-sort",
+  defaultExportFormat: "klipprr-default-export-format",
+} as const;
 
 export default function HomePage() {
   const [videoUrl, setVideoUrl] = useState("");
@@ -46,6 +59,18 @@ export default function HomePage() {
   >("idle");
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null);
   const updateRef = useRef<Awaited<ReturnType<typeof checkForUpdate>> | null>(null);
+
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [exportPanelOpen, setExportPanelOpen] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [theme, setThemeState] = useState<ThemePreference>("dark");
+  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("dark");
+  const [clipSort, setClipSortState] = useState<ClipSortOption>("timeline");
+  const [defaultExportFormat, setDefaultExportFormatState] = useState<DefaultExportFormat>("universal");
+  const [exportCompleteToast, setExportCompleteToast] = useState<{
+    count: number;
+    exportDir: string;
+  } | null>(null);
 
   async function loadAuthAndPlan() {
     const { data } = await supabase.auth.getSession();
@@ -124,6 +149,7 @@ export default function HomePage() {
         await invoke("set_supabase_session", { accessToken, refreshToken });
         await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
         await refreshCapabilities();
+        await loadAuthAndPlan();
         console.log("[FRONTEND] Auth flow finished (from pending tokens)");
         return;
       }
@@ -172,6 +198,54 @@ useEffect(() => {
   const [prevVideoId, setPrevVideoId] = useState<string | null>(null);
   const [exportHQ, setExportHQ] = useState(false);
   const [exportCodec, setExportCodec] = useState<"universal" | "original">("universal");
+  // Load settings from localStorage and sync exportCodec with default format
+  useEffect(() => {
+    const t = localStorage.getItem(SETTINGS_KEYS.theme) as ThemePreference | null;
+    if (t === "light" || t === "dark" || t === "system") setThemeState(t);
+    const s = localStorage.getItem(SETTINGS_KEYS.clipSort) as ClipSortOption | null;
+    if (s === "timeline" || s === "created") setClipSortState(s);
+    const f = localStorage.getItem(SETTINGS_KEYS.defaultExportFormat) as DefaultExportFormat | null;
+    if (f === "universal" || f === "original") {
+      setDefaultExportFormatState(f);
+      setExportCodec(f);
+    }
+  }, []);
+  // Resolved theme for "system" preference
+  useEffect(() => {
+    if (theme !== "system") {
+      setResolvedTheme(theme);
+      return;
+    }
+    const m = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setResolvedTheme(m.matches ? "dark" : "light");
+    update();
+    m.addEventListener("change", update);
+    return () => m.removeEventListener("change", update);
+  }, [theme]);
+  // Persist theme and apply to document
+  useEffect(() => {
+    document.documentElement.classList.remove("light", "dark");
+    document.documentElement.classList.add(resolvedTheme);
+  }, [resolvedTheme]);
+  const setTheme = (v: ThemePreference) => {
+    setThemeState(v);
+    localStorage.setItem(SETTINGS_KEYS.theme, v);
+  };
+  const setClipSort = (v: ClipSortOption) => {
+    setClipSortState(v);
+    localStorage.setItem(SETTINGS_KEYS.clipSort, v);
+  };
+  const setDefaultExportFormat = (v: DefaultExportFormat) => {
+    setDefaultExportFormatState(v);
+    setExportCodec(v);
+    localStorage.setItem(SETTINGS_KEYS.defaultExportFormat, v);
+  };
+  const sortedClips = useMemo(() => {
+    if (clipSort === "timeline") {
+      return [...clips].sort((a, b) => a.start - b.start);
+    }
+    return clips;
+  }, [clips, clipSort]);
   const [keepWholeVideo, setKeepWholeVideo] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
@@ -275,11 +349,12 @@ async function refreshCapabilities() {
 
   // Load video metadata from ClipAgent
   async function loadVideo() {
-    // Normalize YouTube URLs / IDs for best UX
-    function normalizeYouTubeUrl(input: string): string | null {
+    // Normalize video URLs (accept many; UI only promises YouTube, Twitch clips, X, Instagram, Vimeo)
+    function normalizeVideoUrl(input: string): string | null {
       input = input.trim();
+      if (!input) return null;
 
-      // If it's already a full URL
+      // Already a full URL — accept any http(s) URL (yt-dlp supports many sites)
       if (input.startsWith("http://") || input.startsWith("https://")) {
         try {
           return new URL(input).toString();
@@ -288,33 +363,46 @@ async function refreshCapabilities() {
         }
       }
 
-      // If user pasted a youtu.be short link without protocol
-      if (input.startsWith("youtu.be/")) {
-        return "https://" + input;
+      // Known domains without protocol — prepend https
+      const knownPrefixes = [
+        "youtu.be/",
+        "youtube.com/",
+        "www.youtube.com/",
+        "twitch.tv/",
+        "www.twitch.tv/",
+        "x.com/",
+        "twitter.com/",
+        "www.twitter.com/",
+        "tiktok.com/",
+        "www.tiktok.com/",
+        "vm.tiktok.com/",
+        "instagram.com/",
+        "www.instagram.com/",
+        "vimeo.com/",
+        "www.vimeo.com/",
+      ];
+      const lower = input.toLowerCase();
+      for (const prefix of knownPrefixes) {
+        if (lower.startsWith(prefix)) return "https://" + input;
       }
 
-      // If user pasted only the ID (most common case)
+      // Bare YouTube video ID (11 chars)
       const ytIdPattern = /^[a-zA-Z0-9_-]{11}$/;
       if (ytIdPattern.test(input)) {
         return `https://www.youtube.com/watch?v=${input}`;
-      }
-
-      // If they pasted something like youtube.com/... without protocol
-      if (input.startsWith("youtube.com/") || input.startsWith("www.youtube.com/")) {
-        return "https://" + input;
       }
 
       return null;
     }
 
     if (!videoUrl.trim()) {
-      alert("Paste a YouTube URL first.");
+      alert("Paste a video URL first.");
       return;
     }
 
-    const normalized = normalizeYouTubeUrl(videoUrl);
+    const normalized = normalizeVideoUrl(videoUrl);
     if (!normalized) {
-      alert("Please enter a valid YouTube link or video ID.");
+      alert("Please enter a valid video link (YouTube, Twitch clips, X, Instagram, Vimeo, or direct video URL).");
       return;
     }
 
@@ -337,27 +425,42 @@ async function refreshCapabilities() {
       // Ignore stale responses
       if (reqId !== resolveReqRef.current) return;
       if (!res.ok) {
-        const msg = res.error || "unknown_error";
+        const code = res.error || "unknown_error";
+        const details = "details" in res ? (res as { details?: string }).details : undefined;
+        const lower = code.toLowerCase();
 
-        // Treat fetch / connectivity failures as Agent issues
-        const lower = msg.toLowerCase();
-const looksProtected =
-  lower.includes("drm") ||
-  lower.includes("widevine") ||
-  lower.includes("protected") ||
-  lower.includes("license") ||
-  lower.includes("m3u8") ||
-  lower.includes("403") ||
-  lower.includes("forbidden") ||
-  lower.includes("unauthorized");
-
-
+        let message: string;
+        if (code === "cookies_not_accessible") {
+          message =
+            "Klipprr can't access browser cookies on this system (macOS restriction). Use \"Load local file\" or record your screen, then load that file.";
+        } else if (code === "youtube_bot_block") {
+          message =
+            "YouTube is blocking automated access. Use \"Load local file\" or record your screen, then load that file.";
+        } else if (code === "login_or_private") {
+          message =
+            "This video is private or requires login. We can't access it directly. Use \"Load local file\" or screen recording instead.";
+        } else if (code === "no_progressive_preview") {
+          message =
+            "This video doesn't provide a format we can preview (e.g. some live or protected streams). Try \"Load local file\" or screen recording.";
+        } else if (
+          lower.includes("drm") ||
+          lower.includes("widevine") ||
+          lower.includes("protected") ||
+          lower.includes("license") ||
+          lower.includes("m3u8") ||
+          lower.includes("403") ||
+          lower.includes("forbidden") ||
+          lower.includes("unauthorized")
+        ) {
+          message =
+            "This platform appears to use protected/DRM streams (e.g., UFC Fight Pass, Netflix). Direct downloading/clipping won't work. Use Screen Capture mode instead.";
+        } else if (details) {
+          message = `Could not resolve this video. Technical details: ${details}`;
+        } else {
+          message = `Could not resolve this video. (${code})`;
+        }
         setVideoData(null);
-        setResolveError(
-          looksProtected
-            ? "This platform appears to use protected/DRM streams (e.g., UFC Fight Pass, Netflix). Direct downloading/clipping won’t work. Use Screen Capture mode instead."
-            : `Could not resolve this video. (${msg})`
-        );
+        setResolveError(message);
       } else {
         setResolveError(null);
         setVideoData(res.data);
@@ -460,6 +563,7 @@ async function handleAuthTokens(access_token: string, refresh_token: string) {
   await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
   await syncLicenseFromSupabase();
   await refreshCapabilities();
+  await loadAuthAndPlan();
 }
 
 // auth-success: emitted when backend hands off tokens (e.g. second instance)
@@ -495,6 +599,52 @@ useEffect(() => {
   };
 }, []);
 
+// When the window gains focus (e.g. after user clicked "Open Klipprr" in the browser),
+// consume any pending auth tokens so login completes even if auth-success/deep-link was missed.
+useEffect(() => {
+  const tryConsumePendingAuth = async () => {
+    if (!(window as any).__TAURI__) return;
+    try {
+      let tokens = await invoke<[string, string] | null>("consume_auth_tokens");
+      if (!tokens) {
+        const { data } = await supabase.auth.getSession();
+        if (data.session?.user) return;
+        tokens = await invoke<[string, string] | null>("get_stored_session_tokens");
+      }
+      if (!tokens) return;
+      const [accessToken, refreshToken] = tokens;
+      await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+      await invoke("set_supabase_session", { accessToken, refreshToken });
+      await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
+      await syncLicenseFromSupabase();
+      await refreshCapabilities();
+      await loadAuthAndPlan();
+      console.log("[FRONTEND] Auth completed from focus fallback (pending tokens)");
+    } catch (e) {
+      console.error("[FRONTEND] Focus fallback consume_auth_tokens failed:", e);
+    }
+  };
+
+  let wasHidden = false;
+  const onVisibility = () => {
+    const visible = document.visibilityState === "visible";
+    if (visible && wasHidden) {
+      wasHidden = false;
+      tryConsumePendingAuth();
+    } else if (!visible) {
+      wasHidden = true;
+    }
+  };
+  const onWindowFocus = () => tryConsumePendingAuth();
+
+  document.addEventListener("visibilitychange", onVisibility);
+  window.addEventListener("focus", onWindowFocus);
+  return () => {
+    document.removeEventListener("visibilitychange", onVisibility);
+    window.removeEventListener("focus", onWindowFocus);
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
 
   // --- License enforcement (Supabase → local ClipAgent) ---
   // Extracted license sync logic
@@ -519,6 +669,7 @@ async function syncLicenseFromSupabase() {
         const next = await supabase.auth.getSession();
         currentSession = next.data.session;
         console.log("[License][SYNC] Restored session from backend");
+        await loadAuthAndPlan();
       }
     } catch (e) {
       console.warn("[License][SYNC] get_stored_session_tokens failed:", e);
@@ -596,9 +747,13 @@ async function syncLicenseFromSupabase() {
 
       return;
     }
-    // 🔓 POSITIVE CASE — active license → ensure backend has it, then refresh caps
+    // 🔓 POSITIVE CASE — active license → push fresh session so backend has latest tokens, then sync
     console.log("[License][SYNC] Active license found → syncing backend and refreshing caps");
     if ((window as any).__TAURI__) {
+      await invoke("set_supabase_session", {
+        accessToken: currentSession.access_token,
+        refreshToken: currentSession.refresh_token ?? "",
+      });
       await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
     }
     const caps = await tauriInvoke<Capabilities>("get_capabilities");
@@ -676,6 +831,20 @@ function fmtRes(h: number) {
 
   useEffect(() => {
     (async () => {
+      if ((window as any).__TAURI__) {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          try {
+            await invoke("set_supabase_session", {
+              accessToken: session.access_token,
+              refreshToken: session.refresh_token ?? "",
+            });
+            await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
+          } catch {
+            // Backend may be unavailable or sync failed; still refresh caps
+          }
+        }
+      }
       await refreshCapabilities();
     })();
   }, []);
@@ -844,156 +1013,80 @@ useEffect(() => {
     }
   }
 
+  const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI__;
+
   return (
-  <div className="min-h-screen bg-black text-white p-6">
-    {/* Export clip toasts — top right */}
+  <div className="h-screen min-h-dvh flex overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-white">
+    <LeftSidebar
+      onOpenSettings={() => setShowSettings(true)}
+      collapsed={sidebarCollapsed}
+      onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
+      email={email}
+      plan={plan}
+      accountLoading={accountLoading}
+      isTauri={isTauri}
+      updateStatus={updateStatus}
+      updateInfo={updateInfo}
+      onSync={async () => {
+        await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
+        await refreshCapabilities();
+      }}
+      onCheckForUpdates={handleCheckForUpdates}
+      onInstallUpdate={handleInstallUpdate}
+      onLogout={async () => {
+        await supabase.auth.signOut();
+        await invoke("clear_license_cmd");
+        await refreshCapabilities();
+        await loadAuthAndPlan();
+      }}
+      onLogin={async () => {
+        try {
+          await openExternal(
+            "https://klipprr.com/login?redirect=" +
+              encodeURIComponent("clipagent://auth-callback")
+          );
+        } catch (err) {
+          console.error("Failed to open login page:", err);
+        }
+      }}
+    />
+
+    {/* Main content — reserve left margin so sidebar never hides content */}
+    <main
+      className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden transition-[margin-left] duration-200"
+      style={{ marginLeft: sidebarCollapsed ? 72 : 256 }}
+    >
+    {/* Export clip toasts — top right, match app (zinc + violet) */}
     <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
       {exportToasts.map((t) => (
         <div
           key={t.id}
-          className="flex items-center gap-2 rounded-lg border border-zinc-600 bg-zinc-900 px-3 py-2 text-sm shadow-lg"
+          className="flex items-center gap-2 rounded-xl border border-zinc-300 bg-white/95 dark:border-zinc-700 dark:bg-zinc-900/95 backdrop-blur px-3 py-2.5 text-sm shadow-xl"
         >
-          <span className="flex-1 truncate text-white" title={t.clipName}>
-            {t.clipName} ✅
+          <span className="flex-1 truncate text-zinc-900 dark:text-white font-medium" title={t.clipName}>
+            {t.clipName}
           </span>
+          <span className="shrink-0 text-violet-400" aria-hidden>✓</span>
           <button
             type="button"
             onClick={() => {
               openExportFolder(t.exportDir);
               dismissExportToast(t.id);
             }}
-            className="shrink-0 rounded px-2 py-0.5 text-xs font-medium bg-zinc-700 hover:bg-zinc-600"
+            className="shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition"
           >
             Open folder
           </button>
           <button
             type="button"
             onClick={() => dismissExportToast(t.id)}
-            className="shrink-0 text-zinc-400 hover:text-white"
+            className="shrink-0 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white p-0.5 rounded"
             aria-label="Dismiss"
           >
             ×
           </button>
         </div>
       ))}
-    </div>
-
-    {/* Top Account Bar */}
-    <div className="w-full mb-6 px-4 py-3 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-between">
-      {accountLoading ? (
-        <span className="text-sm text-zinc-400">Loading account…</span>
-      ) : email ? (
-        <>
-          <div className="flex flex-col">
-            <span className="text-sm text-zinc-400">{email}</span>
-            <span
-              className={`text-xs font-semibold ${
-                (caps?.canSetCustomExportPath || caps?.canRenameClips) ? "text-green-400" : "text-zinc-500"
-              }`}
-            >
-              {(caps?.canSetCustomExportPath || caps?.canRenameClips) ? "Pro Plan" : "Free Plan"}
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              onClick={async () => {
-                await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
-                await refreshCapabilities();
-              }}
-              className="text-xs px-3 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 transition"
-            >
-              Sync
-            </button>
-
-            {(window as any).__TAURI__ && (
-              <>
-                {(updateStatus === "available" || updateStatus === "downloading") && updateInfo ? (
-                  <span className="flex items-center gap-2 text-xs">
-                    <span className="text-green-400">Update {updateInfo.version} available</span>
-                    <button
-                      onClick={handleInstallUpdate}
-                      disabled={updateStatus === "downloading"}
-                      className="rounded-md bg-green-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-green-500 disabled:opacity-50"
-                    >
-                      {updateStatus === "downloading" ? "Downloading…" : "Install"}
-                    </button>
-                  </span>
-                ) : (
-                  <button
-                    onClick={handleCheckForUpdates}
-                    disabled={updateStatus === "checking"}
-                    className="text-xs px-3 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 transition disabled:opacity-50"
-                  >
-                    {updateStatus === "checking" ? "Checking…" : "Check for updates"}
-                  </button>
-                )}
-                {updateStatus === "latest" && (
-                  <span className="text-xs text-gray-500">Up to date</span>
-                )}
-                {updateStatus === "error" && (
-                  <span className="text-xs text-red-400">Update check failed</span>
-                )}
-              </>
-            )}
-
-            <button
-              onClick={async () => {
-                await supabase.auth.signOut();
-                await invoke("clear_license_cmd");
-                await refreshCapabilities();
-                await loadAuthAndPlan();
-              }}
-              className="text-xs px-3 py-1 rounded-md bg-red-600 hover:bg-red-700 transition"
-            >
-              Logout
-            </button>
-          </div>
-        </>
-      ) : (
-        <>
-          <span className="text-sm text-zinc-500">Not logged in</span>
-
-          <div className="flex flex-wrap items-center gap-3">
-            {(window as any).__TAURI__ && updateStatus !== "available" && (
-              <button
-                onClick={handleCheckForUpdates}
-                disabled={updateStatus === "checking"}
-                className="text-xs px-3 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 transition disabled:opacity-50"
-              >
-                {updateStatus === "checking" ? "Checking…" : "Check for updates"}
-              </button>
-            )}
-            {(window as any).__TAURI__ && (updateStatus === "available" || updateStatus === "downloading") && updateInfo && (
-              <span className="flex items-center gap-2 text-xs">
-                <span className="text-green-400">Update {updateInfo.version} available</span>
-                <button
-                  onClick={handleInstallUpdate}
-                  disabled={updateStatus === "downloading"}
-                  className="rounded-md bg-green-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-green-500 disabled:opacity-50"
-                >
-                  {updateStatus === "downloading" ? "Downloading…" : "Install"}
-                </button>
-              </span>
-            )}
-            <button
-              onClick={async () => {
-                try {
-                  await openExternal(
-                    "https://klipprr.com/login?redirect=" +
-                      encodeURIComponent("clipagent://auth-callback")
-                  );
-                } catch (err) {
-                  console.error("Failed to open login page:", err);
-                }
-              }}
-              className="text-xs px-4 py-1 rounded-md bg-blue-600 hover:bg-blue-700 transition font-semibold"
-            >
-              Login
-            </button>
-          </div>
-        </>
-      )}
     </div>
 
     <UpgradeModal
@@ -1015,46 +1108,77 @@ useEffect(() => {
   }}
 />
     {undoToast && (
-      <div className="
-        fixed bottom-6 left-1/2 -translate-x-1/2 z-50
-        bg-black/80 border border-gray-700 px-4 py-2 rounded text-sm
-        animate-toast
-      ">
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-white/95 dark:bg-zinc-900/95 border border-zinc-300 dark:border-zinc-700 px-4 py-2 rounded-xl text-sm text-zinc-900 dark:text-white animate-toast">
         {undoToast}
       </div>
     )}
-    <h1 className="text-3xl font-bold mb-6 text-center">Klipprr</h1>
-
-    {/* URL BAR */}
-    <div className="max-w-5xl mx-auto flex gap-4 mb-6">
-      <input
-        type="text"
-        placeholder="Paste YouTube URL…"
-        defaultValue=""
-        onChange={(e) => setVideoUrl(e.target.value)}
-        className="flex-1 p-3 rounded bg-gray-900 border border-gray-700"
-        suppressHydrationWarning
-      />
-      <button
-        onClick={loadVideo}
-        disabled={loading}
-        className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded font-semibold disabled:opacity-50"
-      >
-        <span className={`inline-flex items-center gap-2 ${loading ? "animate-pulse" : ""}`}>
-          {loading && <span className="inline-block w-2 h-2 rounded-full bg-white animate-bounce" />}
-          {loading ? "Loading…" : "Load"}
+    {exportCompleteToast && (
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white/95 dark:bg-zinc-900/95 backdrop-blur px-4 py-3 shadow-xl">
+        <span className="text-violet-500 dark:text-violet-400 text-lg font-medium" aria-hidden>✓</span>
+        <span className="text-zinc-900 dark:text-white font-medium">
+          Export complete — {exportCompleteToast.count} clip{exportCompleteToast.count !== 1 ? "s" : ""} saved
         </span>
-      </button>
-      {typeof window !== "undefined" && (window as any).__TAURI__ && (
         <button
           type="button"
-          onClick={loadLocalFile}
-          disabled={loading}
-          className="px-6 py-3 bg-zinc-700 hover:bg-zinc-600 rounded font-semibold disabled:opacity-50"
+          onClick={() => {
+            openExportFolder(exportCompleteToast.exportDir);
+            setExportCompleteToast(null);
+          }}
+          className="shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white transition"
         >
-          Load local file
+          Open folder
         </button>
-      )}
+        <button
+          type="button"
+          onClick={() => setExportCompleteToast(null)}
+          className="shrink-0 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white p-0.5 rounded"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+    )}
+    {/* URL bar */}
+    <div className="shrink-0 px-4 py-3 border-b border-zinc-200 bg-zinc-100/80 dark:border-zinc-800 dark:bg-zinc-900/50">
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          {videoData && (
+            <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider px-2 py-1 rounded-md bg-zinc-800/80 text-white dark:text-zinc-300 shrink-0">
+              Preview
+            </span>
+          )}
+          <span className="text-zinc-500 shrink-0">URL</span>
+          <input
+            type="text"
+            placeholder="YouTube, Twitch clips, X, Instagram, or video URL…"
+            value={videoUrl}
+            onChange={(e) => setVideoUrl(e.target.value)}
+            className="flex-1 min-w-0 max-w-xl px-3 py-2 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-white placeholder-zinc-500 focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none"
+            suppressHydrationWarning
+          />
+        </div>
+        <button
+          onClick={loadVideo}
+          disabled={loading}
+          className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-sm disabled:opacity-50 transition"
+        >
+          <span className={`inline-flex items-center gap-2 ${loading ? "animate-pulse" : ""}`}>
+            {loading && <span className="inline-block w-2 h-2 rounded-full bg-white animate-bounce" />}
+            {loading ? "Loading…" : "Load"}
+          </span>
+        </button>
+        {isTauri && (
+          <button
+            type="button"
+            onClick={loadLocalFile}
+            disabled={loading}
+            className="px-4 py-2 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-white font-medium text-sm disabled:opacity-50 transition"
+          >
+            Load local file
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-zinc-500 mt-1.5">YouTube, Twitch clips, X (Twitter), Instagram Reels, Vimeo, and direct video URLs</p>
     </div>
 
     {resolveError && (
@@ -1067,215 +1191,223 @@ useEffect(() => {
       </div>
     )}
 
-    {/* MAIN WORKSPACE only when agent is not offline AND video loaded */}
+    {/* Workspace: fill height; export panel fixed on right when open (never clipped); clips panel can shrink */}
     {videoData && (
-      <div className="max-w-6xl mx-auto grid grid-cols-[2fr_1fr] gap-6 mt-6">
-        {/* LEFT SIDE */}
-        <div>
-          {/* VIDEO PLAYER */}
-          <h2 className="text-xl mb-2">{videoData.title}</h2>
-
-
-          <VideoViewport
-            src={videoData.previewUrl}
-            videoKey={videoData.id}
-            currentTime={currentTime}
-            onTimeUpdate={(t) => setCurrentTime(t)}
-          />
-
-          <Timeline
-            duration={videoData.duration}
-            clips={clips}
-            markIn={markIn}
-            markOut={markOut}
-            selectedClipIds={selectedClipIds}
-            currentTime={currentTime}
-
-            onSeek={(t) => {
-	      setCurrentTime(t);
-	      const video = (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null;
-	      if (!video) return;
-
-	      if (video.readyState >= 1) {
-	        video.currentTime = t;
-	      } else {
- 	        pendingSeekRef.current = t;
-  	      }
-	    }}
-
-            onSelectClip={(id, multi) => {
-              setSelectedClipIds((prev) => {
-                if (multi) {
-                  return prev.includes(id)
-                    ? prev.filter((x) => x !== id)
-                    : [...prev, id];
+      <div className="flex-1 min-h-0 flex flex-row min-w-0 overflow-hidden">
+        {/* Content area: video + clips; scrolls horizontally when export open and narrow */}
+        <div className="flex flex-col min-[1200px]:flex-row gap-4 p-4 flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-hidden min-[1200px]:min-w-0">
+          {/* Video + timeline: fills space */}
+          <div className="flex flex-col min-h-[280px] min-[1200px]:min-h-0 min-w-0 flex-1 min-[1200px]:min-w-[300px] rounded-xl border border-zinc-200 dark:border-zinc-800 bg-black shrink-0">
+            <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400 px-3 pt-2 truncate shrink-0" title={videoData.title}>
+              {videoData.title}
+            </h2>
+            <div className="relative flex-1 min-h-0 w-full">
+              <VideoViewport
+                src={
+                  isTauri &&
+                  videoData.previewUrl &&
+                  (videoData.previewUrl.startsWith("http://") || videoData.previewUrl.startsWith("https://"))
+                    ? `${CLIPAGENT_HTTP}/preview-stream?url=${encodeURIComponent(videoData.previewUrl)}`
+                    : videoData.previewUrl
                 }
-                return [id];
-              });
-            }}
-          />
+                videoKey={videoData.id}
+                currentTime={currentTime}
+                onTimeUpdate={(t) => setCurrentTime(t)}
+              />
+            </div>
+            <div className="shrink-0 p-2 border-t border-zinc-200 dark:border-zinc-800">
+              <Timeline
+                duration={videoData.duration}
+                clips={clips}
+                markIn={markIn}
+                markOut={markOut}
+                selectedClipIds={selectedClipIds}
+                currentTime={currentTime}
+                onSeek={(t) => {
+                  setCurrentTime(t);
+                  const video = (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null;
+                  if (!video) return;
+                  if (video.readyState >= 1) video.currentTime = t;
+                  else pendingSeekRef.current = t;
+                }}
+                onSelectClip={(id, multi) => {
+                  setSelectedClipIds((prev) =>
+                    multi ? (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]) : [id]
+                  );
+                }}
+              />
+            </div>
+            <div className="shrink-0 p-3 flex flex-wrap gap-2 border-t border-zinc-200 dark:border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const video = (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null;
+                    if (!video) return;
+                    const t = video.currentTime;
+                    if (markIn === null && markOut === null) {
+                      pushHistory();
+                      setMarkIn(t);
+                    } else if (markIn !== null && markOut === null) {
+                      setMarkOut(t);
+                      setClips((prev) => {
+                        pushHistory();
+                        const next = [
+                          ...prev,
+                          {
+                            id: crypto.randomUUID(),
+                            start: markIn,
+                            end: t,
+                            name: `Clip ${prev.length + 1}`,
+                          },
+                        ];
+                        return next.sort((a, b) => a.start - b.start);
+                      });
+                    } else {
+                      setMarkIn(t);
+                      setMarkOut(null);
+                    }
+                  }}
+                  className={`px-4 py-2 rounded-lg font-semibold text-sm transition ${
+                    editTarget
+                      ? "bg-zinc-600 cursor-not-allowed text-zinc-400"
+                      : markIn === null && markOut === null
+                      ? "text-white"
+                      : markIn !== null && markOut === null
+                      ? "bg-[#ef4444] hover:bg-[#dc2626] text-white"
+                      : "text-white"
+                  }`}
+                  style={
+                    !editTarget && ((markIn === null && markOut === null) || (markIn !== null && markOut !== null))
+                      ? { background: "linear-gradient(135deg, #059669 0%, #10b981 50%, #34d399 100%)" }
+                      : undefined
+                  }
+                >
+                  {editTarget
+                    ? `Editing ${editTarget.field.toUpperCase()}`
+                    : markIn === null && markOut === null
+                    ? "Mark IN (M)"
+                    : markIn !== null && markOut === null
+                    ? "Mark OUT (M)"
+                    : "Mark IN (M)"}
+                </button>
+                {editTarget && (
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const video = (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null;
+                        if (!video) return;
+                        const t = video.currentTime;
+                        setClips((prev) => {
+                          pushHistory();
+                          return prev
+                            .map((c) => {
+                              if (c.id !== editTarget.clipId) return c;
+                              let start = c.start;
+                              let end = c.end;
+                              if (editTarget.field === "in") start = t;
+                              else end = t;
+                              if (end < start) [start, end] = [end, start];
+                              return { ...c, start, end };
+                            })
+                            .sort((a, b) => a.start - b.start);
+                        });
+                        setEditTarget(null);
+                      }}
+                      className="px-3 py-1 rounded-lg text-white text-sm font-medium"
+                      style={{ background: "linear-gradient(135deg, #059669 0%, #10b981 50%, #34d399 100%)" }}
+                    >
+                      Apply {editTarget.field.toUpperCase()} (Enter)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditTarget(null)}
+                      className="px-3 py-1 rounded-lg bg-zinc-600 hover:bg-zinc-500 text-sm"
+                    >
+                      Cancel (Esc)
+                    </button>
+                  </div>
+                )}
+              </div>
+          </div>
 
-          {/* MARK BUTTONS */}
-          <div className="space-y-3 mt-6">
-            {/* M BUTTON */}
-            <button
-              onClick={() => {
-                const video = (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null;
-                if (!video) return;
-                const t = video.currentTime;
-                if (markIn === null && markOut === null) {
-  pushHistory();
-  setMarkIn(t);
-} else if (markIn !== null && markOut === null) {
-                  setMarkOut(t);
+          {/* Clips panel: fills height in column mode (no gap below); can shrink (min 200px) in row so Export never clipped */}
+          <div className={`flex flex-col min-w-0 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-100/80 dark:bg-zinc-900/80 flex-1 min-h-0 min-[1200px]:flex-initial min-[1200px]:shrink-0 ${exportPanelOpen ? "min-[1200px]:w-80 min-[1200px]:min-w-[200px] min-[1200px]:max-w-[320px]" : "min-[1200px]:w-80"}`}>
+            <div className="flex-1 min-h-0 overflow-x-hidden overflow-y-auto p-4 min-w-0">
+              <ClipsPanel
+                clips={sortedClips}
+                selectedClipIds={selectedClipIds}
+                renameDraft={renameDraft}
+                editTarget={editTarget}
+                undo={undo}
+                redo={redo}
+                canUndo={history.length > 0}
+                canRedo={future.length > 0}
+                formatTime={formatTime}
+                onToggleSelect={(id, checked) =>
+                  setSelectedClipIds((prev) => (checked ? [...prev, id] : prev.filter((x) => x !== id)))
+                }
+                onPlayClip={playClip}
+                onRenameDraftChange={(id, value) => setRenameDraft((d) => ({ ...d, [id]: value }))}
+                onCommitRename={(id) => {
+                  const v = renameDraft[id];
+                  if (v == null) return;
                   setClips((prev) => {
                     pushHistory();
-                    const next = [
-                      ...prev,
-                      {
-                        id: crypto.randomUUID(),
-                        start: markIn,
-                        end: t,
-                        name: `Clip ${prev.length + 1}`,
-                      },
-                    ];
-                    return next.sort((a, b) => a.start - b.start);
+                    showUndoToast("Rename clip");
+                    return prev.map((c) => (c.id === id ? { ...c, name: v.trim() || "Clip" } : c));
                   });
-                } else {
-                  setMarkIn(t);
-                  setMarkOut(null);
-                }
-              }}
-              className={`px-6 py-2 rounded font-bold ${
-  editTarget
-    ? "bg-gray-700 cursor-not-allowed"
-    : markIn === null && markOut === null
-    ? "bg-green-600"
-    : markIn !== null && markOut === null
-    ? "bg-red-600"
-    : "bg-green-600"
-}`}
-            >
-              {editTarget
-  ? `Editing ${editTarget.field.toUpperCase()}`
-  : markIn === null && markOut === null
-  ? "Mark IN (M)"
-  : markIn !== null && markOut === null
-  ? "Mark OUT (M)"
-  : "Mark IN (M)"}
-            </button>
-
-		{editTarget && (
-  <div className="flex gap-2 mt-2">
-    <button
-      onClick={() => {
-        const video = (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null;
-        if (!video) return;
-        const t = video.currentTime;
-        setClips(prev => {
-          pushHistory();
-          return prev
-            .map(c => {
-              if (c.id !== editTarget.clipId) return c;
-              let start = c.start;
-              let end = c.end;
-              if (editTarget.field === "in") start = t;
-              else end = t;
-              // Auto-swap if crossed
-              if (end < start) {
-                const tmp = start;
-                start = end;
-                end = tmp;
-              }
-              return { ...c, start, end };
-            })
-            .sort((a, b) => a.start - b.start);
-        });
-        setEditTarget(null);
-      }}
-      className="px-4 py-1 bg-green-600 rounded font-semibold hover:brightness-110"
-    >
-      Apply {editTarget.field.toUpperCase()} (Enter)
-    </button>
-
-    <button
-      onClick={() => setEditTarget(null)}
-      className="px-4 py-1 bg-gray-600 rounded hover:bg-gray-700"
-    >
-      Cancel (Esc)
-    </button>
-  </div>
-)}
-
+                  setRenameDraft((d) => {
+                    const { [id]: _, ...rest } = d;
+                    return rest;
+                  });
+                }}
+                onEditIn={(id) => setEditTarget({ clipId: id, field: "in" })}
+                onEditOut={(id) => setEditTarget({ clipId: id, field: "out" })}
+                onDeleteSelected={() => {
+                  if (selectedClipIds.length === 0) return;
+                  pushHistory();
+                  setClips((prev) => prev.filter((c) => !selectedClipIds.includes(c.id)));
+                  setSelectedClipIds([]);
+                  setEditTarget(null);
+                  showUndoToast(selectedClipIds.length > 1 ? "Delete clips" : "Delete clip");
+                }}
+                canEditClips={caps.canRenameClips}
+                onUpgradeRequested={() => setShowUpgrade(true)}
+              />
+            </div>
+            {!exportPanelOpen && (
+              <div className="shrink-0 p-4 pt-0 border-t border-zinc-200 dark:border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setExportPanelOpen(true)}
+                  className="btn-brand w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2"
+                >
+                  <span>↓</span>
+                  Export
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* RIGHT SIDE — CLIP LIST + EXPORTS */}
-        <div className="space-y-6">
-          <ClipsPanel
-            clips={clips}
-            selectedClipIds={selectedClipIds}
-            renameDraft={renameDraft}
-            editTarget={editTarget}
-            undo={undo}
-            redo={redo}
-            canUndo={history.length > 0}
-            canRedo={future.length > 0}
-            formatTime={formatTime}
-            onToggleSelect={(id, checked) => {
-              setSelectedClipIds((prev) =>
-                checked ? [...prev, id] : prev.filter((x) => x !== id)
-              );
-            }}
-            onPlayClip={playClip}
-            onRenameDraftChange={(id, value) => {
-              setRenameDraft((d) => ({ ...d, [id]: value }));
-            }}
-            onCommitRename={(id) => {
-              const v = renameDraft[id];
-              if (v == null) return;
-
-              setClips((prev) => {
-                pushHistory();
-                showUndoToast("Rename clip");
-                return prev.map((c) =>
-                  c.id === id ? { ...c, name: v.trim() || "Clip" } : c
-                );
-              });
-
-              setRenameDraft((d) => {
-                const { [id]: _, ...rest } = d;
-                return rest;
-              });
-            }}
-            onEditIn={(id) =>
-              setEditTarget({ clipId: id, field: "in" })
-            }
-            onEditOut={(id) =>
-              setEditTarget({ clipId: id, field: "out" })
-            }
-            onDeleteSelected={() => {
-              if (selectedClipIds.length === 0) return;
-
-              pushHistory();
-              setClips((prev) =>
-                prev.filter((c) => !selectedClipIds.includes(c.id))
-              );
-              setSelectedClipIds([]);
-              setEditTarget(null);
-
-              showUndoToast(
-                selectedClipIds.length > 1
-                  ? "Delete clips"
-                  : "Delete clip"
-              );
-            }}
-            canEditClips={caps.canRenameClips}
-            onUpgradeRequested={() => setShowUpgrade(true)}
-          />
-
-          <ExportPanel
-            clips={clips}
+        {/* Export panel: fixed on the right, never clipped (clips panel shrinks first on narrow screens) */}
+        {exportPanelOpen && (
+          <div className="w-96 flex-shrink-0 flex flex-col overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 self-stretch">
+            <div className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-zinc-800">
+              <span className="font-semibold text-zinc-900 dark:text-white">Export Settings</span>
+              <button
+                type="button"
+                onClick={() => setExportPanelOpen(false)}
+                className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 transition"
+                aria-label="Close export panel"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-auto p-4">
+              <ExportPanel
+            clips={sortedClips}
             selectedClipIds={selectedClipIds}
             videoUrl={videoUrl}
             localFilePath={localFilePath}
@@ -1310,10 +1442,28 @@ useEffect(() => {
               }
             }}
             onUpgradeRequested={() => setShowUpgrade(true)}
-          />
-        </div>
+            onExportComplete={(count, exportDir) => {
+              setExportCompleteToast({ count, exportDir });
+              setTimeout(() => setExportCompleteToast(null), 12000);
+            }}
+              />
+            </div>
+          </div>
+        )}
       </div>
     )}
+    </main>
+
+    <SettingsModal
+      isOpen={showSettings}
+      onClose={() => setShowSettings(false)}
+      theme={theme}
+      setTheme={setTheme}
+      clipSort={clipSort}
+      setClipSort={setClipSort}
+      defaultExportFormat={defaultExportFormat}
+      setDefaultExportFormat={setDefaultExportFormat}
+    />
   </div>
 );
 }

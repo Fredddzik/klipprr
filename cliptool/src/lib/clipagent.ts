@@ -15,7 +15,7 @@ export type AgentState = "checking" | "offline" | "untrusted" | "online";
 
 export type AgentResult<T> =
   | { ok: true; data: T }
-  | { ok: false; error: string; agentState?: AgentState; status?: number };
+  | { ok: false; error: string; agentState?: AgentState; status?: number; details?: string };
 
 type FetchOpts = RequestInit & { timeoutMs?: number };
 
@@ -171,7 +171,11 @@ export async function resolveVideo(url: string): Promise<AgentResult<ResolvedVid
     }
 
     if (json?.error) {
-      return { ok: false, error: String(json.error) };
+      return {
+        ok: false,
+        error: String(json.error),
+        details: typeof json.details === "string" ? json.details : undefined,
+      };
     }
 
     const normalized = normalizeResolve(json as ResolveResponse);
@@ -214,6 +218,8 @@ export interface DownloadAllResponse {
   ok?: boolean;
   error?: string;
   results?: any[];
+  /** Export folder path (when ok). */
+  export_dir?: string | null;
 }
 
 export async function downloadAll(
@@ -225,7 +231,7 @@ export async function downloadAll(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      timeoutMs: 120000,
+      timeoutMs: 600000,
     });
 
     const status = res.status;

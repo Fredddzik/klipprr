@@ -15,7 +15,7 @@ use crate::commands::ping::handle_ping;
 use crate::http::{with_cors, json_response, text_response, handle_http};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_single_instance::init as single_instance;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use serde_json::json;
@@ -340,6 +340,10 @@ fn main() {
                     println!("{msg}");
                     append_file_log(&msg);
                     let _ = app.emit("deep-link", arg);
+                    // Bring app window to front when opened via deep link (e.g. after browser login).
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.set_focus();
+                    }
                 }
             }
         }))
@@ -365,6 +369,10 @@ fn main() {
             // Forward deep link URLs to the frontend via a simple event, and handle Supabase magic links.
             let deep_link_handle = app_handle.clone();
             app.deep_link().on_open_url(move |event| {
+                // Bring app window to front when opened via deep link (e.g. after browser login).
+                if let Some(win) = deep_link_handle.get_webview_window("main") {
+                    let _ = win.set_focus();
+                }
                 if let Some(url) = event.urls().first() {
                     let raw = url.to_string();
                     append_file_log(&format!("[DEEP LINK] RAW URL: {}", raw));
