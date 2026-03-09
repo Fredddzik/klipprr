@@ -82,13 +82,19 @@ jobs:
         if: steps.apple.outputs.enabled == 'true'
         run: |
           BIN_DIR="clipagent/src-tauri/bin"
-          for name in ffmpeg ffprobe yt-dlp; do
+          ENTITLEMENTS="clipagent/src-tauri/entitlements-binaries.plist"
+          for name in ffmpeg ffprobe; do
             path="$BIN_DIR/$name"
             if [ -f "$path" ]; then
               echo "Signing $path"
               codesign --force --options runtime --timestamp -s "$CERT_ID" -- "$path"
             fi
           done
+          # yt-dlp is PyInstaller; extracted Python has different Team ID - need disable-library-validation
+          if [ -f "$BIN_DIR/yt-dlp" ]; then
+            echo "Signing yt-dlp with entitlements (allow embedded Python load)"
+            codesign --force --options runtime --timestamp -s "$CERT_ID" --entitlements "$ENTITLEMENTS" -- "$BIN_DIR/yt-dlp"
+          fi
 
       - name: Tauri build and release
         uses: tauri-apps/tauri-action@action-v0.6.1
