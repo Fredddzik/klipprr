@@ -13,6 +13,9 @@
 #   APPLE_ID                   - Apple ID email
 #   APPLE_PASSWORD             - app-specific password (not main Apple password)
 #   APPLE_TEAM_ID              - Team ID from Apple Developer
+# Optional (to have public downloads while repo is private):
+#   RELEASES_PUBLIC_REPO       - Variable: public repo for releases only (e.g. Fredddzik/klipprr-releases)
+#   RELEASES_PUBLIC_REPO_TOKEN - Secret: PAT with repo scope, to create releases in that public repo
 # See doc/UPDATES.md for setup.
 
 name: Release
@@ -97,6 +100,7 @@ jobs:
           fi
 
       - name: Tauri build and release
+        id: tauri
         uses: tauri-apps/tauri-action@action-v0.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -110,7 +114,28 @@ jobs:
           projectPath: clipagent
           tagName: v__VERSION__
           releaseName: 'Klipprr v__VERSION__'
-          releaseBody: 'macOS beta. Download the .app or .app.tar.gz below.'
+          releaseBody: 'macOS beta. Download the .dmg (drag to Applications) or .app.tar.gz below.'
           releaseDraft: false
-          # --bundles app: skip DMG (bundle_dmg.sh often fails in CI); .app is signed/notarized and uploaded
-          args: '--target aarch64-apple-darwin --bundles app'
+          args: '--target aarch64-apple-darwin --bundles app,dmg'
+
+      - name: Mirror release to public repo (optional)
+        if: vars.RELEASES_PUBLIC_REPO != '' && secrets.RELEASES_PUBLIC_REPO_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PUBLIC_REPO_TOKEN }}
+          PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
+        run: |
+          VERSION=$(cat clipagent/src-tauri/tauri.conf.json | grep '"version"' | head -1 | sed 's/.*: *"\([^"]*\)".*/\1/')
+          TAG="v${VERSION}"
+          BUNDLE_MACOS="clipagent/src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
+          BUNDLE_DMG="clipagent/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg"
+          FILES=()
+          for f in "$BUNDLE_MACOS/Klipprr_aarch64.app.tar.gz" "$BUNDLE_MACOS/Klipprr_aarch64.app.tar.gz.sig" "$BUNDLE_MACOS/latest.json"; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+          for f in "$BUNDLE_DMG"/*.dmg; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+          [ ${#FILES[@]} -eq 0 ] && { echo "No artifacts to upload"; exit 1; }
+          echo "Creating release $TAG in $PUBLIC_REPO"
+          gh release create "$TAG" --repo "$PUBLIC_REPO" --title "Klipprr $TAG" --notes "macOS beta. Download the .dmg (drag to Applications) or .app.tar.gz below."
+          gh release upload "$TAG" --repo "$PUBLIC_REPO" "${FILES[@]}" --clobber

@@ -34,6 +34,25 @@ After that, pushing a new version tag (e.g. `v0.1.1`) triggers a new build and r
 
 ---
 
+## Public downloads while the repo is private
+
+GitHub does **not** let you make only releases public on a private repo — either the whole repo is public (and anyone can see code and releases) or it's private (releases are not reachable without auth). To keep source private but offer public downloads:
+
+1. **Create a second, public repo** (e.g. `Fredddzik/klipprr-releases`) with no source — just used for releases. Add a short README like "Download Klipprr for Mac from the Releases page."
+2. **In the private repo (klipprr):** Add variable `RELEASES_PUBLIC_REPO` = `Fredddzik/klipprr-releases`. Add secret `RELEASES_PUBLIC_REPO_TOKEN` using a **Personal access token (classic)**:
+   - GitHub → **Settings** (your profile) → **Developer settings** → **Personal access tokens** → **Tokens (classic)**.
+   - Click **Generate new token** → **Generate new token (classic)**.
+   - **Note:** e.g. `klipprr-releases-mirror`. **Expiration:** 90 days, 1 year, or No expiration.
+   - **Scopes:** Check **repo** (full control of private repositories — needed to create releases and upload assets in the public repo).
+   - Generate token, **copy it immediately** (you won’t see it again). In the private repo go to **Settings → Secrets and variables → Actions → New repository secret**, name `RELEASES_PUBLIC_REPO_TOKEN`, value = the pasted token.
+3. **Release workflow:** On each release, the workflow will still create the release in your **private** repo, then mirror the built Mac artifacts (`.app.tar.gz`, `.sig`, `latest.json`) to the **public** repo's release of the same tag (e.g. `v0.1.1`).
+4. **Website (Vercel):** Set **NEXT_PUBLIC_RELEASES_REPO** = `Fredddzik/klipprr-releases`. The `/download` page will fetch the latest release from that repo and show the Mac download button.
+5. **In-app updater:** In `clipagent/src-tauri/tauri.conf.json`, set `plugins.updater.endpoints` to the public repo's `latest.json` URL, e.g. `https://github.com/Fredddzik/klipprr-releases/releases/latest/download/latest.json`, so "Check for updates" inside the app uses the public repo.
+
+Result: your main repo stays private (no one sees your code), and the public repo only has release assets so users can download and get updates.
+
+---
+
 ## 1. Generate signing keys (one-time)
 
 Updates are verified with a signature. You need a **private** key (secret) and a **public** key (in the app config).
