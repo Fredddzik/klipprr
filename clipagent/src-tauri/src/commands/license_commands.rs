@@ -395,16 +395,23 @@ pub async fn sync_license_from_supabase(
         return Err(format!("supabase_request_failed: {}", status));
     }
 
-    let rows: Vec<SupabaseLicenseRow> = match resp.json().await {
+    let status = resp.status();
+    let body_bytes = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_else(|_| Vec::new());
+    let snippet_len = body_bytes.len().min(400);
+    let body_snippet = String::from_utf8_lossy(&body_bytes[..snippet_len]);
+    append_file_log(&format!("[SYNC] Response status={} body_len={} snippet={:?}", status, body_bytes.len(), body_snippet));
+
+    let rows: Vec<SupabaseLicenseRow> = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
         Err(e) => {
-            append_file_log(&format!("[SYNC] JSON parse failed: {}", e));
+            append_file_log(&format!("[SYNC] JSON parse failed: {} body_snippet={:?}", e, body_snippet));
             downgrade_to_free(&app);
             return Err(e.to_string());
         }
     };
-    println!("[SYNC] Supabase rows: {:?}", rows);
-    append_file_log(&format!("[SYNC] Supabase rows: {:?}", rows));
+    let row_count = rows.len();
+    println!("[SYNC] Supabase rows (count={}): {:?}", row_count, rows);
+    append_file_log(&format!("[SYNC] Supabase rows count={} user_id={:?}", row_count, user_id));
 
     // Current local state (plan name and whether we have an active license)
     let (local_plan, local_active) = match core_get_license_status(&app) {
@@ -442,12 +449,15 @@ pub async fn sync_license_from_supabase(
         }
     }
 
-    // Supabase says no active license (or empty rows)
+    // Supabase returned 0 rows or no row with active=true (RLS may block if JWT user_id != licenses.user_id).
     if !local_active {
         append_file_log("[SYNC] Idempotent: local already cleared, skip clear");
         return Ok(());
     }
-    append_file_log("[SYNC] No active license in Supabase; clearing local license");
+    append_file_log(&format!(
+        "[SYNC] No active license in Supabase for user_id={} (got {} rows). Check licenses.user_id matches this id and RLS allows SELECT.",
+        user_id, row_count
+    ));
     downgrade_to_free(&app);
     Ok(())
 }

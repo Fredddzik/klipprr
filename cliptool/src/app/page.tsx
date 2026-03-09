@@ -1101,9 +1101,19 @@ useEffect(() => {
     const { error } = await supabase.functions.invoke("redeem_activation_code", {
       body: { code },
     });
-    if (error) return { error: error.message ?? "Activation failed." };
+    // Push current session to backend so sync uses same JWT (RLS will then see the license we just created).
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.access_token) {
+      await invoke("set_supabase_session", {
+        accessToken: session.access_token,
+        refreshToken: session.refresh_token ?? "",
+      });
+    }
     await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
     await refreshCapabilities();
+    if (error) {
+      return { error: error.message ?? "Activation failed." };
+    }
     return {};
   }}
 />

@@ -38,9 +38,10 @@ You have four main pieces: **auth.users** (built-in), **profiles**, **licenses**
 
 ## 4. `public.activation_codes`
 
-- List of codes (e.g. `BETA-CLIP-001`); columns like `code`, `plan`, `redeemed_by`, `redeemed_at`.
+- List of codes (e.g. `BETA-CLIP-001`); columns: `code`, `plan`, **`license_duration_days`**, `redeemed_by`, `redeemed_at`, `created_at`.
+- **`license_duration_days`** (nullable): If **NULL**, the redeemed license is permanent (`licenses.expires_at` = NULL). If set (e.g. **30**), the license expires that many days after redemption (`licenses.expires_at` = now() + N days). Use permanent for friends, 30 for one-month beta testers, 7 for a week, etc.
 - **`redeemed_by`** = `auth.users.id` of the user who redeemed the code.
-- When a code is redeemed, a row is written to **licenses** for that user and the code is marked as redeemed.
+- When a code is redeemed, the **redeem_activation_code** Edge Function should create/update **licenses** with `expires_at` = NULL when `license_duration_days` is NULL, or `expires_at` = now() + `license_duration_days` when it is set.
 
 ---
 
@@ -71,3 +72,23 @@ SELECT * FROM public.licenses WHERE user_id = '<that-id>';
 ```
 
 To have your email show up in `profiles` and thus in `v_user_licenses`, you can either add a trigger that creates a profile on `auth.users` insert, or ensure your app/website upserts a profile when you log in (e.g. on the login or upgrade page).
+
+---
+
+## Beta codes: permanent vs time-limited
+
+- **Permanent (friends):** Insert codes with **`license_duration_days` = NULL**. The Edge Function must set **`licenses.expires_at` = NULL** when redeeming.
+- **Time-limited (e.g. beta testers):** Insert codes with **`license_duration_days` = 30** (one month), **7** (one week), etc. The Edge Function must set **`licenses.expires_at` = now() + license_duration_days** when redeeming.
+
+**redeem_activation_code Edge Function** should:
+
+1. Look up the code in `activation_codes`, get `plan` and **`license_duration_days`**.
+2. Insert/update `licenses` for the user with `plan` = 'pro', **active** = true, and  
+   **`expires_at`** = NULL if `license_duration_days` is NULL, else **`expires_at`** = now() + (`license_duration_days` || ' days')::interval.
+3. Mark the code as redeemed (`redeemed_by`, `redeemed_at`).
+
+**Creating codes:**
+
+1. **Supabase Dashboard** → **SQL Editor** → run the migration **`20250309120000_activation_codes_license_duration.sql`** if you haven’t (adds `license_duration_days`).
+2. Use **`supabase/scripts/insert_10_beta_codes.sql`**: it inserts 10 permanent codes (`license_duration_days` null). For one-month codes, insert with `license_duration_days = 30` (see the commented example in that file).
+3. Share codes; users sign in → Upgrade → enter code → Redeem → Sync.
