@@ -5,7 +5,11 @@
 #   NEXT_PUBLIC_SUPABASE_URL      - Supabase project URL (for frontend build)
 #   NEXT_PUBLIC_SUPABASE_ANON_KEY - Supabase anon key (for frontend build)
 # Required secrets:
-#   TAURI_SIGNING_PRIVATE_KEY  - contents of ~/.tauri/clipagent.key (updater signature)
+#   TAURI_SIGNING_PRIVATE_KEY  - updater private key (full file contents). Either: (1) Generate with password:
+#     cargo tauri signer generate -w ~/.tauri/clipagent-ci.key -p "YourPassword" then set TAURI_SIGNING_PRIVATE_KEY_PASSWORD too.
+#     (2) Unencrypted key: cargo install rsign2 (binary: rsign), run rsign generate -W -s ~/.tauri/clipagent-ci.key -p ~/.tauri/clipagent-ci.key.pub,
+#     put pub key in tauri.conf.json plugins.updater.pubkey, private key contents in this secret.
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD - only if key was generated with a password (leave unset for unencrypted key)
 #   APPLE_CERTIFICATE          - base64 of Developer ID Application .p12
 #   APPLE_CERTIFICATE_PASSWORD - password for the .p12
 #   KEYCHAIN_PASSWORD          - password for the temporary keychain
@@ -94,7 +98,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ''
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ env.CERT_ID }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
