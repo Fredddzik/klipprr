@@ -995,7 +995,7 @@ useEffect(() => {
     } catch (err) {
       console.error("Update check failed:", err);
       setUpdateStatus("error");
-      setTimeout(() => setUpdateStatus("idle"), 4000);
+      setTimeout(() => setUpdateStatus("idle"), 5000);
     }
   }
 

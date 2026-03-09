@@ -486,7 +486,8 @@ No need to “change” an existing version; each release is a new version and �
 
 - **No updater artifacts / missing latest.json**  
   - Build must run with `TAURI_SIGNING_PRIVATE_KEY` set (local or `TAURI_SIGNING_PRIVATE_KEY` secret in GitHub).  
-  - `createUpdaterArtifacts: true` must be set in `tauri.conf.json` (already done).
+  - `createUpdaterArtifacts: true` must be set in `tauri.conf.json` (already done).  
+  - **Public repo (klipprr-releases):** The mirror step now **generates and uploads** `latest.json` so “Check for updates” works. If you already published a release there without `latest.json`, create the JSON (see format in section 7.7), add the `.sig` content and download URL for the `.app.tar.gz` asset, and upload `latest.json` to that release.
 
 - **Signature verification failed**  
   - The **public** key in `tauri.conf.json` must match the key pair of the **private** key used when building.  

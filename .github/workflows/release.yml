@@ -128,14 +128,22 @@ jobs:
           TAG="v${VERSION}"
           BUNDLE_MACOS="clipagent/src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
           BUNDLE_DMG="clipagent/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg"
-          FILES=()
-          for f in "$BUNDLE_MACOS/Klipprr_aarch64.app.tar.gz" "$BUNDLE_MACOS/Klipprr_aarch64.app.tar.gz.sig" "$BUNDLE_MACOS/latest.json"; do
-            [ -f "$f" ] && FILES+=("$f")
-          done
+          # Find .app.tar.gz (Tauri may name it Klipprr_aarch64.app.tar.gz or Klipprr_0.1.3_aarch64.app.tar.gz)
+          APP_TAR_GZ=$(echo "$BUNDLE_MACOS"/Klipprr*.app.tar.gz | awk '{print $1}')
+          APP_SIG="${APP_TAR_GZ}.sig"
+          [ -f "$APP_TAR_GZ" ] || { echo "No .app.tar.gz found in $BUNDLE_MACOS"; ls -la "$BUNDLE_MACOS" || true; exit 1; }
+          [ -f "$APP_SIG" ] || { echo "No .sig for $APP_TAR_GZ"; exit 1; }
+          APP_TAR_GZ_BASENAME=$(basename "$APP_TAR_GZ")
+          FILES=("$APP_TAR_GZ" "$APP_SIG")
           for f in "$BUNDLE_DMG"/*.dmg; do
             [ -f "$f" ] && FILES+=("$f")
           done
-          [ ${#FILES[@]} -eq 0 ] && { echo "No artifacts to upload"; exit 1; }
-          echo "Creating release $TAG in $PUBLIC_REPO"
+          echo "Creating release $TAG in $PUBLIC_REPO (app bundle: $APP_TAR_GZ_BASENAME)"
           gh release create "$TAG" --repo "$PUBLIC_REPO" --title "Klipprr $TAG" --notes "macOS beta. Download the .dmg (drag to Applications) or .app.tar.gz below."
           gh release upload "$TAG" --repo "$PUBLIC_REPO" "${FILES[@]}" --clobber
+          # Generate latest.json so "Check for updates" works (URL must match the uploaded asset name).
+          SIGNATURE=$(cat "$APP_SIG" | jq -Rs .)
+          DOWNLOAD_URL="https://github.com/${PUBLIC_REPO}/releases/download/${TAG}/${APP_TAR_GZ_BASENAME}"
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "{\"version\":\"${VERSION}\",\"notes\":\"\",\"pub_date\":\"${PUB_DATE}\",\"platforms\":{\"darwin-aarch64\":{\"signature\":${SIGNATURE},\"url\":\"${DOWNLOAD_URL}\"}}}" > latest.json
+          gh release upload "$TAG" --repo "$PUBLIC_REPO" latest.json --clobber
