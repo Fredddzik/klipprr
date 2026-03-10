@@ -601,6 +601,8 @@ useEffect(() => {
 
 // When the window gains focus (e.g. after user clicked "Open Klipprr" in the browser),
 // consume any pending auth tokens so login completes even if auth-success/deep-link was missed.
+// Also run once on mount (delayed) so cold-start deep links are picked up when the backend
+// filled PENDING_AUTH before the frontend was ready.
 useEffect(() => {
   const tryConsumePendingAuth = async () => {
     if (!(window as any).__TAURI__) return;
@@ -625,6 +627,10 @@ useEffect(() => {
     }
   };
 
+  // Cold start: deep link was handled before frontend loaded; PENDING_AUTH is set. Run once after
+  // a short delay so the backend has finished processing the URL.
+  const t = setTimeout(() => tryConsumePendingAuth(), 800);
+
   let wasHidden = false;
   const onVisibility = () => {
     const visible = document.visibilityState === "visible";
@@ -640,6 +646,7 @@ useEffect(() => {
   document.addEventListener("visibilitychange", onVisibility);
   window.addEventListener("focus", onWindowFocus);
   return () => {
+    clearTimeout(t);
     document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("focus", onWindowFocus);
   };
