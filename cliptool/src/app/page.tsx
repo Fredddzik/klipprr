@@ -1101,7 +1101,10 @@ useEffect(() => {
     const { error } = await supabase.functions.invoke("redeem_activation_code", {
       body: { code },
     });
-    // Push current session to backend so sync uses same JWT (RLS will then see the license we just created).
+    if (error) {
+      return { error: error.message ?? "Activation failed." };
+    }
+    // Redeem succeeded: push session and sync so the app picks up Pro immediately.
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.access_token) {
       await invoke("set_supabase_session", {
@@ -1111,9 +1114,6 @@ useEffect(() => {
     }
     await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
     await refreshCapabilities();
-    if (error) {
-      return { error: error.message ?? "Activation failed." };
-    }
     return {};
   }}
 />

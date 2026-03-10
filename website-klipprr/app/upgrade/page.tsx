@@ -72,23 +72,27 @@ export default function UpgradePage() {
     return () => subscription.unsubscribe();
   }, [supabase]);
 
-  // 🔑 Redirect back to the app after successful login (deep link handoff)
-useEffect(() => {
-  if (!supabase) return;
-  if (!session) return;
+  // 🔑 Redirect back to the app with session in the deep link so the app can log in (same as auth/callback).
+  // Without tokens in the URL, the app would only focus and stay logged out.
+  useEffect(() => {
+    if (!supabase) return;
+    if (!session?.access_token || !session?.refresh_token) return;
 
-  // redirectTo may be in query (original) or hash (supabase flow)
-  const searchParams = new URLSearchParams(window.location.search);
-  const hashParams = new URLSearchParams(window.location.hash.replace("#", ""));
+    const searchParams = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(window.location.hash.replace("#", ""));
 
-  const redirectTo =
-    searchParams.get("redirectTo") || hashParams.get("redirectTo");
+    const redirectTo =
+      searchParams.get("redirectTo") || hashParams.get("redirectTo");
 
-  if (redirectTo) {
-    console.log("[Upgrade] Redirecting back to app:", redirectTo);
-    window.location.href = redirectTo;
-  }
-}, [supabase, session]);
+    if (redirectTo) {
+      const expiresAt = session.expires_at ? String(session.expires_at) : "";
+      const deepLink =
+        `${redirectTo}#access_token=${encodeURIComponent(session.access_token)}&refresh_token=${encodeURIComponent(session.refresh_token)}` +
+        (expiresAt ? `&expires_at=${encodeURIComponent(expiresAt)}` : "");
+      console.log("[Upgrade] Redirecting back to app with session");
+      window.location.href = deepLink;
+    }
+  }, [supabase, session]);
 
   // Fetch license when logged in (and after Stripe success)
   const refreshLicense = () => {

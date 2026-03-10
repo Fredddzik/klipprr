@@ -455,8 +455,9 @@ pub async fn sync_license_from_supabase(
         return Ok(());
     }
     append_file_log(&format!(
-        "[SYNC] No active license in Supabase for user_id={} (got {} rows). Check licenses.user_id matches this id and RLS allows SELECT.",
-        user_id, row_count
+        "[SYNC] No active license in Supabase for user_id={} (got {} rows). Response snippet: {:?}. \
+         If you just redeemed a code: ensure redeem Edge Function sets licenses.user_id to auth.uid() and uses upsert (update existing row) so duplicate active row is not inserted.",
+        user_id, row_count, body_snippet
     ));
     downgrade_to_free(&app);
     Ok(())

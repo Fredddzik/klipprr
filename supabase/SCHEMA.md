@@ -83,8 +83,10 @@ To have your email show up in `profiles` and thus in `v_user_licenses`, you can 
 **redeem_activation_code Edge Function** should:
 
 1. Look up the code in `activation_codes`, get `plan` and **`license_duration_days`**.
-2. Insert/update `licenses` for the user with `plan` = 'pro', **active** = true, and  
-   **`expires_at`** = NULL if `license_duration_days` is NULL, else **`expires_at`** = now() + (`license_duration_days` || ' days')::interval.
+2. **Use upsert logic** so the user gets Pro even if they already have a license row (e.g. free). The table has a unique index `(user_id) WHERE active = true`, so a plain INSERT fails if the user already has an active row. Do:
+   - **UPDATE** `licenses` SET `plan` = 'pro', `active` = true, `expires_at` = … WHERE `user_id` = `user.id` (from `auth.getUser()`).
+   - If no row was updated (user had no row), **INSERT** one with `user_id: user.id`, `plan: 'pro'`, `active: true`, `expires_at` as above.
+   - Always use **`user.id`** from the JWT (`auth.getUser()`), not from the code or any other source, so RLS and the app’s sync (which queries by session user_id) see the same row.
 3. Mark the code as redeemed (`redeemed_by`, `redeemed_at`).
 
 **Creating codes:**
