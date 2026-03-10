@@ -312,9 +312,15 @@ pub async fn sync_license_from_supabase(
             "SUPABASE_ANON_KEY not set (pass from frontend, set env, or build with cliptool/.env.local)".to_string()
         })?;
 
+    // Log URL prefix so you can verify the app is hitting the right project (not placeholder or another ref).
+    let url_prefix = supabase_url
+        .trim_end_matches('/')
+        .chars()
+        .take(50)
+        .collect::<String>();
     append_file_log(&format!(
-        "[SYNC] Using Supabase URL (len {}), anon key (len {})",
-        supabase_url.len(),
+        "[SYNC] Supabase URL prefix: {}... (anon key len={})",
+        url_prefix,
         supabase_anon_key.len()
     ));
 
