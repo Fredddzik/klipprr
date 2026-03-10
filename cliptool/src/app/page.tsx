@@ -691,6 +691,13 @@ async function syncLicenseFromSupabase() {
         const caps = await tauriInvoke<Capabilities>("get_capabilities");
         if (caps && (caps.canRenameClips || caps.canSetCustomExportPath)) {
           setCaps(caps);
+          // Backend has Pro but frontend had no session — restore session so UI shows logged in
+          const tokens = await invoke<[string, string] | null>("get_stored_session_tokens");
+          if (tokens) {
+            const [accessToken, refreshToken] = tokens;
+            await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+            await loadAuthAndPlan();
+          }
           return;
         }
       } catch {
