@@ -39,21 +39,41 @@ pub fn yt_dlp_cookies_browser() -> &'static str {
     }
 }
 
+#[cfg(windows)]
+fn binary_name(binary: &str) -> String {
+    format!("{}.exe", binary)
+}
+
+#[cfg(not(windows))]
+fn binary_name(binary: &str) -> String {
+    binary.to_string()
+}
+
 fn resolve_binary_path(binary: &str) -> PathBuf {
-    // 1. Always try resolving relative to the currently running executable.
-    // This works for both:
-    // - Installed .app in /Applications
-    // - target/release/bundle builds
+    let name = binary_name(binary);
+
+    // 1. Windows: exe is next to bin/ (e.g. Program Files/Klipprr/Klipprr.exe, bin/ in same dir)
+    #[cfg(windows)]
     if let Ok(exe_path) = env::current_exe() {
-        // Walk up until we find a ".app" bundle root
+        if let Some(app_dir) = exe_path.parent() {
+            for subdir in ["bin", "resources/bin"] {
+                let candidate = app_dir.join(subdir).join(&name);
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    // 2. macOS: walk up until we find a ".app" bundle root
+    #[cfg(target_os = "macos")]
+    if let Ok(exe_path) = env::current_exe() {
         let mut current = exe_path.as_path();
-
         while let Some(parent) = current.parent() {
-            if let Some(name) = parent.file_name() {
-                if name.to_string_lossy().ends_with(".app") {
+            if let Some(file_name) = parent.file_name() {
+                if file_name.to_string_lossy().ends_with(".app") {
                     let resources_bin =
-                        parent.join("Contents").join("Resources").join("bin").join(binary);
-
+                        parent.join("Contents").join("Resources").join("bin").join(&name);
                     if resources_bin.exists() {
                         return resources_bin;
                     }
@@ -63,19 +83,14 @@ fn resolve_binary_path(binary: &str) -> PathBuf {
         }
     }
 
-    // 2. Development fallback ONLY in debug builds
-    // This prevents production builds from ever resolving to CARGO_MANIFEST_DIR.
+    // 3. Development fallback ONLY in debug builds
     #[cfg(debug_assertions)]
     {
-        let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("bin")
-            .join(binary);
-
+        let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin").join(&name);
         if dev_path.exists() {
             return dev_path;
         }
     }
 
-    // 3. If we reach here, something is wrong — fail loudly instead of silently using a wrong path
     panic!("Failed to resolve bundled binary path for {}", binary);
 }
