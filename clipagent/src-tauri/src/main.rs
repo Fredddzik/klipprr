@@ -405,18 +405,10 @@ fn main() {
                                 }
 
                                 append_file_log("[DEEP LINK] Session stored in backend");
+                                // Do not sync here: we have no Supabase URL/key (None, None). Frontend will
+                                // receive auth-success and call sync_license_from_supabase(getSupabaseConfigForBackend()).
 
-                                if let Err(e) = crate::commands::license_commands::sync_license_from_supabase(
-                                    app_for_async.clone(),
-                                    None,
-                                    None,
-                                ).await {
-                                    append_file_log(&format!("[DEEP LINK] License sync failed: {:?}", e));
-                                } else {
-                                    append_file_log("[DEEP LINK] License sync successful");
-                                }
-
-                                // Hand off tokens to frontend so it can setSession and avoid clearing license on load
+                                // Hand off tokens to frontend so it can setSession and sync with URL/key
                                 if let Ok(mut guard) = crate::PENDING_AUTH.lock() {
                                     *guard = Some((access_clone.clone(), refresh_clone.clone()));
                                     append_file_log("[DEEP LINK] Tokens stored in PENDING_AUTH for frontend");
