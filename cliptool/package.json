@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build && node -e \"const fs=require('fs');const path=require('path');const ui=path.join(__dirname,'../clipagent/ui');try{fs.rmSync(path.join(ui,'out'),{recursive:true,force:true});}catch(e){};fs.mkdirSync(ui,{recursive:true});fs.renameSync(path.join(__dirname,'out'),path.join(ui,'out'));\"",
+    "build": "next build && node scripts/copy-out.js",
     "start": "next start",
     "lint": "eslint"
   },
