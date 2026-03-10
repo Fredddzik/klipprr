@@ -14,6 +14,9 @@ fn main() {
     let env_path = Path::new(&manifest_dir)
         .join("../../cliptool/.env.local");
 
+    // 1) Local dev: cliptool/.env.local (not in repo)
+    // 2) CI (GitHub Actions): env vars NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY
+    //    set on the Tauri build step so the packaged app has them for license sync.
     let (url, key) = if env_path.exists() {
         let content = fs::read_to_string(&env_path).unwrap_or_default();
         let mut url = String::new();
@@ -36,7 +39,10 @@ fn main() {
         }
         (url, key)
     } else {
-        (String::new(), String::new())
+        // No .env.local (e.g. CI): use env vars so release workflow can pass vars to Tauri build
+        let url = env::var("NEXT_PUBLIC_SUPABASE_URL").unwrap_or_default();
+        let key = env::var("NEXT_PUBLIC_SUPABASE_ANON_KEY").unwrap_or_default();
+        (url, key)
     };
 
     let content = format!(

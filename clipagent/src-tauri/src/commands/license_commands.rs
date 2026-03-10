@@ -318,11 +318,13 @@ pub async fn sync_license_from_supabase(
         .chars()
         .take(50)
         .collect::<String>();
-    append_file_log(&format!(
+    let url_log = format!(
         "[SYNC] Supabase URL prefix: {}... (anon key len={})",
         url_prefix,
         supabase_anon_key.len()
-    ));
+    );
+    println!("{}", url_log);
+    append_file_log(&url_log);
 
     let url = format!(
         "{}/rest/v1/licenses?user_id=eq.{}&active=eq.true&limit=1",
@@ -460,9 +462,14 @@ pub async fn sync_license_from_supabase(
         append_file_log("[SYNC] Idempotent: local already cleared, skip clear");
         return Ok(());
     }
+    let no_license_msg = format!(
+        "[SYNC] No active license for user_id={} (got {} rows). URL prefix: {} | Response: {:?}",
+        user_id, row_count, url_prefix, body_snippet
+    );
+    println!("{}", no_license_msg);
     append_file_log(&format!(
         "[SYNC] No active license in Supabase for user_id={} (got {} rows). Response snippet: {:?}. \
-         If you just redeemed a code: ensure redeem Edge Function sets licenses.user_id to auth.uid() and uses upsert (update existing row) so duplicate active row is not inserted.",
+         If you just redeemed a code: ensure redeem Edge Function sets licenses.user_id to auth.uid() and uses upsert.",
         user_id, row_count, body_snippet
     ));
     downgrade_to_free(&app);
