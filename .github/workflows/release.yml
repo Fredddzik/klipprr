@@ -18,7 +18,9 @@
 #   RELEASES_PUBLIC_REPO_TOKEN - Secret: PAT with repo scope, to create releases in that public repo
 # See doc/WINDOWS_RELEASE_PLAN.md for Windows (unsigned build; signing is optional).
 #
-# Windows job runs after the Mac job and adds a .msi to the same release. macOS job is unchanged.
+# Windows job runs after the Mac job and adds a .msi to the same release. To re-run only
+# the Windows build (e.g. after a fix) without burning macOS minutes: Actions → Release
+# → Run workflow → set "Only run Windows build..." to true and version (e.g. 0.1.12).
 
 name: Release
 
@@ -31,9 +33,15 @@ on:
       version:
         description: "Version to release (e.g. 0.1.0). Must match tauri.conf.json. Ignored on tag push."
         required: false
+      windows_only:
+        description: "Only run Windows build and attach to existing release (saves macOS minutes)."
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   release:
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_only != 'true'
     permissions:
       contents: write
     runs-on: macos-latest
@@ -143,8 +151,12 @@ jobs:
           for f in "$BUNDLE_DMG"/*.dmg; do
             [ -f "$f" ] && FILES+=("$f")
           done
-          echo "Creating release $TAG in $PUBLIC_REPO (app bundle: $APP_TAR_GZ_BASENAME)"
-          gh release create "$TAG" --repo "$PUBLIC_REPO" --title "Klipprr $TAG" --notes "macOS beta. Download the .dmg (drag to Applications) or .app.tar.gz below."
+          if ! gh release view "$TAG" --repo "$PUBLIC_REPO" >/dev/null 2>&1; then
+            echo "Creating release $TAG in $PUBLIC_REPO (app bundle: $APP_TAR_GZ_BASENAME)"
+            gh release create "$TAG" --repo "$PUBLIC_REPO" --title "Klipprr $TAG" --notes "macOS beta. Download the .dmg (drag to Applications) or .app.tar.gz below."
+          else
+            echo "Release $TAG already exists in $PUBLIC_REPO, uploading assets."
+          fi
           gh release upload "$TAG" --repo "$PUBLIC_REPO" "${FILES[@]}" --clobber
           # Generate latest.json so "Check for updates" works (URL must match the uploaded asset name).
           SIGNATURE=$(cat "$APP_SIG" | jq -Rs .)
@@ -156,6 +168,7 @@ jobs:
   # Windows build (unsigned). Runs after Mac job; uploads .msi to same release.
   # continue-on-error: true so a Windows failure does not mark the workflow failed (Mac release is already done).
   release-windows:
+    if: github.event.inputs.windows_only != 'true'
     permissions:
       contents: write
     runs-on: windows-latest
@@ -224,6 +237,83 @@ jobs:
           PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
         run: |
           $tag = "${{ github.ref_name }}"
+          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($msi) {
+            gh release upload $tag $msi.FullName --repo $env:PUBLIC_REPO --clobber
+            echo "Mirrored $($msi.Name) to $env:PUBLIC_REPO"
+          }
+
+  # Same as release-windows but no Mac job: for re-running only Windows and attaching to existing release.
+  release-windows-only:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.windows_only == 'true'
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/v${{ github.event.inputs.version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        shell: bash
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          cd cliptool && npm ci && npm run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Download Windows ffmpeg and ffprobe
+        run: |
+          $binDir = "clipagent\src-tauri\bin"
+          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+          $api = Invoke-RestMethod "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
+          $zipUrl = ($api.assets | Where-Object { $_.name -match "win64-gpl\.zip$" -and $_.name -notmatch "shared" } | Select-Object -First 1).browser_download_url
+          Invoke-WebRequest -Uri $zipUrl -OutFile ffmpeg.zip -UseBasicParsing
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extract -Force
+          Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffmpeg.exe | Copy-Item -Destination $binDir -Force
+          Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffprobe.exe | Copy-Item -Destination $binDir -Force
+          Remove-Item -Recurse -Force ffmpeg.zip, ffmpeg_extract
+
+      - name: Download Windows yt-dlp
+        shell: bash
+        run: |
+          BIN_DIR="clipagent/src-tauri/bin"
+          YTDLP_URL=$(curl -sS "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest" | grep -E "browser_download_url.*yt-dlp.exe" | head -1 | cut -d '"' -f 4)
+          curl -sL "$YTDLP_URL" -o "$BIN_DIR/yt-dlp.exe"
+
+      - name: Tauri build (Windows MSI)
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          cd clipagent/src-tauri
+          cargo tauri build --bundles msi
+
+      - name: Upload Windows asset to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v${{ github.event.inputs.version }}"
+          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($msi) { gh release upload $tag $msi.FullName --clobber; echo "Uploaded $($msi.Name)" } else { echo "No .msi found"; exit 1 }
+
+      - name: Mirror Windows asset to public repo
+        if: vars.RELEASES_PUBLIC_REPO != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PUBLIC_REPO_TOKEN }}
+          PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
+        run: |
+          $tag = "v${{ github.event.inputs.version }}"
           $msi = Get-ChildItem -Path "clipagent\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($msi) {
             gh release upload $tag $msi.FullName --repo $env:PUBLIC_REPO --clobber
