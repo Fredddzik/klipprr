@@ -8,6 +8,8 @@ async function getLatestRelease(): Promise<{
   version: string;
   macUrl: string | null;
   macLabel: string;
+  windowsUrl: string | null;
+  windowsLabel: string;
 } | null> {
   try {
     const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
@@ -24,9 +26,17 @@ async function getLatestRelease(): Promise<{
     const dmg = assets.find((a) => a.name.endsWith(".dmg"));
     const appTarGz = assets.find((a) => a.name.endsWith(".app.tar.gz"));
     const macAsset = dmg ?? appTarGz;
-    if (!version || !macAsset?.browser_download_url) return null;
+    const msi = assets.find((a) => a.name.endsWith(".msi"));
+    if (!version) return null;
     const macLabel = dmg ? ".dmg" : ".app.tar.gz";
-    return { version, macUrl: macAsset.browser_download_url, macLabel };
+    const windowsLabel = msi ? ".msi" : "";
+    return {
+      version,
+      macUrl: macAsset?.browser_download_url ?? null,
+      macLabel,
+      windowsUrl: msi?.browser_download_url ?? null,
+      windowsLabel,
+    };
   } catch {
     return null;
   }
@@ -94,11 +104,24 @@ export default async function DownloadPage() {
           </section>
 
           {/* Windows */}
-          <section className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 opacity-80">
+          <section className={`rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 ${release?.windowsUrl ? "" : "opacity-80"}`}>
             <h2 className="text-lg font-semibold text-white flex items-center gap-2">
               <span className="text-2xl">🪟</span> Windows
             </h2>
-            <p className="mt-1 text-sm text-zinc-400">Coming soon.</p>
+            <p className="mt-1 text-sm text-zinc-400">
+              {release?.windowsUrl
+                ? "64-bit. Run the installer; you may see a SmartScreen warning (unsigned build) — choose “Run anyway” to install."
+                : "Coming soon."}
+            </p>
+            {release?.windowsUrl ? (
+              <a
+                href={release.windowsUrl}
+                className="mt-4 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-fuchsia-500 transition"
+              >
+                Download Klipprr
+                {release ? ` v${release.version} (${release.windowsLabel})` : ""}
+              </a>
+            ) : null}
           </section>
 
           {/* Linux */}
