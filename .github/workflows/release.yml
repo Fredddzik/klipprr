@@ -254,6 +254,7 @@ jobs:
           }
 
   # Same as release-windows but no Mac job: for re-running only Windows and attaching to existing release.
+  # Builds from default branch (main) so fixes are included; uploads MSI to existing release for the given version.
   release-windows-only:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.windows_only == 'true'
     permissions:
@@ -261,8 +262,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: refs/tags/v${{ github.event.inputs.version }}
+        # Check out main (default branch), not the tag, so we build latest code with any patches
 
       - name: Setup Node
         uses: actions/setup-node@v4
