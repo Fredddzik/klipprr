@@ -5,7 +5,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use tauri::AppHandle;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(windows)]
+use std::os::windows::process::ExitStatusExt;
 
 use crate::output::{unique_output_path, unique_output_path_with_ext};
 use crate::paths::{running_from_sandboxed_app, yt_dlp_path, ffmpeg_path, ffprobe_path, yt_dlp_cookies_browser};
@@ -575,7 +578,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
             match status {
                 Ok((s, fallback_path)) if s.success() => {
-                    let path = fallback_path.unwrap_or(out_str);
+                    let path: String = fallback_path.unwrap_or_else(|| out_str.clone());
                     results.push(serde_json::json!({
                         "index": i,
                         "name": name,

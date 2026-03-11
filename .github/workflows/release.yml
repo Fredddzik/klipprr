@@ -21,6 +21,11 @@
 # Windows job runs after the Mac job and adds a .msi to the same release. To re-run only
 # the Windows build (e.g. after a fix) without burning macOS minutes: Actions → Release
 # → Run workflow → set "Only run Windows build..." to true and version (e.g. 0.1.12).
+#
+# Test Windows build locally before pushing (catches Rust errors, no CI minutes):
+#   rustup target add x86_64-pc-windows-msvc
+#   cd cliptool && npm run build
+#   cd clipagent/src-tauri && cargo check --target x86_64-pc-windows-msvc
 
 name: Release
 
