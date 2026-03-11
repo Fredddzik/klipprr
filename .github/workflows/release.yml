@@ -214,8 +214,7 @@ jobs:
         shell: bash
         run: |
           BIN_DIR="clipagent/src-tauri/bin"
-          YTDLP_URL=$(curl -sS "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest" | grep -E "browser_download_url.*yt-dlp.exe" | head -1 | cut -d '"' -f 4)
-          curl -sL "$YTDLP_URL" -o "$BIN_DIR/yt-dlp.exe"
+          curl -sL -o "$BIN_DIR/yt-dlp.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 
       - name: Tauri build (Windows MSI)
         env:
@@ -294,8 +293,7 @@ jobs:
         shell: bash
         run: |
           BIN_DIR="clipagent/src-tauri/bin"
-          YTDLP_URL=$(curl -sS "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest" | grep -E "browser_download_url.*yt-dlp.exe" | head -1 | cut -d '"' -f 4)
-          curl -sL "$YTDLP_URL" -o "$BIN_DIR/yt-dlp.exe"
+          curl -sL -o "$BIN_DIR/yt-dlp.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 
       - name: Tauri build (Windows MSI)
         env:
