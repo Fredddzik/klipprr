@@ -239,7 +239,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.ref_name }}"
-          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($msi) { gh release upload $tag $msi.FullName --clobber; echo "Uploaded $($msi.Name)" } else { echo "No .msi found"; exit 1 }
 
       - name: Mirror Windows asset to public repo
@@ -249,7 +249,7 @@ jobs:
           PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
         run: |
           $tag = "${{ github.ref_name }}"
-          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($msi) {
             gh release upload $tag $msi.FullName --repo $env:PUBLIC_REPO --clobber
             echo "Mirrored $($msi.Name) to $env:PUBLIC_REPO"
@@ -320,7 +320,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "v${{ github.event.inputs.version }}"
-          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($msi) { gh release upload $tag $msi.FullName --clobber; echo "Uploaded $($msi.Name)" } else { echo "No .msi found"; exit 1 }
 
       - name: Mirror Windows asset to public repo
@@ -330,7 +330,7 @@ jobs:
           PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
         run: |
           $tag = "v${{ github.event.inputs.version }}"
-          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msi = Get-ChildItem -Path "clipagent\src-tauri\target\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($msi) {
             gh release upload $tag $msi.FullName --repo $env:PUBLIC_REPO --clobber
             echo "Mirrored $($msi.Name) to $env:PUBLIC_REPO"
