@@ -144,3 +144,45 @@ Recommendation: **Option A** is clearer and matches your current “one Mac job 
 - **Same release, same tag:** Mac and Windows assets can live on the same GitHub Release (same tag); the mirror copies both to the public repo; the download page shows one “Download for Mac” and one “Download for Windows” from the same version.
 
 No code changes have been made; this document is the plan only.
+
+---
+
+## 7. Build and test the MSI on your Windows PC (before releasing)
+
+You **cannot** reliably build the Windows MSI on a Mac and test it on Windows: the MSI is produced by Windows-only tooling (WiX, etc.). Use your Windows machine to build and test; if it works there, the same commit will work in CI.
+
+**Prerequisites on Windows:** Node.js 20, Rust (stable), Git. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the “Desktop development with C++” workload (for MSVC).
+
+**Steps (match what CI does):**
+
+1. **Clone / pull** the repo (use the branch or commit you want to release).
+
+2. **Build the frontend** (from repo root):
+   ```powershell
+   cd cliptool
+   npm ci
+   $env:NEXT_PUBLIC_SUPABASE_URL = "your-project-url"
+   $env:NEXT_PUBLIC_SUPABASE_ANON_KEY = "your-anon-key"
+   npm run build
+   ```
+   This runs Next.js and copies `out` into `clipagent/ui/out`.
+
+3. **Install Tauri CLI** (once):
+   ```powershell
+   cargo install tauri-cli --version "^2"
+   ```
+
+4. **Put ffmpeg, ffprobe, and yt-dlp in the app’s bin folder:**
+   - Create `clipagent\src-tauri\bin` if it doesn’t exist.
+   - **ffmpeg / ffprobe:** Download e.g. [BtbN FFmpeg Builds](https://github.com/BtbN/FFmpeg-Builds/releases) (win64-gpl zip), extract, copy `ffmpeg.exe` and `ffprobe.exe` into `clipagent\src-tauri\bin`.
+   - **yt-dlp:** Download [yt-dlp.exe](https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe) into `clipagent\src-tauri\bin`.
+
+5. **Build the MSI** (from repo root):
+   ```powershell
+   cd clipagent\src-tauri
+   $env:NEXT_PUBLIC_SUPABASE_URL = "your-project-url"
+   $env:NEXT_PUBLIC_SUPABASE_ANON_KEY = "your-anon-key"
+   cargo tauri build --bundles msi
+   ```
+
+6. **Install and test:** The MSI is under `clipagent\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\`. Install it and run the app. If everything works, push and run the Release workflow (or “Windows only”) on GitHub.
