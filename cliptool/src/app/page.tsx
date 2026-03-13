@@ -169,7 +169,11 @@ useEffect(() => {
   if (!video) return;
 
   const syncTime = () => {
-    setCurrentTime(video.currentTime);
+    if (Date.now() - programmaticSeekAtRef.current < 250) return;
+    const t = video.currentTime;
+    // Ignore stale 0 when we were at a later time (video not loaded or broken)
+    if (t === 0 && currentTimeRef.current > 1) return;
+    setCurrentTime(t);
   };
 
   const onLoadedMetadata = () => {
@@ -252,6 +256,10 @@ useEffect(() => {
   // Remove resolveRequestId state, use ref instead for request tracking
   const resolveReqRef = useRef(0);
   const pendingSeekRef = useRef<number | null>(null);
+  /** Set when we programmatically seek (timeline/arrow); skip overwriting state from video for a short window to avoid reset to 0 */
+  const programmaticSeekAtRef = useRef(0);
+  /** Track state so we can ignore stale video.currentTime===0 when we know we're at a later time */
+  const currentTimeRef = useRef(0);
   const [showAdvancedExport, setShowAdvancedExport] = useState(false);
   const [editTarget, setEditTarget] = useState<{
     clipId: string;
@@ -283,7 +291,10 @@ useEffect(() => {
   });
 
   useKeyboardShortcuts({
-    videoRef: () => document.querySelector("video"),
+    videoRef: () => (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null,
+    onProgrammaticSeek: () => {
+      programmaticSeekAtRef.current = Date.now();
+    },
     clips,
     markIn,
     setMarkIn,
@@ -490,15 +501,16 @@ async function refreshCapabilities() {
       const [duration, _codec] = await invoke<[number, string | null]>("get_local_video_info", {
         path: selected,
       });
-      const previewUrl = convertFileSrc(selected);
       const title = selected.split(/[/\\]/).pop() ?? "Local video";
       const localId = "local-" + selected.replace(/[/\\:]/g, "_").slice(-64);
+      // Use backend stream URL so video works on Windows (convertFileSrc is unreliable there)
+      const previewUrlForVideo = `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(selected)}`;
       const data: ResolvedVideo = {
         id: localId,
         title,
         duration: Number(duration) || 0,
         thumbnail: null,
-        previewUrl,
+        previewUrl: previewUrlForVideo,
         capabilities: {
           fastMaxHeight: 1080,
           trueMaxHeight: 1080,
@@ -508,7 +520,7 @@ async function refreshCapabilities() {
           id: localId,
           title,
           duration: Number(duration) || 0,
-          preview: { url: previewUrl },
+          preview: { url: previewUrlForVideo },
           capabilities: { fast_max_height: 1080, true_max_height: 1080, true_max_requires_reencode: false },
         },
       };
@@ -811,6 +823,10 @@ async function syncLicenseFromSupabase() {
     // Same video, keep ID in sync
     setPrevVideoId(videoData.id);
   }, [videoData?.id]);
+
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
 
   // Capabilities helpers (computed from videoData, after it's set)
   const videoCaps = videoData?.capabilities;
@@ -1230,13 +1246,18 @@ useEffect(() => {
                 src={
                   isTauri &&
                   videoData.previewUrl &&
+                  !videoData.previewUrl.includes("/local-preview") &&
                   (videoData.previewUrl.startsWith("http://") || videoData.previewUrl.startsWith("https://"))
                     ? `${CLIPAGENT_HTTP}/preview-stream?url=${encodeURIComponent(videoData.previewUrl)}`
                     : videoData.previewUrl
                 }
                 videoKey={videoData.id}
                 currentTime={currentTime}
-                onTimeUpdate={(t) => setCurrentTime(t)}
+                onTimeUpdate={(t) => {
+                  if (Date.now() - programmaticSeekAtRef.current < 250) return;
+                  if (t === 0 && currentTimeRef.current > 1) return;
+                  setCurrentTime(t);
+                }}
               />
             </div>
             <div className="shrink-0 p-2 border-t border-zinc-200 dark:border-zinc-800">
@@ -1248,6 +1269,7 @@ useEffect(() => {
                 selectedClipIds={selectedClipIds}
                 currentTime={currentTime}
                 onSeek={(t) => {
+                  programmaticSeekAtRef.current = Date.now();
                   setCurrentTime(t);
                   const video = (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null;
                   if (!video) return;

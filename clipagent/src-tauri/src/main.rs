@@ -16,6 +16,7 @@ use crate::http::{with_cors, json_response, text_response, handle_http};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_single_instance::init as single_instance;
 use tauri::{Emitter, Manager};
+use std::env;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use serde_json::json;
@@ -323,10 +324,7 @@ fn append_file_log(msg: &str) {
 fn main() {
     println!("ClipAgent started.");
     init_file_logger();
-    std::fs::write(
-        "/tmp/clipagent_proof.txt",
-        "MAIN EXECUTED\n"
-    ).ok();
+    let _ = std::fs::write(env::temp_dir().join("clipagent_proof.txt"), "MAIN EXECUTED\n");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -365,7 +363,11 @@ fn main() {
             commands::license_commands::get_stored_session_tokens,
         ])
         .setup(|app| {
-            let app_handle = app.handle().clone();           
+            // Windows: set resource dir so paths.rs can resolve bundled bin/ (yt-dlp, ffmpeg, ffprobe)
+            if let Ok(res_dir) = app.path().resource_dir() {
+                crate::paths::init_resource_dir(res_dir);
+            }
+            let app_handle = app.handle().clone();
             // Forward deep link URLs to the frontend via a simple event, and handle Supabase magic links.
             let deep_link_handle = app_handle.clone();
             app.deep_link().on_open_url(move |event| {

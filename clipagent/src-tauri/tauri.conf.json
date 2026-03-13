@@ -48,12 +48,10 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "targets": "all",
     "resources": [
-      "bin/yt-dlp",
-      "bin/ffmpeg",
-      "bin/ffprobe",
+      "bin/*",
       "assets/*"
     ],
     "icon": [

@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 export function useKeyboardShortcuts({
   videoRef,
+  onProgrammaticSeek,
   clips,
   markIn,
   setMarkIn,
@@ -15,6 +16,7 @@ export function useKeyboardShortcuts({
   showUndoToast,
 }: {
   videoRef: () => HTMLVideoElement | null;
+  onProgrammaticSeek?: () => void;
   clips: any[];
   markIn: number | null;
   setMarkIn: (v: number | null) => void;
@@ -112,6 +114,7 @@ export function useKeyboardShortcuts({
       // Seek
       if (e.key === "ArrowLeft") {
         e.preventDefault();
+        onProgrammaticSeek?.();
         video.currentTime = Math.max(
           0,
           video.currentTime - (e.metaKey || e.ctrlKey ? frameStep : stepSize)
@@ -121,6 +124,7 @@ export function useKeyboardShortcuts({
 
       if (e.key === "ArrowRight") {
         e.preventDefault();
+        onProgrammaticSeek?.();
         video.currentTime = Math.min(
           video.duration,
           video.currentTime + (e.metaKey || e.ctrlKey ? frameStep : stepSize)
@@ -176,5 +180,6 @@ if (!editTarget && e.key.toLowerCase() === "m") {
     setMarkOut,
     setEditTarget,
     showUndoToast,
+    onProgrammaticSeek,
   ]);
 }

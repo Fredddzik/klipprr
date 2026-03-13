@@ -11,16 +11,16 @@ use std::os::unix::process::ExitStatusExt;
 use std::os::windows::process::ExitStatusExt;
 
 use crate::output::{unique_output_path, unique_output_path_with_ext};
-use crate::paths::{running_from_sandboxed_app, yt_dlp_path, ffmpeg_path, ffprobe_path, yt_dlp_cookies_browser};
+use crate::paths::{running_from_sandboxed_app, skip_browser_cookies_for_yt_dlp, yt_dlp_path, ffmpeg_path, ffprobe_path, yt_dlp_cookies_browser};
 use crate::storage;
 use tauri::Emitter;
 
 /// Watermark image embedded at build time so it cannot be removed or replaced from the app bundle.
 static EMBEDDED_WATERMARK: &[u8] = include_bytes!("../../assets/watermark.png");
 
-/// If not sandboxed, returns [\"--cookies-from-browser\", browser]; otherwise [] so we don't hit "Operation not permitted" on cookie access.
+/// If not sandboxed and not skipping cookies (e.g. Windows DPAPI), returns [\"--cookies-from-browser\", browser]; otherwise [].
 fn yt_dlp_cookie_args() -> Vec<&'static str> {
-    if running_from_sandboxed_app() {
+    if running_from_sandboxed_app() || skip_browser_cookies_for_yt_dlp() {
         vec![]
     } else {
         vec!["--cookies-from-browser", yt_dlp_cookies_browser()]
@@ -33,6 +33,17 @@ fn watermark_path_for_export(export_stamp: u128) -> Result<PathBuf, String> {
     let temp = std::env::temp_dir().join(format!("klipprr_watermark_{}.png", export_stamp));
     std::fs::write(&temp, EMBEDDED_WATERMARK).map_err(|e| e.to_string())?;
     Ok(temp)
+}
+
+/// H.264 encoder for re-encoding. macOS: h264_videotoolbox (hardware); Windows/Linux: libx264 (software).
+#[cfg(target_os = "macos")]
+fn h264_encoder() -> &'static str {
+    "h264_videotoolbox"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn h264_encoder() -> &'static str {
+    "libx264"
 }
 
 /// Returns the default export directory path (e.g. ~/Downloads) for the UI to display.
@@ -225,7 +236,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
     let _ = fs::create_dir_all(&base_dir);
 
-    // -------- LOCAL FILE SOURCE: no yt-dlp, ffmpeg only, same format (stream copy unless watermark or lower quality) --------
+    // -------- LOCAL FILE SOURCE: ffmpeg trim only (stream copy), no re-encode --------
     if let Some(ref local_path_str) = local_path_opt {
         let local_path = PathBuf::from(local_path_str);
         if !local_path.is_file() {
@@ -237,19 +248,6 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             .unwrap_or("mp4");
         let local_str = local_path.to_string_lossy().to_string();
         let base_str = base_dir.display().to_string();
-
-        let source_codec = Command::new(ffprobe_path())
-            .args([
-                "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1",
-                local_str.as_str(),
-            ])
-            .output()
-            .ok()
-            .and_then(|o| {
-                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if s.is_empty() { None } else { Some(s) }
-            });
 
         let mut results = vec![];
         for (i, c) in clips.iter().enumerate() {
@@ -267,79 +265,23 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             let out_path = unique_output_path_with_ext(&base_dir, &safe, ext);
             let out_str = out_path.to_string_lossy().to_string();
 
-            let (success, written_path) = if has_watermark {
-                let wm_str = watermark_path_buf.as_ref().map(|p| p.to_string_lossy().to_string()).expect("watermark path when has_watermark");
-                let is_av1 = source_codec.as_deref() == Some("av1");
-                let (vcodec, pix_fmt, out_ext) = if is_av1 {
-                    ("libaom-av1", "yuv420p", "webm")
-                } else {
-                    ("h264_videotoolbox", "yuv420p", ext)
-                };
-                let out_path_wm = if out_ext != ext {
-                    unique_output_path_with_ext(&base_dir, &safe, out_ext)
-                } else {
-                    out_path.clone()
-                };
-                let temp_wm = std::env::temp_dir().join(format!("klipprr_export_{}_{}.{}", export_stamp, i, out_ext));
-                let temp_str_wm = temp_wm.to_string_lossy().to_string();
-                let ok = Command::new(ffmpeg_path())
-                    .current_dir(&base_dir)
-                    .args([
-                        "-ss", &format!("{:.3}", start),
-                        "-to", &format!("{:.3}", end),
-                        "-i", &local_str,
-                        "-i", &wm_str,
-                        "-filter_complex", "[1:v]scale=iw*0.35:-1[wm];[0:v][wm]overlay=W-w-30:H-h-30",
-                        "-c:v", vcodec,
-                        "-pix_fmt", pix_fmt,
-                        "-b:v", if is_av1 { "2M" } else { "6M" },
-                        "-c:a", if is_av1 { "libopus" } else { "aac" },
-                        "-y", &temp_str_wm,
-                    ])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                let ok = ok && move_temp_to_final(&temp_wm, &out_path_wm).is_ok();
-                (ok, out_path_wm.to_string_lossy().to_string())
-            } else if let Some(h) = fast_cap {
-                let h = h as i32;
-                let temp_path = std::env::temp_dir().join(format!("klipprr_export_{}_{}.{}", export_stamp, i, ext));
-                let temp_str = temp_path.to_string_lossy().to_string();
-                let ok = Command::new(ffmpeg_path())
-                    .current_dir(&base_dir)
-                    .args([
-                        "-ss", &format!("{:.3}", start),
-                        "-to", &format!("{:.3}", end),
-                        "-i", &local_str,
-                        "-vf", &format!("scale=-2:min({},ih)", h),
-                        "-c:v", "h264_videotoolbox",
-                        "-pix_fmt", "yuv420p",
-                        "-c:a", "aac",
-                        "-y", &temp_str,
-                    ])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                let ok = ok && move_temp_to_final(&temp_path, &out_path).is_ok();
-                (ok, out_str.clone())
-            } else {
-                let temp_path = std::env::temp_dir().join(format!("klipprr_export_{}_{}.{}", export_stamp, i, ext));
-                let temp_str = temp_path.to_string_lossy().to_string();
-                let ok = Command::new(ffmpeg_path())
-                    .current_dir(&base_dir)
-                    .args([
-                        "-ss", &format!("{:.3}", start),
-                        "-to", &format!("{:.3}", end),
-                        "-i", &local_str,
-                        "-c", "copy",
-                        "-y", &temp_str,
-                    ])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                let ok = ok && move_temp_to_final(&temp_path, &out_path).is_ok();
-                (ok, out_str.clone())
-            };
+            // Local files: always stream copy (trim only), preserve format and quality
+            let temp_path = std::env::temp_dir().join(format!("klipprr_export_{}_{}.{}", export_stamp, i, ext));
+            let temp_str = temp_path.to_string_lossy().to_string();
+            let ok = Command::new(ffmpeg_path())
+                .current_dir(&base_dir)
+                .args([
+                    "-ss", &format!("{:.3}", start),
+                    "-to", &format!("{:.3}", end),
+                    "-i", &local_str,
+                    "-c", "copy",
+                    "-y", &temp_str,
+                ])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            let ok = ok && move_temp_to_final(&temp_path, &out_path).is_ok();
+            let (success, written_path) = (ok, out_str.clone());
 
             if success {
                 results.push(serde_json::json!({"index": i, "name": name, "ok": true, "path": written_path}));
@@ -476,7 +418,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
                     ffmpeg_args.extend(vec![
                         "-c:v".to_string(),
-                        "h264_videotoolbox".to_string(),
+                        h264_encoder().to_string(),
                         "-pix_fmt".to_string(),
                         "yuv420p".to_string(),
                         "-b:v".to_string(),
@@ -682,7 +624,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     "-i", &full_str,
                     "-i", &wm_str,
                     "-filter_complex", "[1:v]scale=iw*0.35:-1[wm];[0:v][wm]overlay=W-w-30:H-h-30",
-                    "-c:v", "h264_videotoolbox",
+                    "-c:v", h264_encoder(),
                     "-pix_fmt", "yuv420p",
                     "-b:v", "6M",
                     "-c:a", "aac",
