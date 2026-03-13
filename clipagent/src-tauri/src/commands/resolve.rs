@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 use urlencoding::decode;
 
-use crate::paths::{running_from_sandboxed_app, yt_dlp_path, yt_dlp_cookies_browser};
+use crate::paths::{running_from_sandboxed_app, skip_browser_cookies_for_yt_dlp, yt_dlp_path, yt_dlp_cookies_browser};
 
 fn log_to_file(msg: &str) {
     if let Some(mut dir) = dirs::home_dir() {
@@ -35,7 +35,7 @@ pub fn handle_resolve(url: String) -> String {
     let arg0 = "--dump-single-json";
     let arg1 = "--no-warnings";
     let arg2 = "--no-progress";
-    let use_cookies = !running_from_sandboxed_app();
+    let use_cookies = !running_from_sandboxed_app() && !skip_browser_cookies_for_yt_dlp();
     let cookies_browser = yt_dlp_cookies_browser();
 
     let args: Vec<&str> = if use_cookies {
