@@ -350,6 +350,21 @@ export default function UpgradePage() {
                   ? "Subscribe to Pro — 2 months free"
                   : "Subscribe to Pro — Monthly"}
             </button>
+            <p className="mb-5 text-xs text-zinc-500">
+              By continuing, you agree to our{" "}
+              <a className="text-violet-300 hover:text-violet-200 transition" href="/terms">
+                Terms
+              </a>{" "}
+              and acknowledge our{" "}
+              <a className="text-violet-300 hover:text-violet-200 transition" href="/privacy">
+                Privacy Policy
+              </a>
+              . See{" "}
+              <a className="text-violet-300 hover:text-violet-200 transition" href="/refunds">
+                Refunds
+              </a>
+              .
+            </p>
             <p className="mb-3 text-xs text-zinc-500">Or enter your activation code:</p>
             <input
               type="text"
