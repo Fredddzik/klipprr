@@ -200,6 +200,12 @@ export interface ClipSpec {
 }
 
 export interface DownloadAllPayload {
+  /** Client-generated export id to correlate progress events. */
+  client_export_id?: string | null;
+  /** Video title for naming whole-video export (when keep_full). */
+  source_title?: string | null;
+  /** Quality mode: force re-encode to H.264 for maximum compatibility (slower). */
+  quality_reencode_h264?: boolean;
   url: string;
   /** When set, backend uses this file as source instead of url (local file clipping). */
   local_path?: string | null;
@@ -227,11 +233,15 @@ export async function downloadAll(
 ): Promise<AgentResult<DownloadAllResponse>> {
   try {
     const base = CLIPAGENT_HTTP;
+    // Quality mode can take a long time (full download + merge + cut). Keep the request alive
+    // to avoid UI flipping to "connection lost" even though the backend continues.
+    const timeoutMs =
+      payload.mode === "quality" ? 45 * 60 * 1000 : 15 * 60 * 1000;
     const res = await fetchWithTimeout(`${base}/download-all`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      timeoutMs: 600000,
+      timeoutMs,
     });
 
     const status = res.status;
