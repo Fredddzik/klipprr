@@ -226,8 +226,8 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
                   min={0}
                   max={1}
                   step={0.01}
-                  value={volume}
-                  onChange={(e) => onVolumeChange(Number(e.target.value))}
+                  value={1 - volume}
+                  onChange={(e) => onVolumeChange(1 - Number(e.target.value))}
                   className="h-24 w-2 appearance-none bg-transparent"
                   style={{
                     writingMode: "vertical-rl",

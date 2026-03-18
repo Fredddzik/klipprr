@@ -1,7 +1,10 @@
+use std::path::Path;
 use hyper::{Body, Response, StatusCode};
 use hyper::body::to_bytes;
 use hyper::{Method, Request};
 use tauri::AppHandle;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_util::io::ReaderStream;
 use crate::commands::download;
 use urlencoding::decode as url_decode;
 
@@ -53,6 +56,100 @@ pub async fn handle_http(
         let body = serde_json::to_string(&caps)
             .unwrap_or_else(|_| "{}".to_string());
         return Ok(json_response(200, body));
+    }
+
+    // Stream a local file for video preview; supports Range for seeking (long videos)
+    if method == Method::GET && path == "/local-preview" {
+        let query = req.uri().query().unwrap_or("");
+        let mut raw_path: Option<String> = None;
+        for part in query.split('&') {
+            let mut it = part.splitn(2, '=');
+            if it.next() == Some("path") {
+                raw_path = it.next().map(|s| s.to_string());
+                break;
+            }
+        }
+        let encoded = match raw_path {
+            Some(p) if !p.is_empty() => p,
+            _ => return Ok(json_response(400, "{\"error\":\"missing_path\"}".to_string())),
+        };
+        let decoded = match url_decode(&encoded) {
+            Ok(u) => u.into_owned(),
+            Err(_) => return Ok(text_response(400, "bad_path_encoding")),
+        };
+        let file_path = Path::new(&decoded);
+        if !file_path.is_file() {
+            return Ok(text_response(404, "not_a_file"));
+        }
+        let file_size = match tokio::fs::metadata(file_path).await {
+            Ok(m) => m.len(),
+            Err(_) => return Ok(text_response(403, "cannot_stat")),
+        };
+        let mut file = match tokio::fs::File::open(file_path).await {
+            Ok(f) => f,
+            Err(_) => return Ok(text_response(403, "cannot_open")),
+        };
+        let content_type = match file_path.extension().and_then(|e| e.to_str()) {
+            Some("mp4") | Some("m4v") => "video/mp4",
+            Some("webm") => "video/webm",
+            Some("mov") => "video/quicktime",
+            Some("avi") => "video/x-msvideo",
+            Some("mkv") => "video/x-matroska",
+            _ => "application/octet-stream",
+        };
+        let (status, body, content_range_opt, content_length_opt) = if let Some(range_hdr) = req.headers().get("range") {
+            let range_str = range_hdr.to_str().unwrap_or("");
+            let (start, end) = if range_str.starts_with("bytes=") {
+                let rest = range_str.trim_start_matches("bytes=").trim();
+                let parts: Vec<&str> = rest.split('-').collect();
+                match parts.as_slice() {
+                    [s, e] if !s.is_empty() && !e.is_empty() => {
+                        let start: u64 = s.parse().unwrap_or(0);
+                        let end: u64 = e.parse().unwrap_or(file_size.saturating_sub(1));
+                        (start, end.min(file_size.saturating_sub(1)))
+                    }
+                    [s, ""] if !s.is_empty() => {
+                        let start: u64 = s.parse().unwrap_or(0);
+                        (start, file_size.saturating_sub(1))
+                    }
+                    _ => (0, file_size.saturating_sub(1)),
+                }
+            } else {
+                (0, file_size.saturating_sub(1))
+            };
+            let start = start.min(file_size);
+            let end = end.min(file_size.saturating_sub(1)).max(start);
+            let len = end - start + 1;
+            if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                return Ok(text_response(500, "seek_failed"));
+            }
+            let limited = file.take(len);
+            let stream = ReaderStream::new(limited);
+            let body = Body::wrap_stream(stream);
+            let content_range = format!("bytes {}-{}/{}", start, end, file_size);
+            (StatusCode::PARTIAL_CONTENT, body, Some(content_range), Some(len))
+        } else {
+            let stream = ReaderStream::new(file);
+            let body = Body::wrap_stream(stream);
+            (StatusCode::OK, body, None, Some(file_size))
+        };
+        let mut res = Response::new(body);
+        *res.status_mut() = status;
+        res.headers_mut()
+            .insert("Content-Type", content_type.parse().unwrap());
+        res.headers_mut()
+            .insert("Accept-Ranges", "bytes".parse().unwrap());
+        if let Some(cl) = content_length_opt {
+            res.headers_mut()
+                .insert("Content-Length", cl.to_string().parse().unwrap());
+        }
+        if let Some(cr) = content_range_opt {
+            res.headers_mut()
+                .insert("Content-Range", cr.parse().unwrap());
+        }
+        res.headers_mut()
+            .insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+        return Ok(res);
     }
 
     // Proxy remote preview URLs so the video element can load them (avoids CORS; fixes Instagram/X audio and TikTok black screen)

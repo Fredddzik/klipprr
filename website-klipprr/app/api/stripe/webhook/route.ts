@@ -69,7 +69,6 @@ export async function POST(req: Request) {
         stripe_subscription_id: sub.id,
         stripe_customer_id: sub.customer as string,
         stripe_price_id: sub.items.data[0]?.price?.id ?? null,
-        updated_at: new Date().toISOString(),
       };
 
       if (existing) {
@@ -93,7 +92,6 @@ export async function POST(req: Request) {
         .update({
           plan: "free",
           active: false,
-          updated_at: new Date().toISOString(),
         })
         .eq("user_id", userId)
         .eq("active", true);
@@ -114,7 +112,6 @@ export async function POST(req: Request) {
         .update({
           plan: "free",
           active: false,
-          updated_at: new Date().toISOString(),
         })
         .eq("user_id", userId)
         .eq("active", true);
