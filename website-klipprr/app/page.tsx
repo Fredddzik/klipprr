@@ -302,13 +302,28 @@ export default function Home() {
                     </a>
                   </li>
                   <li>
-                    <Link href="/login" className="text-sm text-zinc-400 hover:text-white transition">
+                    <Link href="/privacy" className="text-sm text-zinc-400 hover:text-white transition">
                       Privacy
                     </Link>
                   </li>
                   <li>
-                    <Link href="/login" className="text-sm text-zinc-400 hover:text-white transition">
+                    <Link href="/terms" className="text-sm text-zinc-400 hover:text-white transition">
                       Terms
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/refunds" className="text-sm text-zinc-400 hover:text-white transition">
+                      Refunds
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/cookies" className="text-sm text-zinc-400 hover:text-white transition">
+                      Cookies
+                    </Link>
+                  </li>
+                  <li>
+                    <Link href="/copyright" className="text-sm text-zinc-400 hover:text-white transition">
+                      Copyright
                     </Link>
                   </li>
                 </ul>

@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import { WindowsWaitlist } from "./WindowsWaitlist";
 
 const GITHUB_REPO =
   (typeof process !== "undefined" && process.env.NEXT_PUBLIC_RELEASES_REPO) || "Fredddzik/klipprr";
@@ -104,24 +105,15 @@ export default async function DownloadPage() {
           </section>
 
           {/* Windows */}
-          <section className={`rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 ${release?.windowsUrl ? "" : "opacity-80"}`}>
+          <section className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-6 opacity-80">
             <h2 className="text-lg font-semibold text-white flex items-center gap-2">
               <span className="text-2xl">🪟</span> Windows
             </h2>
             <p className="mt-1 text-sm text-zinc-400">
-              {release?.windowsUrl
-                ? "64-bit. Run the installer; you may see a SmartScreen warning (unsigned build) — choose “Run anyway” to install."
-                : "Coming soon."}
+              Windows support is coming soon. Join the waitlist and we&apos;ll email you when the Windows
+              build is ready.
             </p>
-            {release?.windowsUrl ? (
-              <a
-                href={release.windowsUrl}
-                className="mt-4 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/25 hover:from-violet-500 hover:to-fuchsia-500 transition"
-              >
-                Download Klipprr
-                {release ? ` v${release.version} (${release.windowsLabel})` : ""}
-              </a>
-            ) : null}
+            <WindowsWaitlist />
           </section>
 
           {/* Linux */}

@@ -65,7 +65,6 @@ export async function POST(req: Request) {
     if (licenseRow?.id) {
       await serviceClient.from("licenses").update({
         stripe_customer_id: customerId,
-        updated_at: new Date().toISOString(),
       }).eq("id", licenseRow.id);
     } else {
       await serviceClient.from("licenses").insert({

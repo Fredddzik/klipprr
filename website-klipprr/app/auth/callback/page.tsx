@@ -110,12 +110,20 @@ function CallbackInner() {
           Click the button below to open the app and log in. Your browser may not open it automatically.
         </p>
         {deepLink && (
-          <a
-            href={deepLink}
-            className="inline-flex items-center rounded-full bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 transition"
-          >
-            Open Klipprr
-          </a>
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                window.location.href = deepLink;
+              }}
+              className="inline-flex items-center rounded-full bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 transition"
+            >
+              Open Klipprr
+            </button>
+            <p className="text-xs text-zinc-500 mt-3">
+              If nothing happens, run the built app (not dev) and try again — the custom link only works when Klipprr is installed.
+            </p>
+          </>
         )}
       </div>
     </div>

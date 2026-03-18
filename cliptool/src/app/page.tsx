@@ -42,7 +42,11 @@ export default function HomePage() {
   const [videoUrl, setVideoUrl] = useState("");
   const [localFilePath, setLocalFilePath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  /** 0–100; advances while loading (simulated to ~90), then 100 when done. */
+  const [loadProgress, setLoadProgress] = useState(0);
   const [videoData, setVideoData] = useState<ResolvedVideo | null>(null);
+  // Normalized URL actually used for resolve/export. Stays stable even if the user edits the URL input afterwards.
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
   const [markIn, setMarkIn] = useState<number | null>(null);
   const [markOut, setMarkOut] = useState<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -59,6 +63,7 @@ export default function HomePage() {
   >("idle");
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null);
   const updateRef = useRef<Awaited<ReturnType<typeof checkForUpdate>> | null>(null);
+  const [showUpdateToast, setShowUpdateToast] = useState(false);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [exportPanelOpen, setExportPanelOpen] = useState(false);
@@ -73,22 +78,46 @@ export default function HomePage() {
   } | null>(null);
 
   async function loadAuthAndPlan() {
-    const { data } = await supabase.auth.getSession();
-    const session = data.session;
-
-    if (session?.user?.email) {
-      setEmail(session.user.email);
-    } else {
-      setEmail(null);
+    // 1) Source of truth for plan + email is the desktop license (backend).
+    let planFromLicense: "Free" | "Pro" | null = null;
+    let emailFromLicense: string | null = null;
+    try {
+      const status: any = await invoke("get_license_status");
+      if (status && status.Ok) {
+        const ok = status.Ok as any;
+        const rawPlan = String(ok.plan ?? ok?.claims?.plan ?? "free").toLowerCase();
+        planFromLicense = rawPlan === "pro" ? "Pro" : "Free";
+        if (ok.claims?.email && typeof ok.claims.email === "string") {
+          emailFromLicense = ok.claims.email;
+        }
+      }
+    } catch (e) {
+      console.error("Failed to get license status", e);
     }
 
-    try {
-      const caps = await invoke<any>("get_capabilities");
-      const isPro =
-        caps?.canRenameClips || caps?.canSetCustomExportPath || caps?.can_rename_clips || caps?.can_set_custom_export_path;
-      setPlan(isPro ? "Pro" : "Free");
-    } catch (e) {
-      console.error("Failed to get capabilities", e);
+    // 2) Frontend Supabase session (used for showing the account and redeeming codes).
+    const { data } = await supabase.auth.getSession();
+    const supaSession = data.session;
+    const email =
+      emailFromLicense ??
+      (supaSession?.user?.email ? String(supaSession.user.email) : null);
+    setEmail(email);
+
+    // 3) Plan: prefer license; fall back to capabilities if license is missing.
+    if (planFromLicense) {
+      setPlan(planFromLicense);
+    } else {
+      try {
+        const caps = await invoke<any>("get_capabilities");
+        const isPro =
+          caps?.canRenameClips ||
+          caps?.canSetCustomExportPath ||
+          caps?.can_rename_clips ||
+          caps?.can_set_custom_export_path;
+        setPlan(isPro ? "Pro" : "Free");
+      } catch (e) {
+        console.error("Failed to get capabilities", e);
+      }
     }
 
     setAccountLoading(false);
@@ -169,7 +198,11 @@ useEffect(() => {
   if (!video) return;
 
   const syncTime = () => {
-    setCurrentTime(video.currentTime);
+    if (Date.now() - programmaticSeekAtRef.current < 250) return;
+    const t = video.currentTime;
+    // Ignore stale 0 when we were at a later time (video not loaded or broken)
+    if (t === 0 && currentTimeRef.current > 1) return;
+    setCurrentTime(t);
   };
 
   const onLoadedMetadata = () => {
@@ -247,11 +280,17 @@ useEffect(() => {
     return clips;
   }, [clips, clipSort]);
   const [keepWholeVideo, setKeepWholeVideo] = useState(false);
+  const [qualityReencodeH264, setQualityReencodeH264] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportingFlipTrace, setExportingFlipTrace] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
   // Remove resolveRequestId state, use ref instead for request tracking
   const resolveReqRef = useRef(0);
   const pendingSeekRef = useRef<number | null>(null);
+  /** Set when we programmatically seek (timeline/arrow); skip overwriting state from video for a short window to avoid reset to 0 */
+  const programmaticSeekAtRef = useRef(0);
+  /** Track state so we can ignore stale video.currentTime===0 when we know we're at a later time */
+  const currentTimeRef = useRef(0);
   const [showAdvancedExport, setShowAdvancedExport] = useState(false);
   const [editTarget, setEditTarget] = useState<{
     clipId: string;
@@ -283,7 +322,12 @@ useEffect(() => {
   });
 
   useKeyboardShortcuts({
-    videoRef: () => document.querySelector("video"),
+    videoRef: () => (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null,
+    onProgrammaticSeek: (t) => {
+      programmaticSeekAtRef.current = Date.now();
+      currentTimeRef.current = t;
+      setCurrentTime(t);
+    },
     clips,
     markIn,
     setMarkIn,
@@ -306,30 +350,32 @@ async function fetchCapabilitiesHttp(): Promise<Capabilities | null> {
     if (!res.ok) return null;
     const json = (await res.json()) as any;
 
-    // Accept both snake_case (backend) and camelCase (frontend) just in case
-    const normalized: Capabilities = {
-      canRenameClips: Boolean(json.canRenameClips ?? json.can_rename_clips),
-      canEditClipRange: Boolean(json.canEditClipRange ?? json.can_edit_clip_range),
-      canSetCustomExportPath: Boolean(
-        json.canSetCustomExportPath ?? json.can_set_custom_export_path
-      ),
-      hasWatermark: Boolean(json.hasWatermark ?? json.has_watermark),
-    };
-
-    return normalized;
+    return normalizeCapabilities(json);
   } catch {
     return null;
   }
 }
 
+function normalizeCapabilities(json: any): Capabilities {
+  return {
+    canRenameClips: Boolean(json?.canRenameClips ?? json?.can_rename_clips),
+    canEditClipRange: Boolean(json?.canEditClipRange ?? json?.can_edit_clip_range),
+    canSetCustomExportPath: Boolean(
+      json?.canSetCustomExportPath ?? json?.can_set_custom_export_path
+    ),
+    hasWatermark: Boolean(json?.hasWatermark ?? json?.has_watermark),
+  };
+}
+
 async function refreshCapabilities() {
   // 1) Prefer Tauri (when running inside the desktop app)
   try {
-    const backendCaps = await tauriInvoke<Capabilities>("get_capabilities");
+    const backendCaps = await tauriInvoke<any>("get_capabilities");
     if (backendCaps) {
-      setCaps(backendCaps);
+      const normalized = normalizeCapabilities(backendCaps);
+      setCaps(normalized);
       setPlan(
-        backendCaps.canRenameClips || backendCaps.canSetCustomExportPath ? "Pro" : "Free"
+        normalized.canRenameClips || normalized.canSetCustomExportPath ? "Pro" : "Free"
       );
       return;
     }
@@ -407,11 +453,14 @@ async function refreshCapabilities() {
     }
 
     setLoading(true);
+    setLoadProgress(0);
     setShowAdvancedExport(false);
     setResolveError(null);
     setFastCap(null);
     setEditTarget(null);
     setLocalFilePath(null);
+    // We're starting a new resolve for this normalized URL; clear previous resolvedUrl until we succeed.
+    setResolvedUrl(null);
     setClips([]);
     setMarkIn(null);
     setMarkOut(null);
@@ -464,13 +513,15 @@ async function refreshCapabilities() {
       } else {
         setResolveError(null);
         setVideoData(res.data);
+        setResolvedUrl(normalized);
       }
     } catch (err) {
       console.error(err);
       alert("Could not reach ClipAgent.");
     }
 
-    setLoading(false);
+    setLoadProgress(100);
+    setTimeout(() => setLoading(false), 400);
   }
 
   async function loadLocalFile() {
@@ -486,19 +537,21 @@ async function refreshCapabilities() {
       });
       if (!selected) return;
       setLoading(true);
+      setLoadProgress(0);
       setLocalFilePath(selected);
       const [duration, _codec] = await invoke<[number, string | null]>("get_local_video_info", {
         path: selected,
       });
-      const previewUrl = convertFileSrc(selected);
       const title = selected.split(/[/\\]/).pop() ?? "Local video";
       const localId = "local-" + selected.replace(/[/\\:]/g, "_").slice(-64);
+      // Use backend stream URL so video works on Windows (convertFileSrc is unreliable there)
+      const previewUrlForVideo = `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(selected)}`;
       const data: ResolvedVideo = {
         id: localId,
         title,
         duration: Number(duration) || 0,
         thumbnail: null,
-        previewUrl,
+        previewUrl: previewUrlForVideo,
         capabilities: {
           fastMaxHeight: 1080,
           trueMaxHeight: 1080,
@@ -508,7 +561,7 @@ async function refreshCapabilities() {
           id: localId,
           title,
           duration: Number(duration) || 0,
-          preview: { url: previewUrl },
+          preview: { url: previewUrlForVideo },
           capabilities: { fast_max_height: 1080, true_max_height: 1080, true_max_requires_reencode: false },
         },
       };
@@ -519,9 +572,21 @@ async function refreshCapabilities() {
       setVideoData(null);
       setLocalFilePath(null);
     } finally {
-      setLoading(false);
+      setLoadProgress(100);
+      setTimeout(() => setLoading(false), 400);
     }
   }
+
+  // Advance load progress while loading (simulated 0→90% over ~5s so bar moves; 100% set when done)
+  useEffect(() => {
+    if (!loading) return;
+    const cap = 90;
+    const step = 4;
+    const interval = setInterval(() => {
+      setLoadProgress((p) => (p >= cap ? cap : Math.min(p + step, cap)));
+    }, 220);
+    return () => clearInterval(interval);
+  }, [loading]);
 
 useEffect(() => {
   // Pick up session after magic-link redirect
@@ -812,6 +877,10 @@ async function syncLicenseFromSupabase() {
     setPrevVideoId(videoData.id);
   }, [videoData?.id]);
 
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
+
   // Capabilities helpers (computed from videoData, after it's set)
   const videoCaps = videoData?.capabilities;
   const fastMax = videoCaps?.fastMaxHeight ?? 0;
@@ -837,6 +906,20 @@ function fmtRes(h: number) {
     canSetCustomExportPath: false,
     hasWatermark: true,
   });
+
+  const canUseQualityMode = Boolean(caps.canSetCustomExportPath || caps.canRenameClips);
+
+  // Enforce Free = Fast only
+  useEffect(() => {
+    if (!canUseQualityMode && exportHQ) {
+      setExportHQ(false);
+    }
+  }, [canUseQualityMode, exportHQ]);
+
+  // Reset Quality-only toggles when leaving Quality
+  useEffect(() => {
+    if (!exportHQ) setQualityReencodeH264(false);
+  }, [exportHQ]);
 
   useEffect(() => {
     (window as any).__DEBUG_CAPS__ = caps;
@@ -1029,6 +1112,35 @@ useEffect(() => {
 
   const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI__;
 
+  useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.log(`[page] ${new Date().toISOString()} isExporting=${isExporting} exportPanelOpen=${exportPanelOpen}`);
+  }, [isExporting, exportPanelOpen]);
+
+  const setIsExportingTraced = (v: boolean) => {
+    if (v === false) {
+      const stack = new Error("setIsExporting(false) trace").stack ?? null;
+      setExportingFlipTrace(stack);
+      // eslint-disable-next-line no-console
+      console.log(`[page] ${new Date().toISOString()} setIsExporting(false)`, stack);
+    }
+    setIsExporting(v);
+  };
+
+  // Check for updates on startup (desktop only). If an update exists, show a toast bottom-right.
+  useEffect(() => {
+    if (!isTauri) return;
+    handleCheckForUpdates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTauri]);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    if (updateStatus === "available" && updateInfo?.version) {
+      setShowUpdateToast(true);
+    }
+  }, [isTauri, updateStatus, updateInfo?.version]);
+
   return (
   <div className="h-screen min-h-dvh flex overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-white">
     <LeftSidebar
@@ -1064,6 +1176,55 @@ useEffect(() => {
         }
       }}
     />
+
+    {isTauri &&
+      showUpdateToast &&
+      (updateStatus === "available" || updateStatus === "downloading") &&
+      updateInfo?.version && (
+      <div className="fixed bottom-5 right-5 z-50 w-[360px] max-w-[calc(100vw-2.5rem)] rounded-xl border border-zinc-700/40 bg-zinc-900/95 text-white shadow-xl p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold">
+              {updateStatus === "downloading" ? "Downloading update…" : "Update available"}
+            </div>
+            <div className="text-xs text-zinc-300 mt-1">
+              Version <span className="font-mono">{updateInfo.version}</span> is ready to install.
+            </div>
+          </div>
+          <button
+            type="button"
+            className="text-zinc-400 hover:text-white text-sm"
+            onClick={() => setShowUpdateToast(false)}
+            aria-label="Dismiss update notification"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-sm"
+            onClick={() => setShowUpdateToast(false)}
+            disabled={updateStatus === "downloading"}
+          >
+            Later
+          </button>
+          <button
+            type="button"
+            className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-sm font-semibold disabled:opacity-60"
+            onClick={handleInstallUpdate}
+            disabled={updateStatus === "downloading"}
+          >
+            {updateStatus === "downloading" ? "Downloading…" : "Download & restart"}
+          </button>
+        </div>
+        {updateInfo.body && (
+          <div className="mt-3 text-xs text-zinc-300 max-h-24 overflow-auto whitespace-pre-wrap">
+            {updateInfo.body}
+          </div>
+        )}
+      </div>
+    )}
 
     {/* Main content — reserve left margin so sidebar never hides content */}
     <main
@@ -1177,6 +1338,14 @@ useEffect(() => {
             placeholder="YouTube, Twitch clips, X, Instagram, or video URL…"
             value={videoUrl}
             onChange={(e) => setVideoUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (!loading) {
+                  loadVideo();
+                }
+              }
+            }}
             className="flex-1 min-w-0 max-w-xl px-3 py-2 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-white placeholder-zinc-500 focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none"
             suppressHydrationWarning
           />
@@ -1202,6 +1371,17 @@ useEffect(() => {
           </button>
         )}
       </div>
+      {loading && (
+        <div className="max-w-5xl mx-auto mt-2 space-y-1">
+          <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+            <div
+              className="h-full bg-violet-500 dark:bg-violet-400 transition-all duration-300"
+              style={{ width: `${loadProgress}%` }}
+            />
+          </div>
+          <p className="text-xs text-zinc-500">Resolving video…</p>
+        </div>
+      )}
       <p className="text-xs text-zinc-500 mt-1.5">YouTube, Twitch clips, X (Twitter), Instagram Reels, Vimeo, and direct video URLs</p>
     </div>
 
@@ -1230,13 +1410,18 @@ useEffect(() => {
                 src={
                   isTauri &&
                   videoData.previewUrl &&
+                  !videoData.previewUrl.includes("/local-preview") &&
                   (videoData.previewUrl.startsWith("http://") || videoData.previewUrl.startsWith("https://"))
                     ? `${CLIPAGENT_HTTP}/preview-stream?url=${encodeURIComponent(videoData.previewUrl)}`
                     : videoData.previewUrl
                 }
                 videoKey={videoData.id}
                 currentTime={currentTime}
-                onTimeUpdate={(t) => setCurrentTime(t)}
+                onTimeUpdate={(t) => {
+                  if (Date.now() - programmaticSeekAtRef.current < 250) return;
+                  if (t === 0 && currentTimeRef.current > 1) return;
+                  setCurrentTime(t);
+                }}
               />
             </div>
             <div className="shrink-0 p-2 border-t border-zinc-200 dark:border-zinc-800">
@@ -1248,6 +1433,7 @@ useEffect(() => {
                 selectedClipIds={selectedClipIds}
                 currentTime={currentTime}
                 onSeek={(t) => {
+                  programmaticSeekAtRef.current = Date.now();
                   setCurrentTime(t);
                   const video = (window as any).__CLIPTOOL_VIDEO__ as HTMLVideoElement | null;
                   if (!video) return;
@@ -1431,45 +1617,50 @@ useEffect(() => {
             </div>
             <div className="flex-1 min-h-0 overflow-auto p-4">
               <ExportPanel
-            clips={sortedClips}
-            selectedClipIds={selectedClipIds}
-            videoUrl={videoUrl}
-            localFilePath={localFilePath}
-            videoData={videoData}
-            exportHQ={exportHQ}
-            setExportHQ={setExportHQ}
-            exportCodec={exportCodec}
-            setExportCodec={setExportCodec}
-            keepWholeVideo={keepWholeVideo}
-            setKeepWholeVideo={setKeepWholeVideo}
-            fastCap={fastCap}
-            setFastCap={setFastCap}
-            fastMax={fastMax}
-            trueMax={trueMax}
-            fastReachesMax={fastReachesMax}
-            needsReencode={needsReencode}
-            showAdvancedExport={showAdvancedExport}
-            setShowAdvancedExport={setShowAdvancedExport}
-            shouldWarnQuality={shouldWarnQuality}
-            isExporting={isExporting}
-            setIsExporting={setIsExporting}
-            exportPath={exportPath}
-            setExportPath={setExportPath}
-            defaultExportDir={defaultExportDir}
-            sanitizeExportPath={sanitizeExportPath}
-            canEditExportPath={caps.canSetCustomExportPath}
-            onExportPathChosen={async (path) => {
-              try {
-                await invoke("set_export_path", { path });
-              } catch (e) {
-                console.warn("Persist export path failed:", e);
-              }
-            }}
-            onUpgradeRequested={() => setShowUpgrade(true)}
-            onExportComplete={(count, exportDir) => {
-              setExportCompleteToast({ count, exportDir });
-              setTimeout(() => setExportCompleteToast(null), 12000);
-            }}
+                clips={sortedClips}
+                selectedClipIds={selectedClipIds}
+                videoUrl={videoUrl}
+                resolvedUrl={resolvedUrl}
+                localFilePath={localFilePath}
+                videoData={videoData}
+                exportHQ={exportHQ}
+                setExportHQ={setExportHQ}
+                canUseQualityMode={canUseQualityMode}
+                qualityReencodeH264={qualityReencodeH264}
+                setQualityReencodeH264={setQualityReencodeH264}
+                exportCodec={exportCodec}
+                setExportCodec={setExportCodec}
+                keepWholeVideo={keepWholeVideo}
+                setKeepWholeVideo={setKeepWholeVideo}
+                fastCap={fastCap}
+                setFastCap={setFastCap}
+                fastMax={fastMax}
+                trueMax={trueMax}
+                fastReachesMax={fastReachesMax}
+                needsReencode={needsReencode}
+                showAdvancedExport={showAdvancedExport}
+                setShowAdvancedExport={setShowAdvancedExport}
+                shouldWarnQuality={shouldWarnQuality}
+                isExporting={isExporting}
+                setIsExporting={setIsExportingTraced}
+                exportPath={exportPath}
+                setExportPath={setExportPath}
+                defaultExportDir={defaultExportDir}
+                sanitizeExportPath={sanitizeExportPath}
+                canEditExportPath={caps.canSetCustomExportPath}
+                hasWatermark={caps.hasWatermark}
+                onExportPathChosen={async (path) => {
+                  try {
+                    await invoke("set_export_path", { path });
+                  } catch (e) {
+                    console.warn("Persist export path failed:", e);
+                  }
+                }}
+                onUpgradeRequested={() => setShowUpgrade(true)}
+                onExportComplete={(count, exportDir) => {
+                  setExportCompleteToast({ count, exportDir });
+                  setTimeout(() => setExportCompleteToast(null), 12000);
+                }}
               />
             </div>
           </div>

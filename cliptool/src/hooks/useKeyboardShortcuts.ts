@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 export function useKeyboardShortcuts({
   videoRef,
+  onProgrammaticSeek,
   clips,
   markIn,
   setMarkIn,
@@ -15,6 +16,7 @@ export function useKeyboardShortcuts({
   showUndoToast,
 }: {
   videoRef: () => HTMLVideoElement | null;
+  onProgrammaticSeek?: (t: number) => void;
   clips: any[];
   markIn: number | null;
   setMarkIn: (v: number | null) => void;
@@ -34,10 +36,15 @@ export function useKeyboardShortcuts({
         (e.target.tagName === "INPUT" ||
           e.target.tagName === "TEXTAREA");
 
-      // Undo / Redo (allowed everywhere)
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+      // Undo / Redo (editor). When typing in an input/textarea, let the browser handle Cmd+Z / Cmd+Y
+      if (!isTyping && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         e.shiftKey ? redo() : undo();
+        return;
+      }
+      if (!isTyping && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        redo();
         return;
       }
 
@@ -112,19 +119,23 @@ export function useKeyboardShortcuts({
       // Seek
       if (e.key === "ArrowLeft") {
         e.preventDefault();
-        video.currentTime = Math.max(
+        const next = Math.max(
           0,
           video.currentTime - (e.metaKey || e.ctrlKey ? frameStep : stepSize)
         );
+        video.currentTime = next;
+        onProgrammaticSeek?.(next);
         return;
       }
 
       if (e.key === "ArrowRight") {
         e.preventDefault();
-        video.currentTime = Math.min(
+        const next = Math.min(
           video.duration,
           video.currentTime + (e.metaKey || e.ctrlKey ? frameStep : stepSize)
         );
+        video.currentTime = next;
+        onProgrammaticSeek?.(next);
         return;
       }
 
@@ -176,5 +187,6 @@ if (!editTarget && e.key.toLowerCase() === "m") {
     setMarkOut,
     setEditTarget,
     showUndoToast,
+    onProgrammaticSeek,
   ]);
 }
