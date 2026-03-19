@@ -25,6 +25,10 @@ type License = {
   expires_at: string | null;
 };
 
+function isAllowedAppRedirect(redirect: string): boolean {
+  return redirect === "clipagent://auth-callback";
+}
+
 function toUnix(exp: string | null): number | null {
   if (!exp) return null;
   return Math.floor(new Date(exp).getTime() / 1000);
@@ -84,7 +88,7 @@ export default function UpgradePage() {
     const redirectTo =
       searchParams.get("redirectTo") || hashParams.get("redirectTo");
 
-    if (redirectTo) {
+    if (redirectTo && isAllowedAppRedirect(redirectTo)) {
       const expiresAt = session.expires_at ? String(session.expires_at) : "";
       const deepLink =
         `${redirectTo}#access_token=${encodeURIComponent(session.access_token)}&refresh_token=${encodeURIComponent(session.refresh_token)}` +
