@@ -164,12 +164,12 @@ export default function HomePage() {
       } catch (err) {
         console.error("[FRONTEND] consume_auth_tokens error:", err);
       }
-      console.log("[FRONTEND] consume_auth_tokens result:", tokens);
+      console.log("[FRONTEND] consume_auth_tokens completed");
 
       if (cancelled) return;
       if (tokens) {
         const [accessToken, refreshToken] = tokens;
-        console.log("[FRONTEND] Tokens received, setting session...");
+        console.log("[FRONTEND] Tokens received, setting session");
         await supabase.auth.setSession({
           access_token: accessToken,
           refresh_token: refreshToken,
@@ -1102,7 +1102,14 @@ useEffect(() => {
     setUpdateStatus("downloading");
     try {
       await update.downloadAndInstall(() => {});
-      await relaunch();
+      try {
+        await relaunch();
+      } catch (relaunchErr) {
+        console.error("Update installed but relaunch failed:", relaunchErr);
+        setUpdateStatus("latest");
+        setShowUpdateToast(false);
+        alert("Update installed successfully. Please restart Klipprr manually to finish applying it.");
+      }
     } catch (err) {
       console.error("Update install failed:", err);
       setUpdateStatus("error");

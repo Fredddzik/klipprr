@@ -329,12 +329,13 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(single_instance(|app, argv, _cwd| {
             for arg in argv {
                 if arg.starts_with("clipagent://") {
-                    let msg = format!("[SECOND INSTANCE] URL: {arg}");
+                    let msg = "[SECOND INSTANCE] Deep-link URL received";
                     println!("{msg}");
                     append_file_log(&msg);
                     let _ = app.emit("deep-link", arg);
@@ -354,9 +355,7 @@ fn main() {
             commands::download::get_local_video_info,
             commands::license_commands::get_license_status,
             commands::license_commands::get_capabilities,
-            commands::license_commands::activate_license,
             commands::license_commands::clear_license_cmd,
-            commands::license_commands::set_license_from_server,
             commands::license_commands::set_supabase_session,
             commands::license_commands::sync_license_from_supabase,
             commands::license_commands::consume_auth_tokens,
@@ -377,10 +376,10 @@ fn main() {
                 }
                 if let Some(url) = event.urls().first() {
                     let raw = url.to_string();
-                    append_file_log(&format!("[DEEP LINK] RAW URL: {}", raw));
+                    append_file_log("[DEEP LINK] URL received");
 
                     if let Some(fragment) = raw.split('#').nth(1) {
-                        append_file_log(&format!("[DEEP LINK] FRAGMENT: {}", fragment));
+                        append_file_log("[DEEP LINK] URL fragment present");
 
                         let params: std::collections::HashMap<_, _> =
                             url::form_urlencoded::parse(fragment.as_bytes())

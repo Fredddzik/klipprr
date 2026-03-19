@@ -77,12 +77,9 @@ pub fn handle_resolve(url: String) -> String {
     let stdout_sample = String::from_utf8_lossy(&out.stdout);
     let stderr_sample = String::from_utf8_lossy(&out.stderr);
     log_to_file(&format!(
-        "[RESOLVE] stdout (first 2000): {}",
-        stdout_sample.chars().take(2000).collect::<String>()
-    ));
-    log_to_file(&format!(
-        "[RESOLVE] stderr (first 2000): {}",
-        stderr_sample.chars().take(2000).collect::<String>()
+        "[RESOLVE] output sizes: stdout_bytes={} stderr_bytes={}",
+        out.stdout.len(),
+        out.stderr.len()
     ));
 
     let stdout_raw = stdout_sample.trim().to_string();

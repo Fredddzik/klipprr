@@ -68,11 +68,6 @@ pub fn get_capabilities(app: AppHandle) -> Capabilities {
 }
 
 #[tauri::command]
-pub fn activate_license(app: AppHandle, token: LicenseToken) -> Result<(), String> {
-    core_activate_license(&app, token)
-}
-
-#[tauri::command]
 pub fn clear_license_cmd(app: AppHandle) -> Result<(), String> {
     println!("[License] Clearing local license and session (logout or inactive)");
     append_file_log("[License] Clearing local license and session");
@@ -83,12 +78,13 @@ pub fn clear_license_cmd(app: AppHandle) -> Result<(), String> {
     res
 }
 
-#[tauri::command]
-pub fn set_license_from_server(
+/// Install local license after Supabase sync (not exposed as a Tauri command).
+pub(crate) fn set_license_from_server(
     app: AppHandle,
     email: String,
     plan: String,
     exp: Option<u64>,
+    desktop_license_sig: Option<String>,
 ) -> Result<(), String> {
     println!("[License] set_license_from_server invoked");
     append_file_log("[License] set_license_from_server invoked");
@@ -112,9 +108,13 @@ pub fn set_license_from_server(
 
     let payload = URL_SAFE.encode(json.as_bytes());
 
+    let signature = desktop_license_sig
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "server-trusted".to_string());
+
     let token = LicenseToken {
         payload,
-        signature: "server-trusted".to_string(),
+        signature,
     };
 
     println!("[License] Installing license into ClipAgent: {}", plan);
@@ -187,10 +187,7 @@ pub fn set_supabase_session(
     storage::save_supabase_session(&app, &session)?;
 
     println!("[Session] Supabase session stored successfully");
-    append_file_log(&format!(
-        "[Session] Supabase session stored successfully user_id={} email={}",
-        session.user_id, session.user_email
-    ));
+    append_file_log("[Session] Supabase session stored successfully");
     Ok(())
 }
 
@@ -200,6 +197,9 @@ struct SupabaseLicenseRow {
     active: Option<bool>,
     #[serde(default)]
     expires_at: Option<String>,
+    /// Standard base64 Ed25519 signature (64 bytes) over UTF-8 `payload` string; see repo `doc/LICENSE_SIGNING.md`.
+    #[serde(default)]
+    desktop_license_sig: Option<String>,
 }
 
 /// Downgrade to Free: clear local license and notify frontend. Call whenever we cannot confirm Pro.
@@ -331,8 +331,7 @@ pub async fn sync_license_from_supabase(
         supabase_url.trim_end_matches('/'),
         urlencoding::encode(user_id)
     );
-    println!("[SYNC] Request URL: {}", url);
-    append_file_log(&format!("[SYNC] Request URL: {}", url));
+    append_file_log("[SYNC] Querying licenses endpoint");
 
     let client = reqwest::Client::new();
     let mut resp = match client
@@ -405,21 +404,19 @@ pub async fn sync_license_from_supabase(
 
     let status = resp.status();
     let body_bytes = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_else(|_| Vec::new());
-    let snippet_len = body_bytes.len().min(400);
-    let body_snippet = String::from_utf8_lossy(&body_bytes[..snippet_len]);
-    append_file_log(&format!("[SYNC] Response status={} body_len={} snippet={:?}", status, body_bytes.len(), body_snippet));
+    append_file_log(&format!("[SYNC] Response status={} body_len={}", status, body_bytes.len()));
 
     let rows: Vec<SupabaseLicenseRow> = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
         Err(e) => {
-            append_file_log(&format!("[SYNC] JSON parse failed: {} body_snippet={:?}", e, body_snippet));
+            append_file_log(&format!("[SYNC] JSON parse failed: {}", e));
             downgrade_to_free(&app);
             return Err(e.to_string());
         }
     };
     let row_count = rows.len();
-    println!("[SYNC] Supabase rows (count={}): {:?}", row_count, rows);
-    append_file_log(&format!("[SYNC] Supabase rows count={} user_id={:?}", row_count, user_id));
+    println!("[SYNC] Supabase rows count={}", row_count);
+    append_file_log(&format!("[SYNC] Supabase rows count={}", row_count));
 
     // Current local state (plan name and whether we have an active license)
     let (local_plan, local_active) = match core_get_license_status(&app) {
@@ -446,7 +443,13 @@ pub async fn sync_license_from_supabase(
                 .expires_at
                 .as_deref()
                 .and_then(|s| parse_iso_to_unix(s).ok());
-            if let Err(e) = set_license_from_server(app.clone(), session.user_email, supabase_plan, exp) {
+            if let Err(e) = set_license_from_server(
+                app.clone(),
+                session.user_email,
+                supabase_plan,
+                exp,
+                row.desktop_license_sig.clone(),
+            ) {
                 append_file_log(&format!("[SYNC] set_license_from_server failed: {}", e));
                 downgrade_to_free(&app);
                 return Err(e);
@@ -463,14 +466,14 @@ pub async fn sync_license_from_supabase(
         return Ok(());
     }
     let no_license_msg = format!(
-        "[SYNC] No active license for user_id={} (got {} rows). URL prefix: {} | Response: {:?}",
-        user_id, row_count, url_prefix, body_snippet
+        "[SYNC] No active license (got {} rows). URL prefix: {}",
+        row_count, url_prefix
     );
     println!("{}", no_license_msg);
     append_file_log(&format!(
-        "[SYNC] No active license in Supabase for user_id={} (got {} rows). Response snippet: {:?}. \
+        "[SYNC] No active license in Supabase (got {} rows). \
          If you just redeemed a code: ensure redeem Edge Function sets licenses.user_id to auth.uid() and uses upsert.",
-        user_id, row_count, body_snippet
+        row_count
     ));
     downgrade_to_free(&app);
     Ok(())
