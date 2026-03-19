@@ -44,7 +44,8 @@ export async function POST(req: Request) {
   }
 
   const stripe = new Stripe(stripeSecret);
-  const origin = req.headers.get("origin") || process.env.NEXT_PUBLIC_APP_URL || "https://klipprr.com";
+  // Do not trust request Origin for redirect URLs; use a fixed allowlisted app URL.
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://klipprr.com";
 
   const serviceClient = createClient(supabaseUrl, supabaseService);
   const { data: licenseRows } = await serviceClient
@@ -80,8 +81,8 @@ export async function POST(req: Request) {
     mode: "subscription",
     customer: customerId,
     line_items: [{ price: priceId, quantity: 1 }],
-    success_url: `${origin}/upgrade?success=1&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${origin}/upgrade?canceled=1`,
+    success_url: `${appUrl}/upgrade?success=1&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${appUrl}/upgrade?canceled=1`,
     client_reference_id: user.id,
     subscription_data: {
       metadata: { supabase_user_id: user.id },

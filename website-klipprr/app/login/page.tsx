@@ -7,12 +7,17 @@ import type { Session } from "@supabase/supabase-js";
 
 const DEFAULT_APP_REDIRECT = "clipagent://auth-callback";
 
+function isAllowedAppRedirect(redirect: string): boolean {
+  return redirect === DEFAULT_APP_REDIRECT;
+}
+
 function LoginInner() {
   const searchParams = useSearchParams();
   const desktop = searchParams.get("desktop") === "true";
-  const redirect =
-    searchParams.get("redirect") ??
-    (desktop ? DEFAULT_APP_REDIRECT : "");
+  const requestedRedirect = searchParams.get("redirect") ?? (desktop ? DEFAULT_APP_REDIRECT : "");
+  const redirect = requestedRedirect && isAllowedAppRedirect(requestedRedirect)
+    ? requestedRedirect
+    : "";
 
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);

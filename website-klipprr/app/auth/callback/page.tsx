@@ -5,6 +5,11 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
+function isAllowedAppRedirect(redirect: string): boolean {
+  // Only allow desktop deep links for token handoff.
+  return redirect === "clipagent://auth-callback";
+}
+
 function buildDeepLink(
   redirect: string,
   accessToken: string,
@@ -18,7 +23,10 @@ function buildDeepLink(
 
 function CallbackInner() {
   const searchParams = useSearchParams();
-  const redirect = searchParams.get("redirect") ?? "clipagent://auth-callback";
+  const requestedRedirect = searchParams.get("redirect") ?? "clipagent://auth-callback";
+  const redirect = isAllowedAppRedirect(requestedRedirect)
+    ? requestedRedirect
+    : "clipagent://auth-callback";
 
   const [deepLink, setDeepLink] = useState<string | null>(null);
   const [noSession, setNoSession] = useState(false);
