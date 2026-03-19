@@ -4,8 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::storage;
 use tauri::AppHandle;
 
+use base64::engine::general_purpose::STANDARD;
 use base64::engine::general_purpose::URL_SAFE;
 use base64::Engine;
+use ed25519_dalek::{Signature, VerifyingKey};
 
 // ---------- Types ----------
 
@@ -129,9 +131,53 @@ pub fn get_capabilities(app: &AppHandle) -> Capabilities {
     }
 }
 
-// ---------- Verification (stub for now) ----------
-// IMPORTANT: Signature verification will be added AFTER UI wiring.
-// For now we trust payload structure so UX can be built.
+// ---------- Verification ----------
+//
+// Default (no build-time pubkey): accept `server-trusted` + payload/expiry only (legacy).
+//
+// Strict mode: set env at **compile time**:
+//   KLIPPRR_LICENSE_ED25519_PUB_B64 = standard base64 of 32-byte Ed25519 public key
+// Then `server-trusted` is rejected and `signature` must be standard base64 of 64-byte Ed25519
+// signature over **the exact UTF-8 bytes of `token.payload`** (the URL-safe base64 claims blob).
+
+fn license_ed25519_pubkey_bytes() -> Option<[u8; 32]> {
+    let s = option_env!("KLIPPRR_LICENSE_ED25519_PUB_B64")?;
+    if s.trim().is_empty() {
+        return None;
+    }
+    let v = STANDARD.decode(s.trim()).ok()?;
+    if v.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&v);
+    Some(out)
+}
+
+fn verify_ed25519_if_configured(token: &LicenseToken) -> Result<(), &'static str> {
+    let Some(pk) = license_ed25519_pubkey_bytes() else {
+        return Ok(());
+    };
+
+    if token.signature == "server-trusted" {
+        return Err("unsigned_license_rejected");
+    }
+
+    let sig_raw = STANDARD
+        .decode(token.signature.trim())
+        .map_err(|_| "bad_sig_encoding")?;
+    if sig_raw.len() != 64 {
+        return Err("bad_sig_length");
+    }
+    let sig_arr: [u8; 64] = sig_raw
+        .try_into()
+        .map_err(|_| "bad_sig_length")?;
+    let signature = Signature::from_bytes(&sig_arr);
+
+    let vk = VerifyingKey::from_bytes(&pk).map_err(|_| "bad_pubkey_format")?;
+    vk.verify_strict(token.payload.as_bytes(), &signature)
+        .map_err(|_| "sig_verify_failed")
+}
 
 fn verify_license(token: &LicenseToken) -> Result<LicenseClaims, &'static str> {
     let json = base64_url_decode(&token.payload).map_err(|_| "bad_payload")?;
@@ -139,6 +185,13 @@ fn verify_license(token: &LicenseToken) -> Result<LicenseClaims, &'static str> {
 
     if is_expired(claims.exp) {
         return Err("expired");
+    }
+
+    if license_ed25519_pubkey_bytes().is_some() {
+        verify_ed25519_if_configured(token)?;
+    } else if token.signature != "server-trusted" {
+        // Without a configured pubkey, only accept the legacy in-app trust marker.
+        return Err("bad_signature");
     }
 
     Ok(claims)

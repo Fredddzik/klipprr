@@ -7,6 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use crate::commands::download;
 use urlencoding::decode as url_decode;
+use std::net::IpAddr;
+use url::Url;
 
 pub fn with_cors(mut res: Response<Body>) -> Response<Body> {
     let headers = res.headers_mut();
@@ -20,6 +22,58 @@ pub fn with_cors(mut res: Response<Body>) -> Response<Body> {
         "Content-Type".parse().unwrap(),
     );
     res
+}
+
+fn origin_is_allowed(req: &Request<Body>) -> bool {
+    let Some(origin) = req.headers().get("origin") else {
+        // Non-browser or same-process calls may not send Origin.
+        return true;
+    };
+    let Ok(origin_str) = origin.to_str() else {
+        return false;
+    };
+    let Ok(url) = Url::parse(origin_str) else {
+        return false;
+    };
+
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host == "localhost" || host == "127.0.0.1" || host == "tauri.localhost" {
+        return true;
+    }
+    url.scheme() == "tauri" && host == "localhost"
+}
+
+fn is_blocked_preview_target(decoded: &str) -> bool {
+    let Ok(url) = Url::parse(decoded) else {
+        return true;
+    };
+
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    let host_lc = host.to_ascii_lowercase();
+    if host_lc == "localhost" || host_lc.ends_with(".localhost") || host_lc.ends_with(".local") {
+        return true;
+    }
+
+    if let Ok(ip) = host_lc.parse::<IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+            return true;
+        }
+        match ip {
+            IpAddr::V4(v4) => {
+                if v4.is_private() || v4.is_link_local() || v4.is_broadcast() || v4.is_documentation() {
+                    return true;
+                }
+            }
+            IpAddr::V6(v6) => {
+                if v6.is_unique_local() || v6.is_unicast_link_local() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 pub fn json_response(status: u16, body: String) -> Response<Body> {
@@ -44,6 +98,9 @@ pub async fn handle_http(
     let path = req.uri().path().to_string();
 
     if method == Method::OPTIONS {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
         return Ok(with_cors(Response::new(Body::empty())));
     }
 
@@ -52,6 +109,9 @@ pub async fn handle_http(
     }
 
     if method == Method::GET && path == "/capabilities" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
         let caps = crate::license::get_capabilities(&app);
         let body = serde_json::to_string(&caps)
             .unwrap_or_else(|_| "{}".to_string());
@@ -60,6 +120,9 @@ pub async fn handle_http(
 
     // Stream a local file for video preview; supports Range for seeking (long videos)
     if method == Method::GET && path == "/local-preview" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
         let query = req.uri().query().unwrap_or("");
         let mut raw_path: Option<String> = None;
         for part in query.split('&') {
@@ -154,6 +217,9 @@ pub async fn handle_http(
 
     // Proxy remote preview URLs so the video element can load them (avoids CORS; fixes Instagram/X audio and TikTok black screen)
     if method == Method::GET && path == "/preview-stream" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
         let query = req.uri().query().unwrap_or("");
         let mut raw_url: Option<String> = None;
         for part in query.split('&') {
@@ -173,6 +239,9 @@ pub async fn handle_http(
         };
         if !decoded.starts_with("https://") && !decoded.starts_with("http://") {
             return Ok(text_response(400, "url_must_be_http_or_https"));
+        }
+        if is_blocked_preview_target(&decoded) {
+            return Ok(text_response(400, "blocked_target_host"));
         }
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -217,6 +286,9 @@ pub async fn handle_http(
     }
 
     if method == Method::GET && path == "/resolve" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
         let query = req.uri().query().unwrap_or("");
 
         let mut url: Option<String> = None;
@@ -243,6 +315,9 @@ pub async fn handle_http(
     }
 
     if method == Method::POST && path == "/download-all" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
         let body_bytes = to_bytes(req.into_body()).await?;
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
