@@ -79,7 +79,9 @@ export async function POST(req: Request) {
     return { desktop_license_payload: payload, desktop_license_sig };
   }
 
-  switch (event.type) {
+  // Ensure we never throw an unhandled exception (Stripe will treat it as 500).
+  try {
+    switch (event.type) {
     case "customer.subscription.created":
     case "customer.subscription.updated": {
       const sub = event.data.object as Stripe.Subscription;
@@ -105,7 +107,7 @@ export async function POST(req: Request) {
       if (active) {
         if (!licensePrivB64) {
           console.error("[Stripe Webhook] Missing KLIPPRR_LICENSE_ED25519_PRIV_B64");
-          return NextResponse.json({ error: "Server config error" }, { status: 500 });
+          throw new Error("Missing KLIPPRR_LICENSE_ED25519_PRIV_B64");
         }
 
         const expUnix = periodEnd ? Math.floor(new Date(periodEnd).getTime() / 1000) : null;
@@ -116,16 +118,23 @@ export async function POST(req: Request) {
           .eq("id", userId)
           .maybeSingle();
 
-        if (profileError || !profile?.email) {
-          console.error("[Stripe Webhook] Missing profile email for signing", {
-            userId,
-            message: profileError?.message,
-          });
-          return NextResponse.json({ error: "Server config error" }, { status: 500 });
+        let emailForSigning = (profile?.email ?? "").toString();
+        if (profileError || !emailForSigning) {
+          // Fall back to Stripe customer email (avoids failing the whole webhook when profiles row/email is missing).
+          try {
+            const customerId = sub.customer as string;
+            const customer = await stripe.customers.retrieve(customerId);
+            emailForSigning = (customer.email ?? "").toString();
+          } catch (e) {
+            console.warn("[Stripe Webhook] Could not load customer email for signing; signing with empty email.", {
+              userId,
+              message: e instanceof Error ? e.message : String(e),
+            });
+          }
         }
 
         const signed = await signDesktopLicensePayload({
-          email: profile.email as string,
+          email: emailForSigning,
           planLower: active ? "pro" : "free",
           expUnix,
         });
@@ -202,6 +211,12 @@ export async function POST(req: Request) {
     default:
       // Ignore other events
       break;
+    }
+  } catch (e) {
+    // Return JSON so Stripe sees a useful error response, not an HTML 500.
+    const msg = e instanceof Error ? e.message : "stripe_webhook_processing_error";
+    console.error("[Stripe Webhook] Processing failed:", msg, e);
+    return NextResponse.json({ error: "Webhook processing failed", message: msg }, { status: 500 });
   }
 
   return NextResponse.json({ received: true });
