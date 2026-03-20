@@ -84,6 +84,7 @@ pub(crate) fn set_license_from_server(
     email: String,
     plan: String,
     exp: Option<u64>,
+    desktop_license_payload: Option<String>,
     desktop_license_sig: Option<String>,
 ) -> Result<(), String> {
     println!("[License] set_license_from_server invoked");
@@ -94,19 +95,25 @@ pub(crate) fn set_license_from_server(
         _ => Plan::Free,
     };
 
-    let claims = LicenseClaims {
-        email,
-        plan: plan_enum,
-        iat: now_unix(),
-        exp,
-        lic: "supabase".to_string(),
-        aud: None,
+    // For strict verification, the desktop must verify the server-provided signature
+    // against the exact payload string bytes. To avoid iat mismatches, prefer the
+    // server-provided payload.
+    let payload = match desktop_license_payload.filter(|s| !s.trim().is_empty()) {
+        Some(server_payload) => server_payload,
+        None => {
+            let claims = LicenseClaims {
+                email,
+                plan: plan_enum,
+                iat: now_unix(),
+                exp,
+                lic: "supabase".to_string(),
+                aud: None,
+            };
+            let json = serde_json::to_string(&claims)
+                .map_err(|_| "failed_to_serialize_claims".to_string())?;
+            URL_SAFE.encode(json.as_bytes())
+        }
     };
-
-    let json = serde_json::to_string(&claims)
-        .map_err(|_| "failed_to_serialize_claims")?;
-
-    let payload = URL_SAFE.encode(json.as_bytes());
 
     let signature = desktop_license_sig
         .filter(|s| !s.trim().is_empty())
@@ -197,6 +204,9 @@ struct SupabaseLicenseRow {
     active: Option<bool>,
     #[serde(default)]
     expires_at: Option<String>,
+    /// URL-safe base64 payload string the desktop must verify-sign against.
+    #[serde(default)]
+    desktop_license_payload: Option<String>,
     /// Standard base64 Ed25519 signature (64 bytes) over UTF-8 `payload` string; see repo `doc/LICENSE_SIGNING.md`.
     #[serde(default)]
     desktop_license_sig: Option<String>,
@@ -448,6 +458,7 @@ pub async fn sync_license_from_supabase(
                 session.user_email,
                 supabase_plan,
                 exp,
+                row.desktop_license_payload.clone(),
                 row.desktop_license_sig.clone(),
             ) {
                 append_file_log(&format!("[SYNC] set_license_from_server failed: {}", e));

@@ -117,6 +117,14 @@ jobs:
             codesign --force --options runtime --timestamp -s "$CERT_ID" --entitlements "$ENTITLEMENTS" -- "$BIN_DIR/yt-dlp"
           fi
 
+      - name: Ensure license pubkey configured for strict signing
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.KLIPPRR_LICENSE_ED25519_PUB_B64 }}" ]; then
+            echo "Missing required secret: KLIPPRR_LICENSE_ED25519_PUB_B64"
+            exit 1
+          fi
+
       - name: Tauri build and release
         id: tauri
         uses: tauri-apps/tauri-action@action-v0.6.1
@@ -131,6 +139,7 @@ jobs:
           # So build.rs embeds these when .env.local is missing (CI); desktop sync then has URL/key.
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          KLIPPRR_LICENSE_ED25519_PUB_B64: ${{ secrets.KLIPPRR_LICENSE_ED25519_PUB_B64 }}
         with:
           projectPath: clipagent
           tagName: v__VERSION__
@@ -230,6 +239,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          KLIPPRR_LICENSE_ED25519_PUB_B64: ${{ secrets.KLIPPRR_LICENSE_ED25519_PUB_B64 }}
         run: |
           cd clipagent/src-tauri
           cargo tauri build --bundles msi

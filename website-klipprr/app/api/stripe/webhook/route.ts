@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import Stripe from "stripe";
+import { sign } from "@noble/ed25519";
 
 /**
  * POST /api/stripe/webhook
@@ -29,12 +30,54 @@ export async function POST(req: Request) {
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseService = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const licensePrivB64 = process.env.KLIPPRR_LICENSE_ED25519_PRIV_B64;
   if (!supabaseUrl || !supabaseService) {
     console.error("[Stripe Webhook] Missing Supabase env");
     return NextResponse.json({ error: "Server config error" }, { status: 500 });
   }
 
   const supabase = createClient(supabaseUrl, supabaseService);
+
+  function base64UrlEncodeUtf8(s: string) {
+    // Rust's `base64::engine::general_purpose::URL_SAFE` uses URL-safe alphabet and keeps '=' padding.
+    return Buffer.from(s, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
+  }
+
+  function base64ToBytes(b64: string) {
+    return Uint8Array.from(Buffer.from(b64, "base64"));
+  }
+
+  async function signDesktopLicensePayload(opts: {
+    email: string;
+    planLower: "pro" | "free";
+    expUnix: number | null;
+  }) {
+    if (!licensePrivB64) {
+      throw new Error("Missing KLIPPRR_LICENSE_ED25519_PRIV_B64");
+    }
+
+    const privKeyBytes = base64ToBytes(licensePrivB64.trim());
+    const iat = Math.floor(Date.now() / 1000);
+    const planClaim = opts.planLower === "pro" ? "Pro" : "Free";
+
+    // Field order must match Rust `LicenseClaims` struct: email, plan, iat, exp, lic, aud
+    const claims: Record<string, unknown> = {
+      email: opts.email,
+      plan: planClaim,
+      iat,
+      exp: opts.expUnix,
+      lic: "supabase",
+      aud: null,
+    };
+
+    const claimsJson = JSON.stringify(claims);
+    const payload = base64UrlEncodeUtf8(claimsJson);
+    const msg = new TextEncoder().encode(payload);
+
+    const sigBytes = await sign(msg, privKeyBytes);
+    const desktop_license_sig = Buffer.from(sigBytes).toString("base64");
+    return { desktop_license_payload: payload, desktop_license_sig };
+  }
 
   switch (event.type) {
     case "customer.subscription.created":
@@ -55,6 +98,42 @@ export async function POST(req: Request) {
         ? new Date(periodEndTs * 1000).toISOString()
         : null;
 
+      let desktop_license_payload: string | null = null;
+      let desktop_license_sig: string | null = null;
+
+      // Only required when `active=true` because the desktop only syncs active licenses.
+      if (active) {
+        if (!licensePrivB64) {
+          console.error("[Stripe Webhook] Missing KLIPPRR_LICENSE_ED25519_PRIV_B64");
+          return NextResponse.json({ error: "Server config error" }, { status: 500 });
+        }
+
+        const expUnix = periodEnd ? Math.floor(new Date(periodEnd).getTime() / 1000) : null;
+
+        const { data: profile, error: profileError } = await supabase
+          .from("profiles")
+          .select("email")
+          .eq("id", userId)
+          .maybeSingle();
+
+        if (profileError || !profile?.email) {
+          console.error("[Stripe Webhook] Missing profile email for signing", {
+            userId,
+            message: profileError?.message,
+          });
+          return NextResponse.json({ error: "Server config error" }, { status: 500 });
+        }
+
+        const signed = await signDesktopLicensePayload({
+          email: profile.email as string,
+          planLower: active ? "pro" : "free",
+          expUnix,
+        });
+
+        desktop_license_payload = signed.desktop_license_payload;
+        desktop_license_sig = signed.desktop_license_sig;
+      }
+
       const { data: existing } = await supabase
         .from("licenses")
         .select("id")
@@ -66,6 +145,8 @@ export async function POST(req: Request) {
         plan: active ? "pro" : "free",
         active,
         expires_at: periodEnd,
+        desktop_license_payload,
+        desktop_license_sig,
         stripe_subscription_id: sub.id,
         stripe_customer_id: sub.customer as string,
         stripe_price_id: sub.items.data[0]?.price?.id ?? null,

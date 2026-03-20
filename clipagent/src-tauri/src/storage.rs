@@ -114,24 +114,10 @@ pub fn load_supabase_session(app: &AppHandle) -> Option<SupabaseSession> {
         }
     }
 
-    // 1) Prefer legacy file first for smoother UX (avoids keychain prompts on normal startup).
+    // 1) File-only session load for beta UX: avoid any keychain access prompts.
     let dir = app_data_dir(app).ok()?;
     let path = dir.join(SUPABASE_SESSION_FILE);
     if let Ok(raw) = fs::read_to_string(&path) {
-        if let Ok(session) = serde_json::from_str::<SupabaseSession>(&raw) {
-            if !session.user_id.trim().is_empty() {
-                if let Ok(mut guard) = SESSION_CACHE.lock() {
-                    *guard = Some(session.clone());
-                }
-                // Best effort: mirror to keychain for users who later remove the file.
-                let _ = keyring_set_session(&raw);
-                return Some(session);
-            }
-        }
-    }
-
-    // 2) Fallback to secure storage (keychain/credential manager)
-    if let Some(raw) = keyring_get_session() {
         if let Ok(session) = serde_json::from_str::<SupabaseSession>(&raw) {
             if !session.user_id.trim().is_empty() {
                 if let Ok(mut guard) = SESSION_CACHE.lock() {
@@ -155,9 +141,6 @@ pub fn save_supabase_session(app: &AppHandle, session: &SupabaseSession) -> Resu
         *guard = Some(session.clone());
     }
 
-    // Best effort secure store mirror (can prompt on first access depending on keychain policy).
-    let _ = keyring_set_session(&raw);
-
     let dir = app_data_dir(app)?;
     fs::create_dir_all(&dir).map_err(|_| "cannot_create_app_data_dir".to_string())?;
     let path = dir.join(SUPABASE_SESSION_FILE);
@@ -168,8 +151,6 @@ pub fn save_supabase_session(app: &AppHandle, session: &SupabaseSession) -> Resu
 /// Clear Supabase session from disk (e.g. on logout).
 #[allow(dead_code)]
 pub fn clear_supabase_session(app: &AppHandle) -> Result<(), String> {
-    // Best-effort delete from keychain; if it fails, still clear the legacy file.
-    let _ = keyring_delete_session();
     if let Ok(mut guard) = SESSION_CACHE.lock() {
         *guard = None;
     }
