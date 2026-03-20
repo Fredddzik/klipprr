@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import Stripe from "stripe";
 import { sign } from "@noble/ed25519";
@@ -13,9 +12,16 @@ export async function POST(req: Request) {
   const sig = req.headers.get("stripe-signature");
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
 
+  const json = (obj: unknown, status = 200) => {
+    return new Response(JSON.stringify(obj), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
   if (!sig || !secret) {
     console.error("[Stripe Webhook] Missing signature or STRIPE_WEBHOOK_SECRET");
-    return NextResponse.json({ error: "Webhook config error" }, { status: 500 });
+    return json({ error: "Webhook config error" }, 500);
   }
 
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
@@ -25,7 +31,7 @@ export async function POST(req: Request) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     console.error("[Stripe Webhook] Signature verification failed:", msg);
-    return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+    return json({ error: "Invalid signature" }, 400);
   }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -33,7 +39,7 @@ export async function POST(req: Request) {
   const licensePrivB64 = process.env.KLIPPRR_LICENSE_ED25519_PRIV_B64;
   if (!supabaseUrl || !supabaseService) {
     console.error("[Stripe Webhook] Missing Supabase env");
-    return NextResponse.json({ error: "Server config error" }, { status: 500 });
+    return json({ error: "Server config error" }, 500);
   }
 
   const supabase = createClient(supabaseUrl, supabaseService);
@@ -57,6 +63,9 @@ export async function POST(req: Request) {
     }
 
     const privKeyBytes = base64ToBytes(licensePrivB64.trim());
+    if (privKeyBytes.length !== 32) {
+      throw new Error(`Bad KLIPPRR_LICENSE_ED25519_PRIV_B64 decode length=${privKeyBytes.length} (expected 32)`);
+    }
     const iat = Math.floor(Date.now() / 1000);
     const planClaim = opts.planLower === "pro" ? "Pro" : "Free";
 
@@ -213,11 +222,10 @@ export async function POST(req: Request) {
       break;
     }
   } catch (e) {
-    // Return JSON so Stripe sees a useful error response, not an HTML 500.
     const msg = e instanceof Error ? e.message : "stripe_webhook_processing_error";
     console.error("[Stripe Webhook] Processing failed:", msg, e);
-    return NextResponse.json({ error: "Webhook processing failed", message: msg }, { status: 500 });
+    return json({ error: "Webhook processing failed", message: msg }, 500);
   }
 
-  return NextResponse.json({ received: true });
+  return json({ received: true }, 200);
 }
