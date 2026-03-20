@@ -57,6 +57,21 @@ export async function POST(req: Request) {
   const licenseRow = Array.isArray(licenseRows) ? licenseRows[0] : licenseRows;
 
   let customerId = licenseRow?.stripe_customer_id ?? null;
+
+  // Stripe live/test are isolated. If we previously stored a live customer_id and now use a
+  // test secret (or vice-versa), Stripe will error "No such customer". Validate existence in
+  // the current Stripe environment and recreate if needed.
+  if (customerId) {
+    try {
+      await stripe.customers.retrieve(customerId);
+    } catch (e) {
+      console.warn("[Stripe Checkout] Stored customer_id not found in this Stripe mode; recreating.", {
+        customerId,
+      });
+      customerId = null;
+    }
+  }
+
   if (!customerId) {
     const customer = await stripe.customers.create({
       email: user.email,
@@ -64,9 +79,10 @@ export async function POST(req: Request) {
     });
     customerId = customer.id;
     if (licenseRow?.id) {
-      await serviceClient.from("licenses").update({
-        stripe_customer_id: customerId,
-      }).eq("id", licenseRow.id);
+      await serviceClient
+        .from("licenses")
+        .update({ stripe_customer_id: customerId })
+        .eq("id", licenseRow.id);
     } else {
       await serviceClient.from("licenses").insert({
         user_id: user.id,
