@@ -28,16 +28,21 @@ When it is **unset/empty** (default today):
 
 ## Supabase: optional column
 
-Add a nullable text column on `licenses` (name must match JSON from PostgREST):
+Add nullable text columns on `licenses` (names must match JSON from PostgREST):
 
 ```sql
+alter table public.licenses
+  add column if not exists desktop_license_payload text;
+
 alter table public.licenses
   add column if not exists desktop_license_sig text;
 ```
 
+Populate `desktop_license_payload` with URL-safe base64 of the UTF-8 JSON claims.
+
 Populate `desktop_license_sig` with **standard base64** of the 64-byte signature (same encoding the app expects in `license.signature`).
 
-The sync query uses the user’s JWT; RLS must allow the row to be read. The app passes `desktop_license_sig` from the API response into the local license token.
+The sync query uses the user’s JWT; RLS must allow the row to be read. The app passes `desktop_license_payload` and `desktop_license_sig` from the API response into the local license token.
 
 ## Signing (must match Rust `serde_json` for claims)
 
@@ -71,5 +76,7 @@ Use the same `claims` field types/order as `LicenseClaims` in `license.rs` (`pla
 ## CI (GitHub Actions)
 
 Add `KLIPPRR_LICENSE_ED25519_PUB_B64` as a **repository secret** and export it in the job `env` before `cargo tauri build` / `tauri-action` so release binaries enforce signatures.
+
+The server-side signer (Stripe webhook + activation-code edge function) additionally needs `KLIPPRR_LICENSE_ED25519_PRIV_B64` in env/secrets (standard base64 of the 32-byte signing seed).
 
 Do **not** commit the private key; only the public key (or its base64) is embedded in the app.
