@@ -1,6 +1,13 @@
 import { createClient } from "@supabase/supabase-js";
 import Stripe from "stripe";
-import { sign } from "@noble/ed25519";
+import { sign, hashes as ed25519Hashes } from "@noble/ed25519";
+import { createHash } from "crypto";
+
+// Force Node runtime so `crypto`/`Buffer` and noble hashing work reliably.
+export const runtime = "nodejs";
+
+// Ensure @noble/ed25519 hashing is configured in Node.
+ed25519Hashes.sha512 = (m: Uint8Array) => createHash("sha512").update(m).digest();
 
 /**
  * POST /api/stripe/webhook
@@ -133,7 +140,12 @@ export async function POST(req: Request) {
           try {
             const customerId = sub.customer as string;
             const customer = await stripe.customers.retrieve(customerId);
-            emailForSigning = (customer.email ?? "").toString();
+            // Stripe's retrieve() type can include DeletedCustomer; email only exists on Customer.
+            if ("email" in customer) {
+              emailForSigning = (customer.email ?? "").toString();
+            } else {
+              emailForSigning = "";
+            }
           } catch (e) {
             console.warn("[Stripe Webhook] Could not load customer email for signing; signing with empty email.", {
               userId,
