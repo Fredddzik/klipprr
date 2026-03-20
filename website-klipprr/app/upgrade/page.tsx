@@ -190,13 +190,26 @@ export default function UpgradePage() {
         },
         body: JSON.stringify({ plan: billingPlan }),
       });
-      const data = await res.json();
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {
+        // Non-JSON error bodies (e.g. Next.js 500 HTML) should still surface the status.
+        data = null;
+      }
+
       if (!res.ok) {
-        setStatus(data.error || "Could not start checkout.");
+        setStatus(
+          (data && data.error) || `Could not start checkout (HTTP ${res.status})`
+        );
+        if (raw && raw.length < 2000) {
+          console.error("[Upgrade] Stripe checkout non-JSON error body:", raw);
+        }
         return;
       }
-      if (data.url) window.location.href = data.url;
-      else setStatus("Missing checkout URL.");
+      if (data?.url) window.location.href = data.url;
+      else setStatus(data?.error || "Missing checkout URL.");
     } catch (e) {
       console.error("[Upgrade] Stripe checkout failed:", e);
       setStatus("Checkout failed. Try again.");

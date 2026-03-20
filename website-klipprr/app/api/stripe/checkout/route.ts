@@ -87,10 +87,18 @@ export async function POST(req: Request) {
     subscription_data: {
       metadata: { supabase_user_id: user.id },
     },
+  }).catch((err) => {
+    // Prevent Next.js from returning an HTML 500 page; frontend expects JSON.
+    const message = err instanceof Error ? err.message : "stripe_error";
+    console.error("[Stripe Checkout] sessions.create failed:", message);
+    return null;
   });
 
-  if (!session.url) {
-    return NextResponse.json({ error: "Failed to create checkout session" }, { status: 500 });
+  if (!session?.url) {
+    return NextResponse.json(
+      { error: "Failed to create checkout session (check Stripe env + price IDs).", debug: { priceId } },
+      { status: 500 }
+    );
   }
 
   return NextResponse.json({ url: session.url });
