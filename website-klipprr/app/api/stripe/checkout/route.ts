@@ -77,6 +77,7 @@ export async function POST(req: Request) {
     }
   }
 
+  let stripeSessionError: string | null = null;
   const session = await stripe.checkout.sessions.create({
     mode: "subscription",
     customer: customerId,
@@ -90,13 +91,19 @@ export async function POST(req: Request) {
   }).catch((err) => {
     // Prevent Next.js from returning an HTML 500 page; frontend expects JSON.
     const message = err instanceof Error ? err.message : "stripe_error";
+    stripeSessionError = message;
     console.error("[Stripe Checkout] sessions.create failed:", message);
     return null;
   });
 
   if (!session?.url) {
     return NextResponse.json(
-      { error: "Failed to create checkout session (check Stripe env + price IDs).", debug: { priceId } },
+      {
+        error:
+          `Failed to create checkout session (check Stripe env + price IDs).` +
+          (stripeSessionError ? ` Stripe: ${stripeSessionError}` : ""),
+        debug: { priceId },
+      },
       { status: 500 }
     );
   }
