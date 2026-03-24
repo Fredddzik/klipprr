@@ -4,9 +4,9 @@ import Stripe from "stripe";
 
 /**
  * POST /api/stripe/checkout
- * Creates a Stripe Checkout Session for a Pro subscription.
+ * Creates a Stripe Checkout Session for a paid subscription tier.
  * Requires Authorization: Bearer <supabase_access_token>.
- * Body: { plan?: "monthly" | "yearly" } (default: "monthly").
+ * Body: { tier?: "pro" | "max", billing?: "monthly" | "yearly" }.
  * Returns { url } to redirect the user to Stripe Checkout.
  */
 export async function POST(req: Request) {
@@ -16,24 +16,39 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Missing or invalid Authorization header" }, { status: 401 });
   }
 
-  let plan: "monthly" | "yearly" = "monthly";
+  let billing: "monthly" | "yearly" = "yearly";
+  let tier: "pro" | "max" = "pro";
   try {
     const body = await req.json();
-    if (body?.plan === "yearly") plan = "yearly";
+    if (body?.billing === "monthly") billing = "monthly";
+    if (body?.tier === "max") tier = "max";
   } catch {
-    // no body or invalid JSON: use default monthly
+    // no body or invalid JSON: use defaults
   }
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   const supabaseService = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const stripeSecret = process.env.STRIPE_SECRET_KEY;
-  const priceIdMonthly = process.env.STRIPE_PRO_PRICE_ID_MONTHLY ?? process.env.STRIPE_PRO_PRICE_ID;
-  const priceIdYearly = process.env.STRIPE_PRO_PRICE_ID_YEARLY;
-  const priceId = plan === "yearly" ? priceIdYearly : priceIdMonthly;
+  const proMonthly = process.env.STRIPE_PRO_PRICE_ID_MONTHLY ?? process.env.STRIPE_PRO_PRICE_ID;
+  const proYearly = process.env.STRIPE_PRO_PRICE_ID_YEARLY;
+  const maxMonthly = process.env.STRIPE_MAX_PRICE_ID_MONTHLY;
+  const maxYearly = process.env.STRIPE_MAX_PRICE_ID_YEARLY;
+
+  const priceId =
+    tier === "pro"
+      ? billing === "yearly"
+        ? proYearly
+        : proMonthly
+      : billing === "yearly"
+        ? maxYearly
+        : maxMonthly;
 
   if (!supabaseUrl || !supabaseAnon || !supabaseService || !stripeSecret || !priceId) {
-    console.error("[Stripe Checkout] Missing env: SUPABASE_*, STRIPE_SECRET_KEY, or price ID for plan:", plan);
+    console.error("[Stripe Checkout] Missing env: SUPABASE_*, STRIPE_SECRET_KEY, or price ID", {
+      tier,
+      billing,
+    });
     return NextResponse.json({ error: "Server configuration error" }, { status: 500 });
   }
 
@@ -102,7 +117,7 @@ export async function POST(req: Request) {
     cancel_url: `${appUrl}/upgrade?canceled=1`,
     client_reference_id: user.id,
     subscription_data: {
-      metadata: { supabase_user_id: user.id },
+      metadata: { supabase_user_id: user.id, klipprr_plan: tier },
     },
   }).catch((err) => {
     // Prevent Next.js from returning an HTML 500 page; frontend expects JSON.
@@ -118,7 +133,7 @@ export async function POST(req: Request) {
         error:
           `Failed to create checkout session (check Stripe env + price IDs).` +
           (stripeSessionError ? ` Stripe: ${stripeSessionError}` : ""),
-        debug: { priceId },
+        debug: { priceId, tier, billing },
       },
       { status: 500 }
     );

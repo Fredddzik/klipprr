@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Klipprr — Create viral clips from any video in seconds",
   description:
-    "Extract the best moments from YouTube, Twitch, or local videos. Precise trimming and lightning-fast exports for content creators.",
+    "Extract the best moments from online, or local videos. Precise trimming and lightning-fast exports for content creators.",
   icons: {
     icon: [{ url: "/logo.png", type: "image/png", sizes: "32x32" }],
     apple: [{ url: "/logo.png", type: "image/png", sizes: "180x180" }],

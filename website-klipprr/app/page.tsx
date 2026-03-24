@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import { PricingSection } from "./PricingSection";
 
 export default function Home() {
   return (
@@ -47,7 +48,7 @@ export default function Home() {
             </span>
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-zinc-400">
-            Extract the best moments from YouTube, Twitch, or local videos. Precise trimming meets
+            Extract the best moments from online, or local videos. Precise trimming meets
             lightning-fast exports — no AI, just you in control.
           </p>
           <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
@@ -87,12 +88,12 @@ export default function Home() {
           <div className="mt-16 grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
             {[
               {
-                title: "YouTube Support",
-                description: "Paste any YouTube URL and start clipping instantly. No downloads needed.",
+                title: "Video platform Support",
+                description: "Paste any video URL and start clipping instantly. No downloads needed.",
               },
               {
                 title: "Twitch Integration",
-                description: "Clip your best streaming moments from Twitch VODs with ease.",
+                description: "Clip your best streaming moments from Twitch Clips with ease.",
               },
               {
                 title: "Local Files",
@@ -139,7 +140,7 @@ export default function Home() {
               {
                 step: "01",
                 title: "Paste URL or Upload",
-                description: "Start with a YouTube or Twitch link, or upload your own video file.",
+                description: "Start with a video link, or upload your own video file.",
               },
               {
                 step: "02",
@@ -164,90 +165,7 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Pricing */}
-      <section id="pricing" className="border-t border-zinc-800 py-24 px-6">
-        <div className="mx-auto max-w-5xl">
-          <div className="text-center">
-            <h2 className="text-3xl font-bold text-white sm:text-4xl">
-              Simple, Transparent Pricing
-            </h2>
-            <p className="mt-4 text-lg text-zinc-400">
-              Start free, upgrade when you need more. No hidden fees.
-            </p>
-          </div>
-          <div className="mt-16 grid gap-8 md:grid-cols-3">
-            {/* Free */}
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6 flex flex-col">
-              <h3 className="text-lg font-semibold text-white">Free</h3>
-              <p className="mt-1 text-sm text-zinc-400">Perfect for trying out Klipprr</p>
-              <p className="mt-4 text-3xl font-bold text-white">
-                $0 <span className="text-base font-normal text-zinc-400">/ forever</span>
-              </p>
-              <Link
-                href="/login"
-                className="mt-6 rounded-full border border-zinc-600 py-2.5 text-center text-sm font-medium text-white hover:border-zinc-500 transition"
-              >
-                Get Started
-              </Link>
-              <ul className="mt-6 flex-1 space-y-3 text-sm text-zinc-400">
-                <li>5 clips per month</li>
-                <li>720p export quality</li>
-                <li>YouTube & Twitch support</li>
-                <li>Basic editing tools</li>
-                <li>Watermark on exports</li>
-              </ul>
-            </div>
-
-            {/* Pro */}
-            <div className="relative rounded-2xl border-2 border-violet-500 bg-zinc-900 p-6 flex flex-col shadow-lg shadow-violet-500/10">
-              <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-violet-600 px-3 py-0.5 text-xs font-medium text-white">
-                Most Popular
-              </span>
-              <h3 className="text-lg font-semibold text-white">Pro</h3>
-              <p className="mt-1 text-sm text-zinc-400">For serious content creators</p>
-              <p className="mt-4 text-3xl font-bold text-white">
-                $12 <span className="text-base font-normal text-zinc-400">/ per month</span>
-              </p>
-              <Link
-                href="/upgrade"
-                className="mt-6 rounded-full bg-gradient-to-r from-violet-600 to-fuchsia-600 py-2.5 text-center text-sm font-semibold text-white hover:from-violet-500 hover:to-fuchsia-500 transition"
-              >
-                Start Free Trial
-              </Link>
-              <ul className="mt-6 flex-1 space-y-3 text-sm text-zinc-400">
-                <li>Unlimited clips</li>
-                <li>1080p export quality</li>
-                <li>All platforms supported</li>
-                <li>No watermarks</li>
-                <li>Custom export folder</li>
-                <li>Advanced editing tools</li>
-              </ul>
-            </div>
-
-            {/* Team */}
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6 flex flex-col">
-              <h3 className="text-lg font-semibold text-white">Team</h3>
-              <p className="mt-1 text-sm text-zinc-400">For teams and agencies</p>
-              <p className="mt-4 text-3xl font-bold text-white">
-                $39 <span className="text-base font-normal text-zinc-400">/ per month</span>
-              </p>
-              <a
-                href="mailto:hello@klipprr.com"
-                className="mt-6 rounded-full border border-zinc-600 py-2.5 text-center text-sm font-medium text-white hover:border-zinc-500 transition"
-              >
-                Contact Sales
-              </a>
-              <ul className="mt-6 flex-1 space-y-3 text-sm text-zinc-400">
-                <li>Everything in Pro</li>
-                <li>Up to 5 team members</li>
-                <li>4K export quality</li>
-                <li>Shared project library</li>
-                <li>Priority support</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </section>
+      <PricingSection />
 
       {/* Footer */}
       <footer className="border-t border-zinc-800 py-16 px-6">

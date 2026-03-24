@@ -44,6 +44,10 @@ export async function POST(req: Request) {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseService = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const licensePrivB64 = process.env.KLIPPRR_LICENSE_ED25519_PRIV_B64;
+  const proMonthly = process.env.STRIPE_PRO_PRICE_ID_MONTHLY ?? process.env.STRIPE_PRO_PRICE_ID;
+  const proYearly = process.env.STRIPE_PRO_PRICE_ID_YEARLY;
+  const maxMonthly = process.env.STRIPE_MAX_PRICE_ID_MONTHLY;
+  const maxYearly = process.env.STRIPE_MAX_PRICE_ID_YEARLY;
   if (!supabaseUrl || !supabaseService) {
     console.error("[Stripe Webhook] Missing Supabase env");
     return json({ error: "Server config error" }, 500);
@@ -58,6 +62,16 @@ export async function POST(req: Request) {
 
   function base64ToBytes(b64: string) {
     return Uint8Array.from(Buffer.from(b64, "base64"));
+  }
+
+  function resolvePlanFromPriceId(priceId: string | null | undefined): "pro" | "max" {
+    if (priceId && (priceId === maxMonthly || priceId === maxYearly)) {
+      return "max";
+    }
+    if (priceId && (priceId === proMonthly || priceId === proYearly)) {
+      return "pro";
+    }
+    return "pro";
   }
 
   async function signDesktopLicensePayload(opts: {
@@ -108,6 +122,8 @@ export async function POST(req: Request) {
       }
       const status = sub.status;
       const active = status === "active" || status === "trialing";
+      const currentPriceId = sub.items.data[0]?.price?.id ?? null;
+      const paidPlan = resolvePlanFromPriceId(currentPriceId);
       // Period: on newer Stripe API it's on the first item; on older it's on the subscription
       const firstItem = sub.items?.data?.[0] as { current_period_end?: number } | undefined;
       const subWithPeriod = sub as Stripe.Subscription & { current_period_end?: number };
@@ -156,6 +172,7 @@ export async function POST(req: Request) {
 
         const signed = await signDesktopLicensePayload({
           email: emailForSigning,
+          // Desktop license currently understands "Pro"/"Free"; both Pro and Max map to paid unlock.
           planLower: active ? "pro" : "free",
           expUnix,
         });
@@ -172,14 +189,14 @@ export async function POST(req: Request) {
         .maybeSingle();
 
       const payload = {
-        plan: active ? "pro" : "free",
+        plan: active ? paidPlan : "free",
         active,
         expires_at: periodEnd,
         desktop_license_payload,
         desktop_license_sig,
         stripe_subscription_id: sub.id,
         stripe_customer_id: sub.customer as string,
-        stripe_price_id: sub.items.data[0]?.price?.id ?? null,
+        stripe_price_id: currentPriceId,
       };
 
       if (existing) {

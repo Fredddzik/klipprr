@@ -25,6 +25,9 @@ type License = {
   expires_at: string | null;
 };
 
+type PaidTier = "pro" | "max";
+type BillingPeriod = "monthly" | "yearly";
+
 function isAllowedAppRedirect(redirect: string): boolean {
   return redirect === "clipagent://auth-callback";
 }
@@ -44,7 +47,8 @@ export default function UpgradePage() {
   const [mounted, setMounted] = useState(false);
   const [supabase, setSupabase] = useState<any>(null);
   const [stripeLoading, setStripeLoading] = useState(false);
-  const [billingPlan, setBillingPlan] = useState<"monthly" | "yearly">("monthly");
+  const [selectedTier, setSelectedTier] = useState<PaidTier>("pro");
+  const [billingPeriod, setBillingPeriod] = useState<BillingPeriod>("yearly");
   const successParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("success") : null;
   const canceledParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("canceled") : null;
 
@@ -188,7 +192,7 @@ export default function UpgradePage() {
           Authorization: `Bearer ${session.access_token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ plan: billingPlan }),
+        body: JSON.stringify({ tier: selectedTier, billing: billingPeriod }),
       });
       const raw = await res.text();
       let data: any = null;
@@ -326,30 +330,54 @@ export default function UpgradePage() {
         {session && !license && (
           <>
             <p className="mb-3 text-sm text-zinc-400">
-              Subscribe to Pro with Stripe, or enter an activation code.
+              Subscribe with Stripe, or enter an activation code.
             </p>
-            <div className="mb-3 flex overflow-visible rounded-lg border border-zinc-700 bg-zinc-800/80 p-1 pt-3">
+            <div className="mb-3 grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setBillingPlan("monthly")}
-                className={`flex-1 rounded-md py-2 text-sm font-medium transition ${
-                  billingPlan === "monthly"
-                    ? "bg-violet-600 text-white"
-                    : "text-zinc-400 hover:text-white"
+                onClick={() => setSelectedTier("pro")}
+                className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
+                  selectedTier === "pro"
+                    ? "border-violet-500 bg-violet-600 text-white"
+                    : "border-zinc-700 bg-zinc-800/80 text-zinc-300 hover:text-white"
                 }`}
               >
-                $12 / month
+                Pro
               </button>
               <button
                 type="button"
-                onClick={() => setBillingPlan("yearly")}
-                className={`relative flex-1 rounded-md py-2 text-sm font-medium transition ${
-                  billingPlan === "yearly"
+                onClick={() => setSelectedTier("max")}
+                className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${
+                  selectedTier === "max"
+                    ? "border-emerald-500 bg-emerald-600 text-zinc-950"
+                    : "border-zinc-700 bg-zinc-800/80 text-zinc-300 hover:text-white"
+                }`}
+              >
+                Max
+              </button>
+            </div>
+            <div className="mb-3 flex overflow-visible rounded-lg border border-zinc-700 bg-zinc-800/80 p-1 pt-3">
+              <button
+                type="button"
+                onClick={() => setBillingPeriod("monthly")}
+                className={`flex-1 rounded-md py-2 text-sm font-medium transition ${
+                  billingPeriod === "monthly"
                     ? "bg-violet-600 text-white"
                     : "text-zinc-400 hover:text-white"
                 }`}
               >
-                $120 / year
+                {selectedTier === "pro" ? "$12 / month" : "$39 / month"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setBillingPeriod("yearly")}
+                className={`relative flex-1 rounded-md py-2 text-sm font-medium transition ${
+                  billingPeriod === "yearly"
+                    ? "bg-violet-600 text-white"
+                    : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                {selectedTier === "pro" ? "$120 / year" : "$396 / year"}
                 <span className="absolute -top-2 right-2 rounded-full bg-emerald-500 px-2 py-0.5 text-[10px] font-semibold text-white shadow-sm">
                   2 months free
                 </span>
@@ -363,9 +391,9 @@ export default function UpgradePage() {
             >
               {stripeLoading
                 ? "Redirecting…"
-                : billingPlan === "yearly"
-                  ? "Subscribe to Pro — 2 months free"
-                  : "Subscribe to Pro — Monthly"}
+                : billingPeriod === "yearly"
+                  ? `Subscribe to ${selectedTier === "pro" ? "Pro" : "Max"} — 2 months free`
+                  : `Subscribe to ${selectedTier === "pro" ? "Pro" : "Max"} — Monthly`}
             </button>
             <p className="mb-5 text-xs text-zinc-500">
               By continuing, you agree to our{" "}
