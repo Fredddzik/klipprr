@@ -1,6 +1,6 @@
-# Stripe subscription (Pro plan)
+# Stripe subscriptions (Pro + Max)
 
-Paying the subscription fee turns the user’s account to **Pro**. If they cancel or payment fails, the license is set to **active = false** and the app shows **Free** after the next sync.
+Paying the subscription fee turns the user’s account to **Pro** or **Max** (based on Stripe price ID). If they cancel or payment fails, the license is set to **active = false** and the app shows **Free** after the next sync.
 
 ## Where to put the variables
 
@@ -32,7 +32,9 @@ Use the **exact** variable names below so the API routes can read them.
 | **STRIPE_SECRET_KEY**     | Developers → **API keys** → “Secret key” (starts with `sk_live`_ or `sk_test_`). Click “Reveal” and copy.                                                                                                                                                                                 | Vercel env / `.env.local` |
 | **STRIPE_WEBHOOK_SECRET** | After creating the webhook (step 2 below): Developers → **Webhooks** → your endpoint → “Signing secret” (starts with `whsec`_).                                                                                                                                                           | Vercel env / `.env.local` |
 | **STRIPE_PRO_PRICE_ID_MONTHLY** | Product catalog → **Products** → “Klipprr Pro” → click the **monthly** price ($12/month). Copy the **Price ID** (e.g. `price_1T7iBsCzlydVHH9DR3qYAXsc`). | Vercel env / `.env.local` |
-| **STRIPE_PRO_PRICE_ID_YEARLY** | Same product → click the **yearly** price ($120/year). Copy its **Price ID**. | Vercel env / `.env.local` |
+| **STRIPE_PRO_PRICE_ID_YEARLY** | Same product → click the **yearly** price ($120/year). Copy its **Price ID** (e.g. `price_1T7iBrCzlydVHH9DpnWXrbMv`). | Vercel env / `.env.local` |
+| **STRIPE_MAX_PRICE_ID_MONTHLY** | Product catalog → **Products** → “Klipprr Max” → click the **monthly** price ($39/month). Copy the **Price ID** (e.g. `price_1TEVlbCzlydVHH9DC7kNAipD`). | Vercel env / `.env.local` |
+| **STRIPE_MAX_PRICE_ID_YEARLY** | Same product → click the **yearly** price ($396/year). Copy its **Price ID** (e.g. `price_1TEVlbCzlydVHH9DgqBxCXih`). | Vercel env / `.env.local` |
 | **STRIPE_PRO_PRICE_ID** (optional) | If you only set this (and not the two above), it is used as the monthly price. Prefer the two vars above for both plans. | Vercel env / `.env.local` |
 
 
@@ -81,6 +83,8 @@ Use the **exact** variable names below so the API routes can read them.
 | `STRIPE_WEBHOOK_SECRET`         | Webhook signing secret (after creating the endpoint above).                                    |
 | `STRIPE_PRO_PRICE_ID_MONTHLY`   | Pro **monthly** Price ID from Product catalog ($12/month). |
 | `STRIPE_PRO_PRICE_ID_YEARLY`   | Pro **yearly** Price ID from Product catalog ($120/year). |
+| `STRIPE_MAX_PRICE_ID_MONTHLY`   | Max **monthly** Price ID from Product catalog ($39/month). |
+| `STRIPE_MAX_PRICE_ID_YEARLY`   | Max **yearly** Price ID from Product catalog ($396/year). |
 | `STRIPE_PRO_PRICE_ID`          | Optional fallback: used as monthly if the two above are not set. |
 | `SUPABASE_SERVICE_ROLE_KEY`     | Supabase service role key (Settings → API).                                                    |
 | `NEXT_PUBLIC_SUPABASE_URL`      | Already used by the site.                                                                      |
@@ -90,7 +94,12 @@ Use the **exact** variable names below so the API routes can read them.
 
 ## Monthly vs yearly
 
-Set both **STRIPE_PRO_PRICE_ID_MONTHLY** and **STRIPE_PRO_PRICE_ID_YEARLY** in Vercel. The upgrade page shows a toggle (“$12 / month” and “$120 / year”); the user picks one and clicks Subscribe. The checkout API uses the matching price. If you only set **STRIPE_PRO_PRICE_ID** (no monthly/yearly vars), it is used as the monthly price and the yearly option will not work until you add **STRIPE_PRO_PRICE_ID_YEARLY**.
+Set all four price vars in Vercel:
+
+- **STRIPE_PRO_PRICE_ID_MONTHLY** / **STRIPE_PRO_PRICE_ID_YEARLY**
+- **STRIPE_MAX_PRICE_ID_MONTHLY** / **STRIPE_MAX_PRICE_ID_YEARLY**
+
+The upgrade page lets users choose tier (Pro/Max) and billing (monthly/yearly). The checkout API uses the matching price var. If Max vars are missing, Max checkout will fail with server configuration error.
 
 ---
 

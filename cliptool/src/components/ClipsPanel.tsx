@@ -62,31 +62,48 @@ export default function ClipsPanel({
 
   return (
     <div className="space-y-3 min-w-0">
-      {/* Header: Clips title + Undo/Redo left, Delete selected top right */}
+      {/* Header: Clips title + icon actions */}
       <div className="flex items-center justify-between gap-2 flex-wrap min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <h3 className="text-base font-semibold text-zinc-900 dark:text-white">Clips ({clips.length})</h3>
           <button
             onClick={undo}
             disabled={!canUndo}
-            className="px-3 py-1.5 text-xs rounded-lg bg-zinc-700 hover:bg-zinc-600 text-white disabled:opacity-40 transition"
+            aria-label="Undo"
+            title="Undo"
+            className="w-9 h-9 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-white disabled:opacity-40 disabled:cursor-not-allowed transition inline-flex items-center justify-center"
           >
-            Undo
+            <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4" aria-hidden="true">
+              <path d="M9 7L4 12L9 17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M20 12H5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
           </button>
           <button
             onClick={redo}
             disabled={!canRedo}
-            className="px-3 py-1.5 text-xs rounded-lg bg-zinc-700 hover:bg-zinc-600 text-white disabled:opacity-40 transition"
+            aria-label="Redo"
+            title="Redo"
+            className="w-9 h-9 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-white disabled:opacity-40 disabled:cursor-not-allowed transition inline-flex items-center justify-center"
           >
-            Redo
+            <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4" aria-hidden="true">
+              <path d="M15 7L20 12L15 17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M4 12H19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
           </button>
         </div>
         <button
           disabled={selectedClipIds.length === 0}
           onClick={onDeleteSelected}
-          className="px-3 py-1.5 text-xs rounded-lg bg-red-600 hover:bg-red-500 text-white disabled:opacity-40 transition shrink-0"
+          aria-label="Delete selected"
+          title="Delete selected"
+          className="w-9 h-9 rounded-lg bg-red-600 hover:bg-red-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0 inline-flex items-center justify-center"
         >
-          Delete selected
+          <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4" aria-hidden="true">
+            <path d="M4 7H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            <path d="M9 7V5C9 4.45 9.45 4 10 4H14C14.55 4 15 4.45 15 5V7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            <path d="M7 7L8 19C8.05 19.55 8.5 20 9.05 20H14.95C15.5 20 15.95 19.55 16 19L17 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M10 11V16M14 11V16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          </svg>
         </button>
       </div>
 

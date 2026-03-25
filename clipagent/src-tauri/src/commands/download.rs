@@ -361,6 +361,10 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
     let _ = fs::create_dir_all(&base_dir);
 
     // -------- LOCAL FILE SOURCE --------
+    // Local exports are always raw trim/copy from the selected local file:
+    // - never watermark
+    // - never resolution-cap
+    // - never force re-encode
     if let Some(ref local_path_str) = local_path_opt {
         let local_path = PathBuf::from(local_path_str);
         if !local_path.is_file() {
@@ -383,68 +387,25 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 continue;
             }
             let safe: String = name.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect();
-            // Free (watermarked) local exports must also be capped to 720p, which requires re-encode.
-            // Use MP4 output for maximum compatibility.
-            let out_path = if has_watermark {
-                unique_output_path(&base_dir, &safe)
-            } else {
-                unique_output_path_with_ext(&base_dir, &safe, ext)
-            };
+            let out_path = unique_output_path_with_ext(&base_dir, &safe, ext);
             let out_str = out_path.to_string_lossy().to_string();
 
-            let temp_path = if has_watermark {
-                std::env::temp_dir().join(format!("klipprr_export_{}_{}.mp4", export_stamp, i))
-            } else {
-                std::env::temp_dir().join(format!("klipprr_export_{}_{}.{}", export_stamp, i, ext))
-            };
+            let temp_path =
+                std::env::temp_dir().join(format!("klipprr_export_{}_{}.{}", export_stamp, i, ext));
             let temp_str = temp_path.to_string_lossy().to_string();
 
-            let ok = if has_watermark {
-                let wm_str = watermark_path_buf
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .expect("watermark path when has_watermark");
-                let scale_h = 720i64;
-                let (vw, vh) = probe_video_dims(&local_path).unwrap_or((1280, 720));
-                let wm_w = watermark_target_width(vw, vh);
-                Command::new(ffmpeg_path())
-                    .current_dir(&base_dir)
-                    .args([
-                        "-ss", &format!("{:.3}", start),
-                        "-to", &format!("{:.3}", end),
-                        "-i", &local_str,
-                        "-loop", "1",
-                        "-i", &wm_str,
-                        "-filter_complex",
-                        &format!(
-                            "[0:v]scale=-2:{scale_h}[base];\
-[1:v]format=rgba,colorchannelmixer=aa=0.8[wm0];\
-scale={wm_w}:-1[wm];\
-[base][wm]overlay=x='max(0,W-w-32)':y='max(0,H-h-72)'"
-                        ),
-                        "-c:v", h264_encoder(),
-                        "-pix_fmt", "yuv420p",
-                        "-c:a", "aac",
-                        "-y", &temp_str,
-                    ])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-            } else {
-                // Pro local files: stream copy (trim only), preserve format and quality
-                Command::new(ffmpeg_path())
-                    .current_dir(&base_dir)
-                    .args([
-                        "-ss", &format!("{:.3}", start),
-                        "-to", &format!("{:.3}", end),
-                        "-i", &local_str,
-                        "-c", "copy",
-                        "-y", &temp_str,
-                    ])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-            };
+            let ok = Command::new(ffmpeg_path())
+                .current_dir(&base_dir)
+                .args([
+                    "-ss", &format!("{:.3}", start),
+                    "-to", &format!("{:.3}", end),
+                    "-i", &local_str,
+                    "-c", "copy",
+                    "-y", &temp_str,
+                ])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
             let ok = ok && move_temp_to_final(&temp_path, &out_path).is_ok();
             let (success, written_path) = (ok, out_str.clone());
 

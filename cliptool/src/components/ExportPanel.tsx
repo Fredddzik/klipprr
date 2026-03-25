@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { downloadAll, type AgentResult } from "../lib/clipagent";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import { releaseClipExports } from "@/lib/usage";
 
 interface Clip {
   id: string;
@@ -73,7 +74,10 @@ interface ExportPanelProps {
 
   onUpgradeRequested?: () => void;
 
-  onBeforeExport?: () => Promise<boolean>;
+  onBeforeExport?: (clipCount: number) => Promise<boolean>;
+  onExportReservationStart?: (clipCount: number) => void;
+  onExportClipSettled?: () => void;
+  onExportReservationComplete?: () => void;
 
   /** Called when export finishes successfully (count, exportDir). Replaces alert. */
   onExportComplete?: (count: number, exportDir: string) => void;
@@ -125,6 +129,9 @@ export default function ExportPanel({
   onExportPathChosen,
   onUpgradeRequested,
   onBeforeExport,
+  onExportReservationStart,
+  onExportClipSettled,
+  onExportReservationComplete,
   onExportComplete,
 }: ExportPanelProps) {
   const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI__;
@@ -146,50 +153,20 @@ export default function ExportPanel({
   const exportTotalRef = useRef<number | null>(null);
   const [connectionLost, setConnectionLost] = useState(false);
   const exportInProgressRef = useRef(false);
-  const exportDebugIdRef = useRef(0);
   const exportClientIdRef = useRef<string | null>(null);
-  const [debugLines, setDebugLines] = useState<string[]>([]);
-  const [showDebug, setShowDebug] = useState(false);
-  const [lastHideReason, setLastHideReason] = useState<string | null>(null);
   const clipFailedRef = useRef<Record<number, string>>({});
   const [clipFailed, setClipFailed] = useState<Record<number, string>>({});
   const exportOkCountRef = useRef(0);
   const exportFailedCountRef = useRef(0);
   const exportDirRef = useRef<string>("");
+  const refundedFailedClipIndicesRef = useRef<Record<number, true>>({});
   const [exportClipNames, setExportClipNames] = useState<string[]>([]);
   const exportClipNamesRef = useRef<string[]>([]);
 
-  function dbg(msg: string, extra?: any) {
-    if (typeof window === "undefined") return;
-    const t = new Date().toISOString();
-    const id = exportDebugIdRef.current;
-    const line = extra !== undefined
-      ? `[export-ui ${t} #${id}] ${msg} ${safeJson(extra)}`
-      : `[export-ui ${t} #${id}] ${msg}`;
-    setDebugLines((prev) => {
-      const next = [...prev, line];
-      return next.length > 200 ? next.slice(next.length - 200) : next;
-    });
-    if (extra !== undefined) {
-      // eslint-disable-next-line no-console
-      console.log(`[export-ui ${t} #${id}] ${msg}`, extra);
-    } else {
-      // eslint-disable-next-line no-console
-      console.log(`[export-ui ${t} #${id}] ${msg}`);
-    }
-  }
-
-  function safeJson(v: any) {
-    try {
-      return JSON.stringify(v);
-    } catch {
-      return "\"<unserializable>\"";
-    }
-  }
+  function dbg(_msg: string, _extra?: any) {}
 
   function clearExportingUI(reason: string, extra?: any) {
     dbg(`clearExportingUI: ${reason}`, extra);
-    setLastHideReason(reason);
     exportInProgressRef.current = false;
     setConnectionLost(false);
     setIsExporting(false);
@@ -208,19 +185,12 @@ export default function ExportPanel({
     exportOkCountRef.current = 0;
     exportFailedCountRef.current = 0;
     exportDirRef.current = "";
+    refundedFailedClipIndicesRef.current = {};
   }
 
   useEffect(() => {
     clipProgressRef.current = clipProgress;
   }, [clipProgress]);
-
-  useEffect(() => {
-    dbg("mounted", { isTauri, clientExportId: exportClientIdRef.current });
-    return () => {
-      dbg("unmounted", { clientExportId: exportClientIdRef.current });
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -300,6 +270,7 @@ export default function ExportPanel({
       if (idx !== undefined) {
         clipProgressRef.current = { ...clipProgressRef.current, [idx]: 100 };
         setClipProgress((prev) => ({ ...prev, [idx]: 100 }));
+        onExportClipSettled?.();
       }
     });
     const unlistenFailed = listen<{ clipIndex?: number; reason?: string; client_export_id?: string }>(
@@ -315,6 +286,18 @@ export default function ExportPanel({
         const idx = typeof event.payload?.clipIndex === "number" ? event.payload.clipIndex : undefined;
         const reason = typeof event.payload?.reason === "string" ? event.payload.reason : "failed";
         if (idx !== undefined) {
+          if (!refundedFailedClipIndicesRef.current[idx]) {
+            refundedFailedClipIndicesRef.current[idx] = true;
+            releaseClipExports({ count: 1 }).then((res) => {
+              if (!res.ok) {
+                console.warn("[Export] Failed to refund quota for failed clip", {
+                  idx,
+                  error: res.error,
+                });
+              }
+            });
+          }
+          onExportClipSettled?.();
           clipFailedRef.current = { ...clipFailedRef.current, [idx]: reason };
           setClipFailed((prev) => ({ ...prev, [idx]: reason }));
           // Mark as "done" so export-all-done can close UI deterministically.
@@ -364,6 +347,7 @@ export default function ExportPanel({
                 setConnectionLost(false);
                 const okCount = exportOkCountRef.current;
                 const exportDir = exportDirRef.current;
+                onExportReservationComplete?.();
                 clearExportingUI("export-all-done accepted (after retry)", { total, completedNow, failedNow, okCount, exportDir });
                 if (onExportComplete && exportDir && okCount > 0) {
                   onExportComplete(okCount, exportDir);
@@ -377,6 +361,7 @@ export default function ExportPanel({
 
           const okCount = exportOkCountRef.current;
           const exportDir = exportDirRef.current;
+          onExportReservationComplete?.();
           clearExportingUI("export-all-done accepted", { total, completed, failed, okCount, exportDir });
           if (onExportComplete && exportDir && okCount > 0) {
             onExportComplete(okCount, exportDir);
@@ -475,20 +460,13 @@ export default function ExportPanel({
     }
 
     if (onBeforeExport) {
-      const ok = await onBeforeExport();
+      const ok = await onBeforeExport(chosen.length);
       if (!ok) return;
     }
+    onExportReservationStart?.(chosen.length);
 
     exportInProgressRef.current = true;
-    exportDebugIdRef.current += 1;
     exportClientIdRef.current = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    setLastHideReason(null);
-    setDebugLines((prev) =>
-      prev.length === 0
-        ? prev
-        : [...prev, "---------------- export run start ----------------"]
-    );
-    setShowDebug(true);
     setConnectionLost(false);
     setIsExporting(true);
     setExportProgress(null);
@@ -498,6 +476,7 @@ export default function ExportPanel({
     clipHalfDurMsRef.current = {};
     clipProgressRef.current = {};
     exportTotalRef.current = null;
+    refundedFailedClipIndicesRef.current = {};
     const names = chosen.map((c) => c?.name).filter((n) => typeof n === "string" && n.trim().length > 0) as string[];
     setExportClipNames(names);
     exportClipNamesRef.current = names;
@@ -523,14 +502,16 @@ export default function ExportPanel({
       const result = await downloadAll({
         client_export_id: exportClientIdRef.current,
         source_title: (videoData as any)?.title ? String((videoData as any).title) : null,
-        quality_reencode_h264: exportHQ ? Boolean(qualityReencodeH264) : undefined,
+        quality_reencode_h264: !localFilePath && exportHQ ? Boolean(qualityReencodeH264) : undefined,
         // Use the resolved URL that produced the current preview, not whatever is currently typed.
         url: localFilePath ? "" : exportUrl,
         local_path: localFilePath ?? undefined,
         clips: chosen,
-        mode: exportHQ ? "quality" : "speed",
+        mode: localFilePath ? "speed" : exportHQ ? "quality" : "speed",
         // Free exports are capped at 720p max (enforced client + backend).
-        fast_max_height: exportHQ
+        fast_max_height: localFilePath
+          ? null
+          : exportHQ
           ? null
           : hasWatermark
           ? Math.min(720, fastCap ?? 720)
@@ -591,6 +572,7 @@ export default function ExportPanel({
   return (
     <div className="space-y-4">
       {/* CAPABILITIES */}
+      {!localFilePath && (
       <div className="text-xs text-zinc-600 dark:text-gray-300/80 space-y-1">
         <div>
           Fast max: <span className="text-zinc-900 dark:text-white">{fmtRes(fastMax)}</span>{" "}
@@ -612,9 +594,16 @@ export default function ExportPanel({
           </div>
         )}
       </div>
+      )}
+
+      {localFilePath && (
+        <p className="text-xs text-zinc-500">
+          Local exports preserve source quality and format (trim only).
+        </p>
+      )}
 
       {/* QUALITY TOGGLE */}
-      {(!fastReachesMax || showAdvancedExport) && (
+      {!localFilePath && (!fastReachesMax || showAdvancedExport) && (
         <div className="space-y-2">
           <label className="flex items-center gap-2 text-sm">
             <span className={!exportHQ ? "text-zinc-900 dark:text-white" : "text-zinc-500 dark:text-gray-400"}>
@@ -660,7 +649,7 @@ export default function ExportPanel({
         </div>
       )}
 
-      {!exportHQ && !localFilePath ? (
+      {!localFilePath && !exportHQ ? (
         <div className="space-y-1">
           <label className="text-xs text-gray-400">Video format</label>
 
@@ -696,7 +685,7 @@ export default function ExportPanel({
             </p>
           )}
         </div>
-      ) : (
+      ) : !localFilePath ? (
         <div className="space-y-2">
           <label className="text-xs text-gray-400">Quality mode</label>
           <label className="flex items-center gap-2 text-sm">
@@ -711,9 +700,9 @@ export default function ExportPanel({
             Re-encoding improves compatibility but can be much slower on long/high-res videos.
           </p>
         </div>
-      )}
+      ) : null}
 
-      {!exportHQ && fastMax > 0 && (
+      {!localFilePath && !exportHQ && fastMax > 0 && (
         <div className="space-y-1">
           <label className="text-xs text-zinc-400">Resolution</label>
           <select
@@ -808,44 +797,6 @@ export default function ExportPanel({
             Long clips may take several minutes. Don’t close the app.
           </p>
 
-          <button
-            type="button"
-            className="text-xs text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white underline"
-            onClick={() => setShowDebug((s) => !s)}
-          >
-            {showDebug ? "Hide debug" : "Show debug"}
-          </button>
-
-          {showDebug && (
-            <div className="mt-2 rounded-lg border border-zinc-300/70 dark:border-zinc-700 bg-white/70 dark:bg-zinc-950/40 p-2">
-              <pre className="text-[11px] leading-4 text-zinc-700 dark:text-zinc-300 max-h-48 overflow-auto whitespace-pre-wrap">
-                {debugLines.join("\n")}
-              </pre>
-            </div>
-          )}
-        </div>
-      )}
-
-      {!isExporting && showDebug && debugLines.length > 0 && (
-        <div className="rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900/50 p-3 space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-sm font-medium text-zinc-900 dark:text-white">Last export debug</span>
-            <button
-              type="button"
-              className="text-xs text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white underline"
-              onClick={() => setShowDebug(false)}
-            >
-              Hide
-            </button>
-          </div>
-          {lastHideReason && (
-            <p className="text-xs text-amber-400">Last hide reason: {lastHideReason}</p>
-          )}
-          <div className="rounded-lg border border-zinc-300/70 dark:border-zinc-700 bg-white/70 dark:bg-zinc-950/40 p-2">
-            <pre className="text-[11px] leading-4 text-zinc-700 dark:text-zinc-300 max-h-48 overflow-auto whitespace-pre-wrap">
-              {debugLines.join("\n")}
-            </pre>
-          </div>
         </div>
       )}
 
