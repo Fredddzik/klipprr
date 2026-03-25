@@ -31,12 +31,19 @@ import SettingsModal, {
   type DefaultExportFormat,
 } from "@/components/SettingsModal";
 import type { Capabilities } from "@/lib/capabilities";
+import {
+  getCurrentMonthlyUsage,
+  normalizePlan,
+  releaseClipExports,
+  reserveClipExports,
+} from "@/lib/usage";
 
 const SETTINGS_KEYS = {
   theme: "klipprr-theme",
   clipSort: "klipprr-clip-sort",
   defaultExportFormat: "klipprr-default-export-format",
 } as const;
+const PENDING_EXPORT_RESERVATION_KEY = "klipprr-pending-export-reservation";
 
 export default function HomePage() {
   const [videoUrl, setVideoUrl] = useState("");
@@ -51,12 +58,14 @@ export default function HomePage() {
   const [markOut, setMarkOut] = useState<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [showUpgrade, setShowUpgrade] = useState(false);
+  const [upgradeReason, setUpgradeReason] = useState<"feature_locked" | "clip_limit_reached" | null>(null);
   const [session, setSession] = useState<any>(null);
   const [license, setLicense] = useState<{ plan: string; active: boolean } | null>(null);
 
   const [email, setEmail] = useState<string | null>(null);
-  const [plan, setPlan] = useState<"Free" | "Pro">("Free");
+  const [plan, setPlan] = useState<"Free" | "Pro" | "Max">("Free");
   const [accountLoading, setAccountLoading] = useState(true);
+  const [usage, setUsage] = useState<{ used: number; limit: number; remaining: number } | null>(null);
 
   const [updateStatus, setUpdateStatus] = useState<
     "idle" | "checking" | "latest" | "available" | "downloading" | "error"
@@ -77,16 +86,46 @@ export default function HomePage() {
     exportDir: string;
   } | null>(null);
 
+  function clearSupabaseLocalAuthStorage() {
+    if (typeof window === "undefined") return;
+    try {
+      const keysToDelete: string[] = [];
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const key = window.localStorage.key(i);
+        if (!key) continue;
+        if (key === "supabase.auth.token" || (key.startsWith("sb-") && key.endsWith("-auth-token"))) {
+          keysToDelete.push(key);
+        }
+      }
+      for (const key of keysToDelete) {
+        window.localStorage.removeItem(key);
+      }
+    } catch (e) {
+      console.warn("[Auth] Failed to clear local Supabase auth storage:", e);
+    }
+  }
+
   async function loadAuthAndPlan() {
+    if (suppressAutoSessionRestoreRef.current) {
+      setSession(null);
+      setLicense(null);
+      setEmail(null);
+      setPlan("Free");
+      setAccountLoading(false);
+      return;
+    }
+
     // 1) Source of truth for plan + email is the desktop license (backend).
-    let planFromLicense: "Free" | "Pro" | null = null;
+    let planFromLicense: "Free" | "Pro" | "Max" | null = null;
     let emailFromLicense: string | null = null;
     try {
       const status: any = await invoke("get_license_status");
       if (status && status.Ok) {
         const ok = status.Ok as any;
         const rawPlan = String(ok.plan ?? ok?.claims?.plan ?? "free").toLowerCase();
-        planFromLicense = rawPlan === "pro" ? "Pro" : "Free";
+        if (rawPlan === "max") planFromLicense = "Max";
+        else if (rawPlan === "pro") planFromLicense = "Pro";
+        else planFromLicense = "Free";
         if (ok.claims?.email && typeof ok.claims.email === "string") {
           emailFromLicense = ok.claims.email;
         }
@@ -98,6 +137,7 @@ export default function HomePage() {
     // 2) Frontend Supabase session (used for showing the account and redeeming codes).
     const { data } = await supabase.auth.getSession();
     const supaSession = data.session;
+    setSession(supaSession ?? null);
     const email =
       emailFromLicense ??
       (supaSession?.user?.email ? String(supaSession.user.email) : null);
@@ -282,7 +322,6 @@ useEffect(() => {
   const [keepWholeVideo, setKeepWholeVideo] = useState(false);
   const [qualityReencodeH264, setQualityReencodeH264] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
-  const [exportingFlipTrace, setExportingFlipTrace] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
   // Remove resolveRequestId state, use ref instead for request tracking
   const resolveReqRef = useRef(0);
@@ -302,6 +341,7 @@ useEffect(() => {
   const [defaultExportDir, setDefaultExportDir] = useState("");
   const [exportToasts, setExportToasts] = useState<{ id: number; clipName: string; exportDir: string }[]>([]);
   const exportToastIdRef = useRef(0);
+  const suppressAutoSessionRestoreRef = useRef(false);
   const {
     undo,
     redo,
@@ -374,8 +414,12 @@ async function refreshCapabilities() {
     if (backendCaps) {
       const normalized = normalizeCapabilities(backendCaps);
       setCaps(normalized);
-      setPlan(
-        normalized.canRenameClips || normalized.canSetCustomExportPath ? "Pro" : "Free"
+      setPlan((prev) =>
+        prev === "Max"
+          ? "Max"
+          : normalized.canRenameClips || normalized.canSetCustomExportPath
+            ? "Pro"
+            : "Free"
       );
       return;
     }
@@ -387,9 +431,76 @@ async function refreshCapabilities() {
   const httpCaps = await fetchCapabilitiesHttp();
   if (httpCaps) {
     setCaps(httpCaps);
-    setPlan(
-      httpCaps.canRenameClips || httpCaps.canSetCustomExportPath ? "Pro" : "Free"
+    setPlan((prev) =>
+      prev === "Max"
+        ? "Max"
+        : httpCaps.canRenameClips || httpCaps.canSetCustomExportPath
+          ? "Pro"
+          : "Free"
     );
+  }
+}
+
+async function reserveExportQuota(clipCount: number): Promise<boolean> {
+  if (!session?.user?.id) {
+    alert("Please log in before exporting so we can track your monthly clip limit.");
+    return false;
+  }
+
+  const planKey = normalizePlan(plan);
+  const result = await reserveClipExports({ plan: planKey, requested: clipCount });
+  if (!result.ok) {
+    alert(result.error || "Could not verify your clip quota.");
+    return false;
+  }
+
+  if (!result.result.allowed) {
+    setUpgradeReason("clip_limit_reached");
+    setShowUpgrade(true);
+    return false;
+  }
+  await refreshUsage();
+  return true;
+}
+
+async function refreshUsage() {
+  if (!session?.user?.id) {
+    setUsage(null);
+    return;
+  }
+  const planKey = normalizePlan(plan);
+  const result = await getCurrentMonthlyUsage(planKey, session.user.id);
+  if (!result.ok) {
+    console.warn("[Usage] failed to fetch usage", result.error);
+    return;
+  }
+  setUsage(result.result);
+}
+
+function savePendingReservation(remaining: number) {
+  if (typeof window === "undefined") return;
+  if (remaining <= 0) {
+    window.localStorage.removeItem(PENDING_EXPORT_RESERVATION_KEY);
+    return;
+  }
+  window.localStorage.setItem(
+    PENDING_EXPORT_RESERVATION_KEY,
+    JSON.stringify({
+      remaining,
+      updatedAt: Date.now(),
+    })
+  );
+}
+
+function readPendingReservation(): number {
+  if (typeof window === "undefined") return 0;
+  const raw = window.localStorage.getItem(PENDING_EXPORT_RESERVATION_KEY);
+  if (!raw) return 0;
+  try {
+    const parsed = JSON.parse(raw) as { remaining?: number };
+    return Math.max(0, Number(parsed?.remaining ?? 0));
+  } catch {
+    return 0;
   }
 }
 
@@ -606,9 +717,31 @@ useEffect(() => {
   };
 }, []);
 
+useEffect(() => {
+  refreshUsage();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [session?.user?.id, plan]);
+
+useEffect(() => {
+  const recoverPendingReservation = async () => {
+    const pending = readPendingReservation();
+    if (pending <= 0) return;
+    const result = await releaseClipExports({ count: pending });
+    if (!result.ok) {
+      console.warn("[Usage] failed to recover pending reservation refund", result.error);
+      return;
+    }
+    savePendingReservation(0);
+    await refreshUsage();
+  };
+  recoverPendingReservation();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
+
 // Shared handler: set Supabase session from tokens and refresh license/caps
 async function handleAuthTokens(access_token: string, refresh_token: string) {
   if (!access_token || !refresh_token) return;
+  suppressAutoSessionRestoreRef.current = false;
 
   const { data, error } = await supabase.auth.setSession({
     access_token,
@@ -669,17 +802,53 @@ useEffect(() => {
 // Also run once on mount (delayed) so cold-start deep links are picked up when the backend
 // filled PENDING_AUTH before the frontend was ready.
 useEffect(() => {
+  let syncTimers: number[] = [];
+  const clearSyncTimers = () => {
+    syncTimers.forEach((id) => window.clearTimeout(id));
+    syncTimers = [];
+  };
+
+  // Checkout/webhook can finish a few seconds after the app regains focus.
+  // Retry sync briefly so Pro unlocks without requiring manual "Sync".
+  const queuePostReturnSync = () => {
+    if (!(window as any).__TAURI__) return;
+    if (suppressAutoSessionRestoreRef.current) return;
+    clearSyncTimers();
+    const delays = [0, 3000, 12000];
+    for (const d of delays) {
+      const id = window.setTimeout(async () => {
+        try {
+          await syncLicenseFromSupabase();
+          await refreshCapabilities();
+          await loadAuthAndPlan();
+        } catch (e) {
+          console.warn("[License][SYNC] post-return retry failed:", e);
+        }
+      }, d);
+      syncTimers.push(id);
+    }
+  };
+
   const tryConsumePendingAuth = async () => {
     if (!(window as any).__TAURI__) return;
+    if (suppressAutoSessionRestoreRef.current) return;
     try {
       let tokens = await invoke<[string, string] | null>("consume_auth_tokens");
       if (!tokens) {
         const { data } = await supabase.auth.getSession();
-        if (data.session?.user) return;
+        if (data.session?.user) {
+          // Already logged in: still run license sync (e.g. user just returned from Stripe checkout).
+          queuePostReturnSync();
+          return;
+        }
         tokens = await invoke<[string, string] | null>("get_stored_session_tokens");
       }
-      if (!tokens) return;
+      if (!tokens) {
+        queuePostReturnSync();
+        return;
+      }
       const [accessToken, refreshToken] = tokens;
+      suppressAutoSessionRestoreRef.current = false;
       await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
       await invoke("set_supabase_session", { accessToken, refreshToken });
       await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
@@ -687,8 +856,10 @@ useEffect(() => {
       await refreshCapabilities();
       await loadAuthAndPlan();
       console.log("[FRONTEND] Auth completed from focus fallback (pending tokens)");
+      queuePostReturnSync();
     } catch (e) {
       console.error("[FRONTEND] Focus fallback consume_auth_tokens failed:", e);
+      queuePostReturnSync();
     }
   };
 
@@ -712,6 +883,7 @@ useEffect(() => {
   window.addEventListener("focus", onWindowFocus);
   return () => {
     clearTimeout(t);
+    clearSyncTimers();
     document.removeEventListener("visibilitychange", onVisibility);
     window.removeEventListener("focus", onWindowFocus);
   };
@@ -721,6 +893,9 @@ useEffect(() => {
   // --- License enforcement (Supabase → local ClipAgent) ---
   // Extracted license sync logic
 async function syncLicenseFromSupabase() {
+  if (suppressAutoSessionRestoreRef.current) {
+    return;
+  }
   console.log("[License][SYNC] invoked");
 
   let {
@@ -1119,21 +1294,6 @@ useEffect(() => {
 
   const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI__;
 
-  useEffect(() => {
-    // eslint-disable-next-line no-console
-    console.log(`[page] ${new Date().toISOString()} isExporting=${isExporting} exportPanelOpen=${exportPanelOpen}`);
-  }, [isExporting, exportPanelOpen]);
-
-  const setIsExportingTraced = (v: boolean) => {
-    if (v === false) {
-      const stack = new Error("setIsExporting(false) trace").stack ?? null;
-      setExportingFlipTrace(stack);
-      // eslint-disable-next-line no-console
-      console.log(`[page] ${new Date().toISOString()} setIsExporting(false)`, stack);
-    }
-    setIsExporting(v);
-  };
-
   // Check for updates on startup (desktop only). If an update exists, show a toast bottom-right.
   useEffect(() => {
     if (!isTauri) return;
@@ -1156,21 +1316,30 @@ useEffect(() => {
       onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
       email={email}
       plan={plan}
+      usage={usage}
       accountLoading={accountLoading}
       isTauri={isTauri}
       updateStatus={updateStatus}
       updateInfo={updateInfo}
       onSync={async () => {
         await invoke("sync_license_from_supabase", getSupabaseConfigForBackend());
+        await loadAuthAndPlan();
         await refreshCapabilities();
+        await refreshUsage();
       }}
       onCheckForUpdates={handleCheckForUpdates}
       onInstallUpdate={handleInstallUpdate}
       onLogout={async () => {
-        await supabase.auth.signOut();
+        suppressAutoSessionRestoreRef.current = true;
+        setSession(null);
+        setLicense(null);
+        setEmail(null);
+        setPlan("Free");
+        setAccountLoading(false);
+        clearSupabaseLocalAuthStorage();
+        await supabase.auth.signOut({ scope: "local" } as any);
         await invoke("clear_license_cmd");
         await refreshCapabilities();
-        await loadAuthAndPlan();
       }}
       onLogin={async () => {
         try {
@@ -1273,10 +1442,16 @@ useEffect(() => {
 
     <UpgradeModal
   open={showUpgrade}
-  onClose={() => setShowUpgrade(false)}
+  reason={upgradeReason}
+  onClose={() => {
+    setShowUpgrade(false);
+    setUpgradeReason(null);
+  }}
   onUpgraded={async () => {
     await refreshCapabilities();
+    await refreshUsage();
     setShowUpgrade(false);
+    setUpgradeReason(null);
   }}
   isLoggedIn={!!email}
   onRedeemCode={async (code) => {
@@ -1590,7 +1765,10 @@ useEffect(() => {
                   showUndoToast(selectedClipIds.length > 1 ? "Delete clips" : "Delete clip");
                 }}
                 canEditClips={caps.canRenameClips}
-                onUpgradeRequested={() => setShowUpgrade(true)}
+                onUpgradeRequested={() => {
+                  setUpgradeReason("feature_locked");
+                  setShowUpgrade(true);
+                }}
               />
             </div>
             {!exportPanelOpen && (
@@ -1649,7 +1827,7 @@ useEffect(() => {
                 setShowAdvancedExport={setShowAdvancedExport}
                 shouldWarnQuality={shouldWarnQuality}
                 isExporting={isExporting}
-                setIsExporting={setIsExportingTraced}
+                setIsExporting={setIsExporting}
                 exportPath={exportPath}
                 setExportPath={setExportPath}
                 defaultExportDir={defaultExportDir}
@@ -1663,7 +1841,23 @@ useEffect(() => {
                     console.warn("Persist export path failed:", e);
                   }
                 }}
-                onUpgradeRequested={() => setShowUpgrade(true)}
+                onUpgradeRequested={() => {
+                  setUpgradeReason("feature_locked");
+                  setShowUpgrade(true);
+                }}
+                onBeforeExport={reserveExportQuota}
+                onExportReservationStart={(clipCount) => {
+                  savePendingReservation(clipCount);
+                }}
+                onExportClipSettled={() => {
+                  const pending = readPendingReservation();
+                  if (pending <= 0) return;
+                  savePendingReservation(pending - 1);
+                }}
+                onExportReservationComplete={() => {
+                  savePendingReservation(0);
+                  refreshUsage();
+                }}
                 onExportComplete={(count, exportDir) => {
                   setExportCompleteToast({ count, exportDir });
                   setTimeout(() => setExportCompleteToast(null), 12000);

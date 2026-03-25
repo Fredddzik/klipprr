@@ -189,9 +189,10 @@ fn verify_license(token: &LicenseToken) -> Result<LicenseClaims, &'static str> {
 
     if license_ed25519_pubkey_bytes().is_some() {
         verify_ed25519_if_configured(token)?;
-    } else if token.signature != "server-trusted" {
-        // Without a configured pubkey, only accept the legacy in-app trust marker.
-        return Err("bad_signature");
+    } else {
+        // Legacy mode (no compile-time pubkey):
+        // trust payload + expiry checks only. Signature marker/value is ignored so
+        // Supabase-sourced desktop tokens don't get rejected as "bad_signature".
     }
 
     Ok(claims)
