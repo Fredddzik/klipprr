@@ -54,22 +54,31 @@ export default function AccountPage() {
       setLicense(null);
       return;
     }
+
     setLicenseLoading(true);
-    supabase
-      .from("licenses")
-      .select("plan, expires_at, active")
-      .eq("user_id", session.user.id)
-      .eq("active", true)
-      .maybeSingle()
-      .then(({ data, error }) => {
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from("licenses")
+          .select("plan, expires_at, active")
+          .eq("user_id", session.user.id)
+          .eq("active", true)
+          .maybeSingle();
+
         if (error) {
           console.error("[Account] license load failed", error);
           setLicense(null);
           return;
         }
+
         setLicense((data as LicenseRow | null) ?? null);
-      })
-      .finally(() => setLicenseLoading(false));
+      } catch (e) {
+        console.error("[Account] license load failed (exception)", e);
+        setLicense(null);
+      } finally {
+        setLicenseLoading(false);
+      }
+    })();
   }, [session?.user?.id]);
 
   const plan = useMemo(() => normalizePlan(license?.plan), [license?.plan]);
