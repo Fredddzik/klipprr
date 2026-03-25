@@ -371,12 +371,18 @@ export default function UpgradePage() {
 
         {session && license && (
           <>
-            <p className="mb-4 text-sm text-emerald-400">
-              Klipprr Pro is active.
+            <p className="mb-2 text-sm text-emerald-400">
+              Your plan is active.
             </p>
             <p className="text-sm text-zinc-400">
-              Your license is active. Open Klipprr and log in to unlock Pro features.
+              Manage billing (next charge, invoices, cancel) from your account page.
             </p>
+            <Link
+              href="/account"
+              className="mt-5 inline-flex w-full items-center justify-center rounded-full bg-violet-600 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 transition"
+            >
+              Go to account
+            </Link>
           </>
         )}
 
