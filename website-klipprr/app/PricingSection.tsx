@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 
 type BillingMode = "yearly" | "monthly";
 
 type Tier = {
   name: string;
   subtitle: string;
-  ctaHref: string;
   ctaLabel: string;
   popular?: boolean;
   accent?: "violet" | "emerald" | "zinc";
@@ -23,7 +24,6 @@ const tiers: Tier[] = [
   {
     name: "Free",
     subtitle: "Try Klipprr quickly before upgrading",
-    ctaHref: "/login",
     ctaLabel: "Get Started",
     accent: "zinc",
     monthlyPrice: 0,
@@ -38,7 +38,6 @@ const tiers: Tier[] = [
   {
     name: "Pro",
     subtitle: "Best for creators publishing consistently",
-    ctaHref: "/upgrade",
     ctaLabel: "Upgrade",
     popular: true,
     accent: "violet",
@@ -57,7 +56,6 @@ const tiers: Tier[] = [
   {
     name: "Max",
     subtitle: "For power users with high clipping volume",
-    ctaHref: "/upgrade",
     ctaLabel: "Upgrade",
     accent: "emerald",
     monthlyPrice: 39,
@@ -102,8 +100,44 @@ function priceCopy(tier: Tier, mode: BillingMode) {
 }
 
 export function PricingSection() {
+  const router = useRouter();
   const [mode, setMode] = useState<BillingMode>("yearly");
   const orderedTiers = useMemo(() => tiers, []);
+  const [checkoutLoading, setCheckoutLoading] = useState<null | "pro" | "max">(null);
+
+  const startCheckout = async (tier: "pro" | "max", billing: BillingMode) => {
+    setCheckoutLoading(tier);
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token ?? null;
+      if (!token) {
+        router.push("/login");
+        return;
+      }
+
+      const res = await fetch("/api/stripe/checkout", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ tier, billing }),
+      });
+      const raw = await res.text();
+      const json = raw ? (JSON.parse(raw) as { url?: string; error?: string }) : null;
+      if (!res.ok || !json?.url) {
+        const message = json?.error || `Could not start checkout (HTTP ${res.status})`;
+        alert(message);
+        return;
+      }
+      window.location.href = json.url;
+    } catch (e) {
+      console.error("[Pricing] checkout failed", e);
+      alert("Checkout failed. Please try again.");
+    } finally {
+      setCheckoutLoading(null);
+    }
+  };
 
   return (
     <section id="pricing" className="border-t border-zinc-800 py-24 px-6">
@@ -194,16 +228,31 @@ export function PricingSection() {
                   ))}
                 </ul>
 
-                <Link
-                  href={tier.ctaHref}
-                  className={`mt-7 rounded-xl py-2.5 text-center text-sm font-semibold uppercase tracking-wide transition ${
-                    tier.popular
-                      ? "bg-emerald-500 text-zinc-950 hover:bg-emerald-400"
-                      : "bg-zinc-100 text-zinc-900 hover:bg-zinc-200"
-                  }`}
-                >
-                  {tier.ctaLabel}
-                </Link>
+                {tier.monthlyPrice === 0 ? (
+                  <Link
+                    href="/login"
+                    className="mt-7 rounded-xl bg-zinc-100 py-2.5 text-center text-sm font-semibold uppercase tracking-wide text-zinc-900 transition hover:bg-zinc-200"
+                  >
+                    {tier.ctaLabel}
+                  </Link>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => startCheckout(tier.name === "Max" ? "max" : "pro", mode)}
+                    disabled={checkoutLoading !== null}
+                    className={`mt-7 rounded-xl py-2.5 text-center text-sm font-semibold uppercase tracking-wide transition disabled:opacity-60 ${
+                      tier.popular
+                        ? "bg-emerald-500 text-zinc-950 hover:bg-emerald-400"
+                        : "bg-zinc-100 text-zinc-900 hover:bg-zinc-200"
+                    }`}
+                  >
+                    {checkoutLoading
+                      ? "Redirecting…"
+                      : mode === "yearly"
+                        ? `Upgrade (yearly)`
+                        : `Upgrade (monthly)`}
+                  </button>
+                )}
               </div>
             );
           })}
