@@ -51,7 +51,6 @@ function toUnix(exp: string | null): number | null {
 }
 
 export default function UpgradePage() {
-  const [email, setEmail] = useState("");
   const [session, setSession] = useState<any>(null);
   const [license, setLicense] = useState<License | null>(null);
   const [code, setCode] = useState("");
@@ -246,43 +245,6 @@ export default function UpgradePage() {
     );
   }
 
-  const sendMagicLink = async () => {
-  if (!supabase) return;
-
-  setLoading(true);
-  setStatus(null);
-
-  try {
-    const params = new URLSearchParams(window.location.search);
-    const redirectTo = params.get("redirectTo");
-
-    const redirectUrl = redirectTo
-      ? `${window.location.origin}/upgrade?redirectTo=${encodeURIComponent(
-          redirectTo
-        )}`
-      : `${window.location.origin}/upgrade`;
-
-    const { error }: { error: AuthError | null } =
-      await supabase.auth.signInWithOtp({
-        email,
-        options: {
-          emailRedirectTo: redirectUrl,
-        },
-      });
-
-    if (error) {
-      setStatus(error.message);
-    } else {
-      setStatus("Check your email for the login link.");
-    }
-  } catch (e) {
-    console.error("[Upgrade] signInWithOtp failed:", e);
-    setStatus("Login failed. Check console logs.");
-  } finally {
-    setLoading(false);
-  }
-};
-
   const subscribeWithStripe = async () => {
     if (!session?.access_token) {
       setStatus("Please log in first.");
@@ -389,23 +351,21 @@ export default function UpgradePage() {
 
         {!session && (
           <>
-            <p className="mb-4 text-sm text-zinc-400">
-              Log in to manage your Klipprr license.
+            <p className="mb-6 text-sm text-zinc-400">
+              Sign in to manage your subscription or redeem an activation code.
             </p>
-            <input
-              type="email"
-              placeholder="you@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-            />
-            <button
-              onClick={sendMagicLink}
-              disabled={loading}
-              className="w-full rounded-full bg-violet-600 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-60 transition"
+            <Link
+              href="/login"
+              className="inline-flex w-full items-center justify-center rounded-full bg-violet-600 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 transition"
             >
-              Send login link
-            </button>
+              Sign in
+            </Link>
+            <Link
+              href="/#pricing"
+              className="mt-3 inline-flex w-full items-center justify-center rounded-full border border-zinc-700 bg-zinc-900 py-2.5 text-sm font-semibold text-zinc-100 hover:bg-zinc-800 transition"
+            >
+              View pricing
+            </Link>
           </>
         )}
 
