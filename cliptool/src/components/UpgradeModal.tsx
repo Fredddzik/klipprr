@@ -7,6 +7,7 @@ interface UpgradeModalProps {
   open: boolean;
   onClose: () => void;
   onUpgraded?: () => void;
+  reason?: "feature_locked" | "clip_limit_reached" | null;
   /** When true, show "Enter activation code" so logged-in user can redeem a beta code in-app. */
   isLoggedIn?: boolean;
   /** Redeem an activation code (uses current session). Returns error message or undefined on success. */
@@ -16,11 +17,12 @@ interface UpgradeModalProps {
 const LOGIN_URL =
   "https://klipprr.com/login?redirect=" +
   encodeURIComponent("clipagent://auth-callback");
-const UPGRADE_URL = "https://klipprr.com/upgrade";
+const UPGRADE_URL = "https://klipprr.com/#pricing";
 
 export default function UpgradeModal({
   open,
   onClose,
+  reason = null,
   isLoggedIn = false,
   onRedeemCode,
 }: UpgradeModalProps) {
@@ -84,8 +86,64 @@ export default function UpgradeModal({
         </button>
 
         <h2 className="mb-4 text-xl font-semibold text-white">
-          Upgrade to Pro
+          {reason === "clip_limit_reached" ? "Monthly clip limit reached" : "Upgrade to Pro"}
         </h2>
+        {reason === "clip_limit_reached" && (
+          <p className="mb-4 text-sm text-amber-300">
+            You used all clips for this month on your current plan. Upgrade for more clips.
+          </p>
+        )}
+
+        <div className="mb-4 grid grid-cols-1 gap-3 text-xs text-gray-300">
+          <div className="rounded-lg border border-gray-700 bg-gray-800/60 p-3">
+            <div className="font-semibold text-white">Free</div>
+            <div>10 clips / month · 720p · watermark</div>
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="relative rounded-xl border border-violet-500/80 bg-gray-900/90 p-4 shadow-[0_0_20px_rgba(139,92,246,0.22)]">
+              <span className="absolute -top-2 left-1/2 -translate-x-1/2 rounded-full bg-amber-400 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-zinc-900">
+                Most Popular
+              </span>
+              <h3 className="text-base font-semibold uppercase text-white">Pro</h3>
+              <p className="mt-1 text-[11px] text-zinc-400">Best for creators publishing consistently</p>
+              <p className="mt-3 text-zinc-500 line-through">$12</p>
+              <p className="text-3xl font-bold text-white">
+                $10 <span className="text-lg font-normal text-zinc-400">/ month</span>
+              </p>
+              <p className="mt-1 text-xs text-zinc-400">Billed yearly ($120/year)</p>
+              <span className="mt-2 inline-block rounded-md bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                2 months free
+              </span>
+              <ul className="mt-3 space-y-1.5 text-xs text-zinc-300">
+                <li>✓ Up to 4K clips</li>
+                <li>✓ Can rename clips</li>
+                <li>✓ Can choose export path</li>
+                <li>✓ 120 clips per month</li>
+                <li>✓ No watermark</li>
+              </ul>
+            </div>
+
+            <div className="rounded-xl border border-emerald-500/70 bg-gray-900/90 p-4 shadow-[0_0_18px_rgba(16,185,129,0.2)]">
+              <h3 className="text-base font-semibold uppercase text-white">Max</h3>
+              <p className="mt-1 text-[11px] text-zinc-400">For power users with high clipping volume</p>
+              <p className="mt-3 text-zinc-500 line-through">$39</p>
+              <p className="text-3xl font-bold text-white">
+                $33 <span className="text-lg font-normal text-zinc-400">/ month</span>
+              </p>
+              <p className="mt-1 text-xs text-zinc-400">Billed yearly ($396/year)</p>
+              <span className="mt-2 inline-block rounded-md bg-emerald-500/20 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                2 months free
+              </span>
+              <ul className="mt-3 space-y-1.5 text-xs text-zinc-300">
+                <li>✓ Everything in Pro</li>
+                <li>✓ Up to 8K (if source supports it)</li>
+                <li>✓ 500 clips per month</li>
+                <li>✓ No watermark</li>
+                <li>✓ Priority support</li>
+              </ul>
+            </div>
+          </div>
+        </div>
 
         {!isLoggedIn ? (
           <>
@@ -113,7 +171,7 @@ export default function UpgradeModal({
               onClick={handleOpenUpgrade}
               className="w-full rounded-lg bg-yellow-500 py-2 font-semibold text-black hover:brightness-110"
             >
-              Upgrade to Pro in browser
+              Upgrade for more clips
             </button>
             <p className="mt-3 text-xs text-gray-500 mb-4">or</p>
             {onRedeemCode && (
