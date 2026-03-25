@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Image from "next/image";
+import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
 import type { AuthResponse } from "@supabase/supabase-js";
 import type { Session } from "@supabase/supabase-js";
@@ -32,6 +34,17 @@ function isAllowedAppRedirect(redirect: string): boolean {
   return redirect === "clipagent://auth-callback";
 }
 
+function buildDeepLink(
+  redirect: string,
+  accessToken: string,
+  refreshToken: string,
+  expiresAt?: string
+): string {
+  let link = `${redirect}#access_token=${encodeURIComponent(accessToken)}&refresh_token=${encodeURIComponent(refreshToken)}`;
+  if (expiresAt) link += `&expires_at=${encodeURIComponent(expiresAt)}`;
+  return link;
+}
+
 function toUnix(exp: string | null): number | null {
   if (!exp) return null;
   return Math.floor(new Date(exp).getTime() / 1000);
@@ -51,6 +64,7 @@ export default function UpgradePage() {
   const [billingPeriod, setBillingPeriod] = useState<BillingPeriod>("yearly");
   const successParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("success") : null;
   const canceledParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("canceled") : null;
+  const [openAttempted, setOpenAttempted] = useState(false);
 
   useEffect(() => {
     try {
@@ -102,6 +116,25 @@ export default function UpgradePage() {
     }
   }, [supabase, session]);
 
+  // On success, offer "Open Klipprr" even without redirectTo.
+  useEffect(() => {
+    if (successParam !== "1") return;
+    if (openAttempted) return;
+    if (!session?.access_token || !session?.refresh_token) return;
+    // Give the license refresh a moment; then try opening the app.
+    const t = setTimeout(() => {
+      const deepLink = buildDeepLink(
+        "clipagent://auth-callback",
+        session.access_token,
+        session.refresh_token,
+        session.expires_at ? String(session.expires_at) : undefined
+      );
+      setOpenAttempted(true);
+      window.location.href = deepLink;
+    }, 500);
+    return () => clearTimeout(t);
+  }, [openAttempted, session?.access_token, session?.expires_at, session?.refresh_token, successParam]);
+
   // Fetch license when logged in (and after Stripe success)
   const refreshLicense = () => {
     if (!supabase || !session?.user?.id) return;
@@ -139,6 +172,78 @@ export default function UpgradePage() {
 
   if (!mounted) {
     return null;
+  }
+
+  const isSuccess = successParam === "1";
+  const canDeepLink = !!session?.access_token && !!session?.refresh_token;
+  const successDeepLink = canDeepLink
+    ? buildDeepLink(
+        "clipagent://auth-callback",
+        session.access_token,
+        session.refresh_token,
+        session.expires_at ? String(session.expires_at) : undefined
+      )
+    : null;
+
+  if (isSuccess && session && license) {
+    const planLabel = (license.plan || "").toLowerCase() === "max" ? "Max" : "Pro";
+    return (
+      <div className="min-h-screen bg-zinc-950 text-zinc-100 px-6 py-12">
+        <main className="mx-auto max-w-lg">
+          <div className="flex items-center justify-center gap-3">
+            <Image src="/logo.png" alt="Klipprr" width={40} height={40} className="rounded-xl" />
+            <span className="text-xl font-semibold text-white">Klipprr</span>
+          </div>
+
+          <div className="mt-10 rounded-2xl border border-zinc-800 bg-zinc-900/80 p-8 shadow-xl text-center">
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-300">
+              Payment successful
+            </p>
+            <h1 className="mt-2 text-2xl font-semibold text-white">
+              You&apos;re all set
+            </h1>
+            <p className="mt-3 text-sm text-zinc-400">
+              Your <strong className="text-white">{planLabel}</strong> plan is active for{" "}
+              <strong className="text-white">{session.user?.email}</strong>.
+            </p>
+
+            {successDeepLink ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    window.location.href = successDeepLink;
+                  }}
+                  className="mt-6 inline-flex w-full items-center justify-center rounded-full bg-violet-600 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 transition"
+                >
+                  Open Klipprr
+                </button>
+                <p className="mt-3 text-xs text-zinc-500">
+                  If nothing happens, make sure Klipprr is installed, then click the button again.
+                </p>
+              </>
+            ) : (
+              <Link
+                href="/login"
+                className="mt-6 inline-flex w-full items-center justify-center rounded-full bg-violet-600 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 transition"
+              >
+                Sign in again
+              </Link>
+            )}
+
+            <div className="mt-6 flex items-center justify-center gap-4 text-sm">
+              <Link href="/account" className="text-zinc-400 hover:text-white transition">
+                View account
+              </Link>
+              <span className="text-zinc-700">•</span>
+              <Link href="/" className="text-zinc-400 hover:text-white transition">
+                Back to home
+              </Link>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
   }
 
   const sendMagicLink = async () => {
