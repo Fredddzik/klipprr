@@ -111,6 +111,7 @@ export async function POST(req: Request) {
   let stripeSessionError: string | null = null;
   const session = await stripe.checkout.sessions.create({
     mode: "subscription",
+    allow_promotion_codes: true,
     customer: customerId,
     line_items: [{ price: priceId, quantity: 1 }],
     success_url: `${appUrl}/upgrade?success=1&session_id={CHECKOUT_SESSION_ID}`,
