@@ -74,6 +74,13 @@ export async function POST(req: Request) {
     return "pro";
   }
 
+  function resolvePlanFromMetadataPlan(plan: unknown): "pro" | "max" | null {
+    const v = (plan ?? "").toString().trim().toLowerCase();
+    if (v === "max") return "max";
+    if (v === "pro") return "pro";
+    return null;
+  }
+
   async function signDesktopLicensePayload(opts: {
     email: string;
     planLower: "pro" | "free";
@@ -109,6 +116,100 @@ export async function POST(req: Request) {
     return { desktop_license_payload: payload, desktop_license_sig };
   }
 
+  async function upsertLicenseFromSubscription(sub: Stripe.Subscription, userId: string) {
+    const status = sub.status;
+    const active = status === "active" || status === "trialing";
+    const currentPriceId = sub.items.data[0]?.price?.id ?? null;
+
+    const planFromPrice = resolvePlanFromPriceId(currentPriceId);
+    const planFromMeta =
+      resolvePlanFromMetadataPlan((sub.metadata as any)?.klipprr_plan) ??
+      resolvePlanFromMetadataPlan((sub.metadata as any)?.plan) ??
+      null;
+    const paidPlan = planFromMeta ?? planFromPrice;
+
+    // Period: on newer Stripe API it's on the first item; on older it's on the subscription
+    const firstItem = sub.items?.data?.[0] as { current_period_end?: number } | undefined;
+    const subWithPeriod = sub as Stripe.Subscription & { current_period_end?: number };
+    const periodEndTs = firstItem?.current_period_end ?? subWithPeriod.current_period_end;
+    const periodEnd = periodEndTs ? new Date(periodEndTs * 1000).toISOString() : null;
+
+    let desktop_license_payload: string | null = null;
+    let desktop_license_sig: string | null = null;
+
+    // Only required when `active=true` because the desktop only syncs active licenses.
+    if (active) {
+      if (!licensePrivB64) {
+        console.error("[Stripe Webhook] Missing KLIPPRR_LICENSE_ED25519_PRIV_B64");
+        throw new Error("Missing KLIPPRR_LICENSE_ED25519_PRIV_B64");
+      }
+
+      const expUnix = periodEnd ? Math.floor(new Date(periodEnd).getTime() / 1000) : null;
+
+      const { data: profile, error: profileError } = await supabase
+        .from("profiles")
+        .select("email")
+        .eq("id", userId)
+        .maybeSingle();
+
+      let emailForSigning = (profile?.email ?? "").toString();
+      if (profileError || !emailForSigning) {
+        // Fall back to Stripe customer email (avoids failing the whole webhook when profiles row/email is missing).
+        try {
+          const customerId = sub.customer as string;
+          const customer = await stripe.customers.retrieve(customerId);
+          if ("email" in customer) {
+            emailForSigning = (customer.email ?? "").toString();
+          } else {
+            emailForSigning = "";
+          }
+        } catch (e) {
+          console.warn("[Stripe Webhook] Could not load customer email for signing; signing with empty email.", {
+            userId,
+            message: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
+      const signed = await signDesktopLicensePayload({
+        email: emailForSigning,
+        // Desktop license currently understands "Pro"/"Free"; both Pro and Max map to paid unlock.
+        planLower: active ? "pro" : "free",
+        expUnix,
+      });
+
+      desktop_license_payload = signed.desktop_license_payload;
+      desktop_license_sig = signed.desktop_license_sig;
+    }
+
+    const { data: existing } = await supabase
+      .from("licenses")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("active", true)
+      .maybeSingle();
+
+    const payload = {
+      plan: active ? paidPlan : "free",
+      active,
+      expires_at: periodEnd,
+      desktop_license_payload,
+      desktop_license_sig,
+      stripe_subscription_id: sub.id,
+      stripe_customer_id: sub.customer as string,
+      stripe_price_id: currentPriceId,
+    };
+
+    if (existing) {
+      await supabase.from("licenses").update(payload).eq("id", existing.id);
+    } else {
+      await supabase.from("licenses").insert({
+        user_id: userId,
+        ...payload,
+      });
+    }
+  }
+
   // Ensure we never throw an unhandled exception (Stripe will treat it as 500).
   try {
     switch (event.type) {
@@ -120,93 +221,24 @@ export async function POST(req: Request) {
         console.warn("[Stripe Webhook] subscription missing supabase_user_id in metadata");
         break;
       }
-      const status = sub.status;
-      const active = status === "active" || status === "trialing";
-      const currentPriceId = sub.items.data[0]?.price?.id ?? null;
-      const paidPlan = resolvePlanFromPriceId(currentPriceId);
-      // Period: on newer Stripe API it's on the first item; on older it's on the subscription
-      const firstItem = sub.items?.data?.[0] as { current_period_end?: number } | undefined;
-      const subWithPeriod = sub as Stripe.Subscription & { current_period_end?: number };
-      const periodEndTs = firstItem?.current_period_end ?? subWithPeriod.current_period_end;
-      const periodEnd = periodEndTs
-        ? new Date(periodEndTs * 1000).toISOString()
-        : null;
+      await upsertLicenseFromSubscription(sub, userId);
+      break;
+    }
 
-      let desktop_license_payload: string | null = null;
-      let desktop_license_sig: string | null = null;
-
-      // Only required when `active=true` because the desktop only syncs active licenses.
-      if (active) {
-        if (!licensePrivB64) {
-          console.error("[Stripe Webhook] Missing KLIPPRR_LICENSE_ED25519_PRIV_B64");
-          throw new Error("Missing KLIPPRR_LICENSE_ED25519_PRIV_B64");
-        }
-
-        const expUnix = periodEnd ? Math.floor(new Date(periodEnd).getTime() / 1000) : null;
-
-        const { data: profile, error: profileError } = await supabase
-          .from("profiles")
-          .select("email")
-          .eq("id", userId)
-          .maybeSingle();
-
-        let emailForSigning = (profile?.email ?? "").toString();
-        if (profileError || !emailForSigning) {
-          // Fall back to Stripe customer email (avoids failing the whole webhook when profiles row/email is missing).
-          try {
-            const customerId = sub.customer as string;
-            const customer = await stripe.customers.retrieve(customerId);
-            // Stripe's retrieve() type can include DeletedCustomer; email only exists on Customer.
-            if ("email" in customer) {
-              emailForSigning = (customer.email ?? "").toString();
-            } else {
-              emailForSigning = "";
-            }
-          } catch (e) {
-            console.warn("[Stripe Webhook] Could not load customer email for signing; signing with empty email.", {
-              userId,
-              message: e instanceof Error ? e.message : String(e),
-            });
-          }
-        }
-
-        const signed = await signDesktopLicensePayload({
-          email: emailForSigning,
-          // Desktop license currently understands "Pro"/"Free"; both Pro and Max map to paid unlock.
-          planLower: active ? "pro" : "free",
-          expUnix,
+    case "checkout.session.completed": {
+      const session = event.data.object as Stripe.Checkout.Session;
+      if (session.mode !== "subscription") break;
+      const subId = (session.subscription ?? "").toString();
+      const userId = (session.client_reference_id ?? "").toString();
+      if (!subId || !userId) {
+        console.warn("[Stripe Webhook] checkout.session.completed missing subscription or client_reference_id", {
+          subId,
+          userId,
         });
-
-        desktop_license_payload = signed.desktop_license_payload;
-        desktop_license_sig = signed.desktop_license_sig;
+        break;
       }
-
-      const { data: existing } = await supabase
-        .from("licenses")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("active", true)
-        .maybeSingle();
-
-      const payload = {
-        plan: active ? paidPlan : "free",
-        active,
-        expires_at: periodEnd,
-        desktop_license_payload,
-        desktop_license_sig,
-        stripe_subscription_id: sub.id,
-        stripe_customer_id: sub.customer as string,
-        stripe_price_id: currentPriceId,
-      };
-
-      if (existing) {
-        await supabase.from("licenses").update(payload).eq("id", existing.id);
-      } else {
-        await supabase.from("licenses").insert({
-          user_id: userId,
-          ...payload,
-        });
-      }
+      const sub = await stripe.subscriptions.retrieve(subId, { expand: ["items.data.price"] });
+      await upsertLicenseFromSubscription(sub as any, userId);
       break;
     }
 
