@@ -201,12 +201,32 @@ export async function POST(req: Request) {
     };
 
     if (existing) {
-      await supabase.from("licenses").update(payload).eq("id", existing.id);
+      const { error } = await supabase.from("licenses").update(payload).eq("id", existing.id);
+      if (error) {
+        console.error("[Stripe Webhook] licenses.update failed", {
+          userId,
+          subscriptionId: sub.id,
+          priceId: currentPriceId,
+          paidPlan,
+          message: error.message,
+        });
+        throw new Error(`licenses.update_failed: ${error.message}`);
+      }
     } else {
-      await supabase.from("licenses").insert({
+      const { error } = await supabase.from("licenses").insert({
         user_id: userId,
         ...payload,
       });
+      if (error) {
+        console.error("[Stripe Webhook] licenses.insert failed", {
+          userId,
+          subscriptionId: sub.id,
+          priceId: currentPriceId,
+          paidPlan,
+          message: error.message,
+        });
+        throw new Error(`licenses.insert_failed: ${error.message}`);
+      }
     }
   }
 
