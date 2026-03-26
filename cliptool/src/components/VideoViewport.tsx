@@ -7,9 +7,13 @@ interface VideoViewportProps {
   videoKey?: string;
   currentTime?: number;
   onTimeUpdate?: (t: number) => void;
+  debugInfo?: {
+    audioCodec?: string | null;
+    isLocal?: boolean;
+  };
 }
 
-export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate }: VideoViewportProps) {
+export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate, debugInfo }: VideoViewportProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const bindVideoRef = (el: HTMLVideoElement | null) => {
     videoRef.current = el;
@@ -26,6 +30,7 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
   const [isMuted, setIsMuted] = useState(false);
   /** Video intrinsic size so we can size the preview to the video (no letterboxing). */
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const hideTimer = useRef<number | null>(null);
   function clearHideTimer() {
@@ -101,6 +106,7 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
   // Reset aspect when video source changes so we recalc on new load
   useEffect(() => {
     setAspectRatio(null);
+    setPreviewError(null);
   }, [src, videoKey]);
 
   useEffect(() => {
@@ -173,6 +179,36 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
               pendingSeekRef.current = null;
             }
           }}
+          onError={async () => {
+            const audioCodec = debugInfo?.audioCodec ? String(debugInfo.audioCodec) : null;
+            const isPcm = audioCodec ? audioCodec.toLowerCase().startsWith("pcm") || audioCodec.toLowerCase() === "lpcm" : false;
+
+            let extra: string | null = null;
+            if (src) {
+              try {
+                const res = await fetch(src, { headers: { Range: "bytes=0-1024" } });
+                if (!res.ok) {
+                  const t = (await res.text()).trim();
+                  extra = t ? t.slice(0, 400) : `http_${res.status}`;
+                }
+              } catch (e) {
+                extra = `fetch_failed: ${String(e)}`;
+              }
+            }
+
+            const base =
+              "Preview failed to load in the app.\n\n" +
+              (audioCodec ? `Detected audio codec: ${audioCodec}\n` : "") +
+              (isPcm
+                ? "This file uses Linear PCM audio, which is commonly not supported for in-app preview.\n"
+                : "");
+
+            const tail =
+              (extra ? `\nDetails: ${extra}\n` : "") +
+              "\nWorkaround: export/cl ip from this local file (exports still work), or re-mux/re-encode the file to H.264 + AAC (MP4) for preview.";
+
+            setPreviewError(base + tail);
+          }}
           className="w-full h-full max-h-full object-contain rounded border border-zinc-700 bg-black cursor-pointer"
         />
 
@@ -237,6 +273,15 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
                 />
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {previewError && (
+        <div className="absolute inset-0 flex items-center justify-center p-4">
+          <div className="max-w-lg w-full rounded-xl border border-yellow-700 bg-yellow-950/70 backdrop-blur p-4 text-yellow-100">
+            <div className="font-semibold mb-1">Can’t preview this file</div>
+            <pre className="text-xs whitespace-pre-wrap opacity-95">{previewError}</pre>
           </div>
         </div>
       )}
