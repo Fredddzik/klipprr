@@ -82,9 +82,9 @@ pub fn clear_export_path(app: AppHandle) -> Result<(), String> {
     storage::clear_export_path(&app)
 }
 
-/// Get duration and video codec of a local file via ffprobe (for local file load + same-format export).
+/// Get duration, video codec, and audio codec of a local file via ffprobe.
 #[tauri::command]
-pub fn get_local_video_info(path: String) -> Result<(f64, Option<String>), String> {
+pub fn get_local_video_info(path: String) -> Result<(f64, Option<String>, Option<String>), String> {
     let p = PathBuf::from(path.trim());
     if !p.is_file() {
         return Err("not a file".to_string());
@@ -121,7 +121,23 @@ pub fn get_local_video_info(path: String) -> Result<(f64, Option<String>), Strin
             if s.is_empty() { None } else { Some(s) }
         });
 
-    Ok((duration, codec_name))
+    let out_audio_codec = Command::new(ffprobe_path())
+        .args([
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path_str.as_ref(),
+        ])
+        .output();
+    let audio_codec_name = out_audio_codec
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        });
+
+    Ok((duration, codec_name, audio_codec_name))
 }
 
 /// Open the given path in the system file manager (Finder on macOS, Explorer on Windows, etc.).

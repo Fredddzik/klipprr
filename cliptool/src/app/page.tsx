@@ -24,7 +24,7 @@ import Timeline from "@/components/Timeline";
 import ClipsPanel from "@/components/ClipsPanel";
 import ExportPanel from "@/components/ExportPanel";
 import LeftSidebar from "@/components/LeftSidebar";
-import UpgradeModal from "@/components/UpgradeModal";
+import AccessModal from "@/components/AccessModal";
 import SettingsModal, {
   type ThemePreference,
   type ClipSortOption,
@@ -443,7 +443,8 @@ async function refreshCapabilities() {
 
 async function reserveExportQuota(clipCount: number): Promise<boolean> {
   if (!session?.user?.id) {
-    alert("Please log in before exporting so we can track your monthly clip limit.");
+    setUpgradeReason("feature_locked");
+    setShowUpgrade(true);
     return false;
   }
 
@@ -650,13 +651,16 @@ function readPendingReservation(): number {
       setLoading(true);
       setLoadProgress(0);
       setLocalFilePath(selected);
-      const [duration, _codec] = await invoke<[number, string | null]>("get_local_video_info", {
+      const [duration, _codec, audioCodec] = await invoke<[number, string | null, string | null]>("get_local_video_info", {
         path: selected,
       });
       const title = selected.split(/[/\\]/).pop() ?? "Local video";
       const localId = "local-" + selected.replace(/[/\\:]/g, "_").slice(-64);
       // Use backend stream URL so video works on Windows (convertFileSrc is unreliable there)
-      const previewUrlForVideo = `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(selected)}`;
+      const needsPcmFix =
+        typeof audioCodec === "string" &&
+        (audioCodec.toLowerCase().startsWith("pcm") || audioCodec.toLowerCase() === "lpcm");
+      const previewUrlForVideo = `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(selected)}${needsPcmFix ? "&pcm_fix=1" : ""}`;
       const data: ResolvedVideo = {
         id: localId,
         title,
@@ -673,6 +677,8 @@ function readPendingReservation(): number {
           title,
           duration: Number(duration) || 0,
           preview: { url: previewUrlForVideo },
+          // Non-standard field; used only for in-app diagnostics when local preview fails.
+          audio_codec: audioCodec,
           capabilities: { fast_max_height: 1080, true_max_height: 1080, true_max_requires_reencode: false },
         },
       };
@@ -1440,7 +1446,7 @@ useEffect(() => {
       ))}
     </div>
 
-    <UpgradeModal
+    <AccessModal
   open={showUpgrade}
   reason={upgradeReason}
   onClose={() => {
@@ -1453,7 +1459,7 @@ useEffect(() => {
     setShowUpgrade(false);
     setUpgradeReason(null);
   }}
-  isLoggedIn={!!email}
+  isLoggedIn={!!session?.user?.id}
   onRedeemCode={async (code) => {
     const { error } = await supabase.functions.invoke("redeem_activation_code", {
       body: { code },
@@ -1599,6 +1605,10 @@ useEffect(() => {
                 }
                 videoKey={videoData.id}
                 currentTime={currentTime}
+                debugInfo={{
+                  isLocal: Boolean(localFilePath),
+                  audioCodec: (videoData as any)?.raw?.audio_codec ?? null,
+                }}
                 onTimeUpdate={(t) => {
                   if (Date.now() - programmaticSeekAtRef.current < 250) return;
                   if (t === 0 && currentTimeRef.current > 1) return;

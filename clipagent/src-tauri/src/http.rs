@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use hyper::{Body, Response, StatusCode};
 use hyper::body::to_bytes;
 use hyper::{Method, Request};
@@ -6,6 +8,7 @@ use tauri::AppHandle;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use crate::commands::download;
+use crate::paths::{ffmpeg_path, ffprobe_path};
 use urlencoding::decode as url_decode;
 use std::net::IpAddr;
 use url::Url;
@@ -76,6 +79,66 @@ fn is_blocked_preview_target(decoded: &str) -> bool {
     false
 }
 
+fn needs_pcm_preview_fix(file_path: &Path) -> bool {
+    let path_str = file_path.to_string_lossy().to_string();
+    let out = std::process::Command::new(ffprobe_path())
+        .args([
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path_str.as_str(),
+        ])
+        .output();
+    let codec = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase(),
+        Err(_) => return false,
+    };
+    codec.starts_with("pcm") || codec == "lpcm"
+}
+
+fn make_pcm_fixed_preview(file_path: &Path) -> Option<PathBuf> {
+    let meta = std::fs::metadata(file_path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    file_path.to_string_lossy().hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    if let Ok(modified) = meta.modified() {
+        if let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) {
+            since_epoch.as_secs().hash(&mut hasher);
+            since_epoch.subsec_nanos().hash(&mut hasher);
+        }
+    }
+    let key = hasher.finish();
+
+    let mut cache_dir = std::env::temp_dir();
+    cache_dir.push("clipagent_preview_cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let out_path = cache_dir.join(format!("local_preview_pcmfix_{key:x}.mp4"));
+    if out_path.is_file() {
+        return Some(out_path);
+    }
+
+    let in_str = file_path.to_string_lossy().to_string();
+    let out_str = out_path.to_string_lossy().to_string();
+    let status = std::process::Command::new(ffmpeg_path())
+        .args([
+            "-y",
+            "-i", in_str.as_str(),
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            out_str.as_str(),
+        ])
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    if out_path.is_file() { Some(out_path) } else { None }
+}
+
 pub fn json_response(status: u16, body: String) -> Response<Body> {
     let mut res = Response::new(Body::from(body));
     *res.status_mut() = StatusCode::from_u16(status).unwrap();
@@ -140,7 +203,31 @@ pub async fn handle_http(
             Ok(u) => u.into_owned(),
             Err(_) => return Ok(text_response(400, "bad_path_encoding")),
         };
-        let file_path = Path::new(&decoded);
+        let mut force_pcm_fix = false;
+        for part in query.split('&') {
+            let mut it = part.splitn(2, '=');
+            if it.next() == Some("pcm_fix") && it.next() == Some("1") {
+                force_pcm_fix = true;
+                break;
+            }
+        }
+
+        let mut resolved_path = PathBuf::from(&decoded);
+        if force_pcm_fix {
+            let p = Path::new(&decoded);
+            if p.is_file() && needs_pcm_preview_fix(p) {
+                if let Some(converted) = make_pcm_fixed_preview(p) {
+                    resolved_path = converted;
+                } else {
+                    return Ok(text_response(
+                        500,
+                        "pcm_fix_failed: ffmpeg could not create a preview-safe file (attempted -c:v copy -c:a aac). This usually means the container/streams are unusual or the file is partially corrupted.",
+                    ));
+                }
+            }
+        }
+
+        let file_path = resolved_path.as_path();
         if !file_path.is_file() {
             return Ok(text_response(404, "not_a_file"));
         }

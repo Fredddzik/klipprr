@@ -91,6 +91,8 @@ export interface ResolveResponse {
   thumbnail?: string;
   preview?: { url: string };
   best?: { url: string };
+  /** Local-only diagnostic: detected audio codec from ffprobe (e.g. pcm_s16le, lpcm). */
+  audio_codec?: string | null;
   capabilities?: {
     fast_max_height: number;
     true_max_height: number;
