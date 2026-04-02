@@ -7,6 +7,9 @@ export const metadata: Metadata = {
   title: "Klipprr — Trim & Download Video Clips | YouTube, Twitch, Reels & More",
   description:
     "Klipprr lets you clip and download exactly the part of a video you want — from YouTube, Twitch, Instagram Reels, Twitter/X, or your own files. Free to start, no account needed.",
+  alternates: {
+    canonical: "/",
+  },
   openGraph: {
     title: "Klipprr — Trim & Download Video Clips from YouTube, Twitch, Reels & More",
     description:
