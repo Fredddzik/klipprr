@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import type { Metadata } from "next";
 import { WindowsWaitlist } from "./WindowsWaitlist";
 
 const GITHUB_REPO =
@@ -43,10 +44,13 @@ async function getLatestRelease(): Promise<{
   }
 }
 
-export const metadata = {
+export const metadata: Metadata = {
   title: "Download Klipprr — Mac, Windows, Linux",
   description:
     "Download the Klipprr desktop app. Create viral clips from YouTube, Twitch, and local videos.",
+  alternates: {
+    canonical: "/download",
+  },
 };
 
 export default async function DownloadPage() {
