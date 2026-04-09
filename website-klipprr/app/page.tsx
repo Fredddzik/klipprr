@@ -6,7 +6,7 @@ import { PricingSection } from "./PricingSection";
 export const metadata: Metadata = {
   title: "Klipprr — Trim & Download Video Clips | YouTube, Twitch, Reels & More",
   description:
-    "Klipprr lets you clip and download exactly the part of a video you want — from YouTube, Twitch, Instagram Reels, Twitter/X, or your own files. Free to start, no account needed.",
+    "Klipprr is a desktop app for editors and creators. Clip any part of a YouTube, Twitch, Instagram or X video and export just that moment — no full download needed. Available on macOS, Windows coming soon.",
   alternates: {
     canonical: "/",
   },
@@ -26,7 +26,7 @@ export default function Home() {
     name: "Klipprr",
     url: "https://klipprr.com",
     applicationCategory: "MultimediaApplication",
-    operatingSystem: "Web",
+    operatingSystem: "macOS, Windows",
     offers: [
       { "@type": "Offer", name: "Free", price: "0", priceCurrency: "USD" },
       { "@type": "Offer", name: "Pro", priceCurrency: "USD" },
@@ -134,13 +134,15 @@ export default function Home() {
       {/* Hero */}
       <section className="relative pt-32 pb-24 px-6">
         <div className="mx-auto max-w-4xl text-center">
-          <p className="mb-4 text-sm font-medium uppercase tracking-wider text-violet-400">
-            Turn long videos into viral clips
+          <p className="mb-4 text-sm font-medium tracking-wider">
+            <span className="text-white">macOS</span>
+            <span className="mx-2 text-zinc-500">·</span>
+            <span className="text-zinc-400">Windows coming soon</span>
           </p>
           <h1 className="text-4xl font-bold tracking-tight text-white sm:text-5xl md:text-6xl">
-            Trim and Download Video Clips from{" "}
+            Clip Any Part of Any Video.{" "}
             <span className="bg-gradient-to-r from-violet-400 via-fuchsia-400 to-pink-400 bg-clip-text text-transparent">
-              YouTube, Twitch, Reels & More
+              Download in Seconds.
             </span>
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-zinc-400">
@@ -148,10 +150,9 @@ export default function Home() {
             lightning-fast exports — no AI, just you in control.
           </p>
           <p className="mx-auto mt-4 max-w-3xl text-sm text-zinc-300">
-            Klipprr is a free online clip downloader. Paste a URL from YouTube, Twitch, Instagram
-            Reels, or Twitter/X — or upload a local file — set your start and end timestamps, and
-            download only the part you want. No need to download the full video. Free plan includes
-            10 clips per month at up to 720p. Upgrade for 4K, no watermark, and more.
+            Klipprr is a desktop app built for editors and creators. Paste a YouTube, Twitch,
+            Instagram or X URL — or load a local file — set your in and out points, and export just
+            that clip. No full downloads. No screen recording. Just the clip you need.
           </p>
           <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
             <Link
@@ -161,10 +162,10 @@ export default function Home() {
               Download for Mac
             </Link>
             <Link
-              href="/login"
-              className="rounded-full border border-zinc-600 bg-zinc-900/50 px-6 py-3 text-sm font-medium text-white hover:border-zinc-500 hover:bg-zinc-800/50 transition"
+              href="/download"
+              className="rounded-full border border-zinc-600 bg-zinc-900/50 px-6 py-3 text-sm font-medium text-zinc-300 hover:border-violet-500 hover:text-white transition"
             >
-              Start Clipping for Free
+              Windows? Join the waitlist →
             </Link>
             <a
               href="#how-it-works"
@@ -190,35 +191,42 @@ export default function Home() {
           <div className="mt-16 grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
             {[
               {
-                title: "Video platform Support",
-                description: "Paste any video URL and start clipping instantly. No downloads needed.",
+                icon: "🔗",
+                title: "YouTube, Twitch, Instagram & X",
+                description: "Paste any video URL and start clipping instantly. No full download required.",
               },
               {
-                title: "Twitch Integration",
-                description: "Clip your best streaming moments from Twitch Clips with ease.",
+                icon: "🎬",
+                title: "Frame-Perfect Trimming",
+                description: "Set precise in and out points with a visual timeline. What you see is what you export.",
               },
               {
-                title: "Local Files",
-                description: "Upload your own videos and create clips from any format.",
+                icon: "📁",
+                title: "Local File Support",
+                description: "Already have the video? Load it directly from your Mac and clip away.",
               },
               {
-                title: "Precise Editing",
-                description: "Frame-accurate trimming with real-time preview for perfect clips.",
+                icon: "⚡",
+                title: "Hardware-Accelerated Exports",
+                description: "Exports in seconds using your Mac's GPU. Not minutes. Seconds.",
               },
               {
-                title: "Multiple Clips",
-                description: "Create as many clips as you need from one video, then export in one go.",
+                icon: "🗂️",
+                title: "Multiple Clips, One Export",
+                description: "Mark multiple clips from one video and batch export them all at once.",
               },
               {
-                title: "Lightning Fast",
-                description: "Export clips in seconds with hardware-accelerated encoding.",
+                icon: "🖥️",
+                title: "Native macOS App",
+                description: "Built for Mac. No browser tab. No cloud upload. Your files stay on your machine.",
               },
             ].map((f) => (
               <div
                 key={f.title}
                 className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6 hover:border-zinc-700 transition"
               >
-                <h3 className="text-lg font-semibold text-white">{f.title}</h3>
+                <span className="text-2xl">{f.icon}</span>
+                <h3 className="mt-3 text-lg font-semibold text-white">{f.title}</h3>
                 <p className="mt-2 text-sm text-zinc-400">{f.description}</p>
               </div>
             ))}
@@ -323,7 +331,7 @@ export default function Home() {
                 Create viral clips from any video in seconds.
               </p>
             </div>
-            <div className="grid gap-8 sm:grid-cols-3">
+            <div className="grid gap-8 sm:grid-cols-4">
               <div>
                 <h4 className="text-sm font-semibold text-white">Product</h4>
                 <ul className="mt-3 space-y-2">
@@ -351,6 +359,11 @@ export default function Home() {
                     <a href="https://klipprr.com" className="text-sm text-zinc-400 hover:text-white transition">
                       Documentation
                     </a>
+                  </li>
+                  <li>
+                    <Link href="/blog" className="text-sm text-zinc-400 hover:text-white transition">
+                      Blog
+                    </Link>
                   </li>
                 </ul>
               </div>
@@ -389,11 +402,40 @@ export default function Home() {
                   </li>
                 </ul>
               </div>
+              <div>
+                <h4 className="text-sm font-semibold text-white">Follow Us</h4>
+                <ul className="mt-3 space-y-2">
+                  <li>
+                    <a
+                      href="https://x.com/klipprr"
+                      className="text-sm text-zinc-400 hover:text-white transition"
+                    >
+                      Twitter / X
+                    </a>
+                  </li>
+                  <li>
+                    <a
+                      href="https://www.instagram.com/klipprr/"
+                      className="text-sm text-zinc-400 hover:text-white transition"
+                    >
+                      Instagram
+                    </a>
+                  </li>
+                  <li>
+                    <a
+                      href="https://tiktok.com/@getklipprr"
+                      className="text-sm text-zinc-400 hover:text-white transition"
+                    >
+                      TikTok
+                    </a>
+                  </li>
+                </ul>
+              </div>
             </div>
           </div>
           <div className="mt-12 flex flex-col items-center justify-between gap-4 border-t border-zinc-800 pt-8 sm:flex-row">
             <p className="text-sm text-zinc-500">© 2026 Klipprr. All rights reserved.</p>
-            <p className="text-sm text-zinc-500">Made for content creators</p>
+            <p className="text-sm text-zinc-500">macOS · Windows coming soon</p>
           </div>
         </div>
       </footer>

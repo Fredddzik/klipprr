@@ -28,11 +28,11 @@ const tiers: Tier[] = [
     accent: "zinc",
     monthlyPrice: 0,
     features: [
-      "720p clips",
-      "Cannot rename clips",
-      "Cannot choose export path",
       "10 clips per month",
+      "Up to 720p quality",
       "Watermark on exports",
+      "All supported platforms",
+      "Local file support",
     ],
   },
   {
@@ -145,7 +145,7 @@ export function PricingSection() {
         <div className="text-center">
           <h2 className="text-3xl font-bold text-white sm:text-4xl">Pricing</h2>
           <p className="mt-4 text-lg text-zinc-400">
-            No free trial. Start on Free, then upgrade when you hit your limit.
+            Start free, upgrade when you're ready. No credit card required.
           </p>
         </div>
 
