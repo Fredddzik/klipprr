@@ -45,11 +45,24 @@ async function getLatestRelease(): Promise<{
 }
 
 export const metadata: Metadata = {
-  title: "Download Klipprr — Mac, Windows, Linux",
+  title: "Download Klipprr for Mac — Windows Coming Soon",
   description:
-    "Download the Klipprr desktop app. Create viral clips from YouTube, Twitch, and local videos.",
+    "Download the Klipprr desktop app for macOS. Clip any part of a YouTube, Twitch, Instagram or X video and export just that moment. Free to start.",
   alternates: {
     canonical: "/download",
+  },
+  openGraph: {
+    title: "Download Klipprr for Mac — Windows Coming Soon",
+    description:
+      "Clip any part of a YouTube, Twitch, Instagram or X video and export just that moment. Free to start.",
+    url: "https://klipprr.com/download",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Download Klipprr for Mac — Windows Coming Soon",
+    description:
+      "Clip any part of a YouTube, Twitch, Instagram or X video and export just that moment. Free to start.",
   },
 };
 

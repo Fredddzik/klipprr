@@ -6,7 +6,7 @@ import { PricingSection } from "./PricingSection";
 export const metadata: Metadata = {
   title: "Klipprr — Trim & Download Video Clips | YouTube, Twitch, Reels & More",
   description:
-    "Klipprr is a desktop app for editors and creators. Clip any part of a YouTube, Twitch, Instagram or X video and export just that moment — no full download needed. Available on macOS, Windows coming soon.",
+    "Klipprr is a desktop app for editors and creators. Clip any YouTube, Twitch, Instagram or X video — export just the part you want. No full download needed.",
   alternates: {
     canonical: "/",
   },
@@ -16,6 +16,12 @@ export const metadata: Metadata = {
       "Clip and download exactly the part of any video you want. Supports YouTube, Twitch, Reels, Twitter/X and local files. Free to start.",
     url: "https://klipprr.com",
     type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Klipprr — Trim & Download Video Clips from YouTube, Twitch, Reels & More",
+    description:
+      "Clip and download exactly the part of any video you want. Supports YouTube, Twitch, Reels, Twitter/X and local files. Free to start.",
   },
 };
 
@@ -29,11 +35,31 @@ export default function Home() {
     operatingSystem: "macOS, Windows",
     offers: [
       { "@type": "Offer", name: "Free", price: "0", priceCurrency: "USD" },
-      { "@type": "Offer", name: "Pro", priceCurrency: "USD" },
-      { "@type": "Offer", name: "Max", priceCurrency: "USD" },
+      { "@type": "Offer", name: "Pro", price: "12", priceCurrency: "USD" },
+      { "@type": "Offer", name: "Max", price: "39", priceCurrency: "USD" },
     ],
     description:
       "Klipprr is a freemium online tool to trim and download clips from YouTube, Twitch, Instagram Reels, Twitter/X, and local video files. Set a start and end timestamp and download only the part you want.",
+  };
+
+  const organizationJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    name: "Klipprr",
+    url: "https://klipprr.com",
+    logo: "https://klipprr.com/logo.png",
+    sameAs: [
+      "https://x.com/klipprr",
+      "https://www.instagram.com/klipprr/",
+      "https://tiktok.com/@getklipprr",
+    ],
+  };
+
+  const websiteJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "Klipprr",
+    url: "https://klipprr.com",
   };
 
   const faqJsonLd = {
@@ -95,6 +121,14 @@ export default function Home() {
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
       <script
         type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(organizationJsonLd) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(websiteJsonLd) }}
+      />
+      <script
+        type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(softwareApplicationJsonLd) }}
       />
       <script
@@ -122,10 +156,10 @@ export default function Home() {
               Sign In
             </Link>
             <Link
-              href="/login"
+              href="/download"
               className="rounded-full bg-white px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-zinc-200 transition"
             >
-              Get Started
+              Download for Mac
             </Link>
           </div>
         </nav>
@@ -145,10 +179,6 @@ export default function Home() {
               Download in Seconds.
             </span>
           </h1>
-          <p className="mx-auto mt-6 max-w-2xl text-lg text-zinc-400">
-            Extract the best moments from online, or local videos. Precise trimming meets
-            lightning-fast exports — no AI, just you in control.
-          </p>
           <p className="mx-auto mt-4 max-w-3xl text-sm text-zinc-300">
             Klipprr is a desktop app built for editors and creators. Paste a YouTube, Twitch,
             Instagram or X URL — or load a local file — set your in and out points, and export just
@@ -356,14 +386,9 @@ export default function Home() {
                 <h4 className="text-sm font-semibold text-white">Resources</h4>
                 <ul className="mt-3 space-y-2">
                   <li>
-                    <a href="https://klipprr.com" className="text-sm text-zinc-400 hover:text-white transition">
-                      Documentation
+                    <a href="mailto:hello@klipprr.com" className="text-sm text-zinc-400 hover:text-white transition">
+                      Support
                     </a>
-                  </li>
-                  <li>
-                    <Link href="/blog" className="text-sm text-zinc-400 hover:text-white transition">
-                      Blog
-                    </Link>
                   </li>
                 </ul>
               </div>
