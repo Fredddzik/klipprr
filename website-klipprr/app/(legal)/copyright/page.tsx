@@ -6,8 +6,31 @@ export const metadata: Metadata = {
 };
 
 export default function CopyrightPage() {
+  const webPageJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: "Copyright & Takedown — Klipprr",
+    url: "https://klipprr.com/copyright",
+    dateModified: "2026-04-10",
+  };
+  const breadcrumbJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: "https://klipprr.com/" },
+      { "@type": "ListItem", position: 2, name: "Copyright", item: "https://klipprr.com/copyright" },
+    ],
+  };
   return (
     <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
+      />
       <h1>Copyright &amp; Takedown Policy</h1>
       <p>
         <strong>Effective date:</strong> March 17, 2026

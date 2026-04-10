@@ -6,8 +6,31 @@ export const metadata: Metadata = {
 };
 
 export default function CookiesPage() {
+  const webPageJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: "Cookie Policy — Klipprr",
+    url: "https://klipprr.com/cookies",
+    dateModified: "2026-04-10",
+  };
+  const breadcrumbJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: "https://klipprr.com/" },
+      { "@type": "ListItem", position: 2, name: "Cookies", item: "https://klipprr.com/cookies" },
+    ],
+  };
   return (
     <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
+      />
       <h1>Cookie Policy</h1>
       <p>
         <strong>Effective date:</strong> March 17, 2026

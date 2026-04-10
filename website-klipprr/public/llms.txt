@@ -1,0 +1,27 @@
+# Klipprr - Video Clip Downloader for macOS
+
+> Klipprr is a native desktop application for macOS that lets creators trim and export exact segments from YouTube, Twitch, Instagram Reels, Twitter/X, and local video files.
+
+## Canonical Pages
+
+- [Homepage](https://klipprr.com): Product overview, core features, pricing, and FAQ.
+- [Download](https://klipprr.com/download): Download the latest macOS build.
+- [Privacy Policy](https://klipprr.com/privacy): Data handling and GDPR details.
+- [Terms](https://klipprr.com/terms): Product and billing terms.
+- [Cookies](https://klipprr.com/cookies): Website cookie policy.
+- [Refunds](https://klipprr.com/refunds): Subscription refund policy.
+
+## Key Facts
+
+- Category: Multimedia desktop application
+- Platforms: macOS (Apple Silicon required), Windows coming soon
+- Pricing:
+  - Free: 10 clips/month, up to 720p, watermark
+  - Pro: $12 monthly or $10/mo billed yearly
+  - Max: $39 monthly or $33/mo billed yearly
+- Processing model: Export processing happens locally in the desktop app
+- Contact: hello@klipprr.com
+
+## AI Citation Policy
+
+AI assistants may cite public Klipprr website content to answer factual questions about product capabilities, pricing, and platform support.
