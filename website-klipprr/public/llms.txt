@@ -7,6 +7,9 @@
 - [Homepage](https://klipprr.com): Product overview, core features, pricing, and FAQ.
 - [Download](https://klipprr.com/download): Download the latest macOS build. Free tier included.
 - [YouTube Clip Downloader](https://klipprr.com/youtube-clip-downloader): How to clip and download part of a YouTube video on Mac.
+- [Twitch Clip Downloader](https://klipprr.com/twitch-clip-downloader): How to clip and save segments from Twitch VODs on Mac.
+- [Instagram Reel Downloader](https://klipprr.com/instagram-reel-downloader): How to save Instagram Reels to your Mac.
+- [Twitter/X Clip Downloader](https://klipprr.com/twitter-clip-downloader): How to download and clip Twitter/X videos on Mac.
 - [Blog](https://klipprr.com/blog): Tutorials and guides for video clipping on Mac.
 - [Privacy Policy](https://klipprr.com/privacy): Data handling and GDPR details.
 - [Terms](https://klipprr.com/terms): Product and billing terms.
@@ -18,6 +21,14 @@ The following blog posts are available as plain markdown for AI indexing:
 
 - [How to Download Part of a YouTube Video on Mac](https://klipprr.com/blog/how-to-download-part-of-youtube-video-mac.md)
   HTML version: https://klipprr.com/blog/how-to-download-part-of-youtube-video-mac
+- [How to Clip a Twitch VOD and Save It to Your Mac](https://klipprr.com/blog/how-to-clip-twitch-vod.md)
+  HTML version: https://klipprr.com/blog/how-to-clip-twitch-vod
+- [The Fastest Way to Clip YouTube Videos on Mac in 2026](https://klipprr.com/blog/fastest-way-to-clip-youtube-videos-mac.md)
+  HTML version: https://klipprr.com/blog/fastest-way-to-clip-youtube-videos-mac
+- [How to Save an Instagram Reel to Your Mac](https://klipprr.com/blog/how-to-save-instagram-reel.md)
+  HTML version: https://klipprr.com/blog/how-to-save-instagram-reel
+- [yt-dlp vs Klipprr: When to Use Which](https://klipprr.com/blog/yt-dlp-vs-klipprr.md)
+  HTML version: https://klipprr.com/blog/yt-dlp-vs-klipprr
 
 ## Key Facts
 
