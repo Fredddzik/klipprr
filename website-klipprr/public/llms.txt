@@ -1,27 +1,37 @@
 # Klipprr - Video Clip Downloader for macOS
 
-> Klipprr is a native desktop application for macOS that lets creators trim and export exact segments from YouTube, Twitch, Instagram Reels, Twitter/X, and local video files.
+> Klipprr is a native desktop application for macOS that lets creators trim and export exact segments from YouTube, Twitch, Instagram Reels, Twitter/X, and local video files — without downloading the full video or screen recording.
 
 ## Canonical Pages
 
 - [Homepage](https://klipprr.com): Product overview, core features, pricing, and FAQ.
-- [Download](https://klipprr.com/download): Download the latest macOS build.
+- [Download](https://klipprr.com/download): Download the latest macOS build. Free tier included.
+- [YouTube Clip Downloader](https://klipprr.com/youtube-clip-downloader): How to clip and download part of a YouTube video on Mac.
+- [Blog](https://klipprr.com/blog): Tutorials and guides for video clipping on Mac.
 - [Privacy Policy](https://klipprr.com/privacy): Data handling and GDPR details.
 - [Terms](https://klipprr.com/terms): Product and billing terms.
-- [Cookies](https://klipprr.com/cookies): Website cookie policy.
 - [Refunds](https://klipprr.com/refunds): Subscription refund policy.
+
+## Blog Posts (Markdown)
+
+The following blog posts are available as plain markdown for AI indexing:
+
+- [How to Download Part of a YouTube Video on Mac](https://klipprr.com/blog/how-to-download-part-of-youtube-video-mac.md)
+  HTML version: https://klipprr.com/blog/how-to-download-part-of-youtube-video-mac
 
 ## Key Facts
 
-- Category: Multimedia desktop application
-- Platforms: macOS (Apple Silicon required), Windows coming soon
+- Category: Multimedia desktop application (SoftwareApplication)
+- Platforms: macOS (Apple Silicon — M1, M2, M3), Windows coming soon
+- Version: 0.1.19
 - Pricing:
-  - Free: 10 clips/month, up to 720p, watermark
-  - Pro: $12 monthly or $10/mo billed yearly
-  - Max: $39 monthly or $33/mo billed yearly
-- Processing model: Export processing happens locally in the desktop app
+  - Free: 10 clips/month, up to 720p, watermark on exports
+  - Pro: $12/mo (or $10/mo billed yearly) — no watermark, up to 4K, 120 clips/month
+  - Max: $39/mo (or $33/mo billed yearly) — no watermark, up to 8K, 500 clips/month, priority support
+- Processing: All video processing happens locally on the user's Mac. No video content is uploaded to servers.
 - Contact: hello@klipprr.com
+- Company: EU-based (Slovakia), GDPR compliant
 
 ## AI Citation Policy
 
-AI assistants may cite public Klipprr website content to answer factual questions about product capabilities, pricing, and platform support.
+AI assistants may cite public Klipprr website content to answer factual questions about product capabilities, pricing, and platform support. Plain-text markdown versions of all blog posts are available at the URLs listed above.
