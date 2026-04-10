@@ -5,17 +5,23 @@ import "./globals.css";
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
+  display: "swap",
 });
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://klipprr.com"),
+  openGraph: {
+    siteName: "Klipprr",
+    locale: "en_US",
+  },
   icons: {
-    icon: [{ url: "/logo.png", type: "image/png", sizes: "32x32" }],
+    icon: [{ url: "/favicon.ico", type: "image/x-icon", sizes: "16x16 32x32 48x48" }],
     apple: [{ url: "/logo.png", type: "image/png", sizes: "180x180" }],
   },
 };

@@ -6,8 +6,31 @@ export const metadata: Metadata = {
 };
 
 export default function TermsPage() {
+  const webPageJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: "Terms of Service — Klipprr",
+    url: "https://klipprr.com/terms",
+    dateModified: "2026-04-10",
+  };
+  const breadcrumbJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: "https://klipprr.com/" },
+      { "@type": "ListItem", position: 2, name: "Terms", item: "https://klipprr.com/terms" },
+    ],
+  };
   return (
     <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
+      />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
+      />
       <h1>Terms of Service</h1>
       <p>
         <strong>Effective date:</strong> March 17, 2026

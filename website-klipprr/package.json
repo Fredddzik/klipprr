@@ -5,8 +5,10 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node scripts/indexnow-submit.mjs",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "indexnow:submit": "node scripts/indexnow-submit.mjs"
   },
   "dependencies": {
     "@noble/ed25519": "^3.0.1",
