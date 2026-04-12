@@ -18,11 +18,11 @@ pub fn with_cors(mut res: Response<Body>) -> Response<Body> {
     headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
     headers.insert(
         "Access-Control-Allow-Methods",
-        "GET, POST, OPTIONS".parse().unwrap(),
+        "GET, HEAD, POST, OPTIONS".parse().unwrap(),
     );
     headers.insert(
         "Access-Control-Allow-Headers",
-        "Content-Type".parse().unwrap(),
+        "Content-Type, Range".parse().unwrap(),
     );
     res
 }
@@ -302,8 +302,8 @@ pub async fn handle_http(
         return Ok(res);
     }
 
-    // Proxy remote preview URLs so the video element can load them (avoids CORS; fixes Instagram/X audio and TikTok black screen)
-    if method == Method::GET && path == "/preview-stream" {
+    // Proxy remote preview URLs (forward Range + HEAD so <video> can seek on Chromium / WebView2).
+    if (method == Method::GET || method == Method::HEAD) && path == "/preview-stream" {
         if !origin_is_allowed(&req) {
             return Ok(text_response(403, "forbidden_origin"));
         }
@@ -337,35 +337,108 @@ pub async fn handle_http(
             Ok(c) => c,
             Err(_) => return Ok(text_response(500, "client_build")),
         };
-        let mut proxy_req = client.get(&decoded);
+
+        let upstream_method = if method == Method::HEAD {
+            reqwest::Method::HEAD
+        } else {
+            reqwest::Method::GET
+        };
+
+        let mut proxy_req = client.request(upstream_method, &decoded);
+        if method == Method::GET {
+            if let Some(range_val) = req.headers().get(hyper::header::RANGE) {
+                if let Ok(s) = range_val.to_str() {
+                    proxy_req = proxy_req.header(hyper::header::RANGE, s);
+                }
+            }
+        }
         if decoded.contains("youtube.com") || decoded.contains("youtu.be") {
             proxy_req = proxy_req.header("Referer", "https://www.youtube.com/");
         }
+
         let upstream = match proxy_req.send().await {
             Ok(r) => r,
             Err(e) => {
-                let msg = format!(r#"{{"error":"proxy_fetch","details":"{}"}}"#, e.to_string().replace('"', "\\\""));
+                let msg = format!(
+                    r#"{{"error":"proxy_fetch","details":"{}"}}"#,
+                    e.to_string().replace('"', "\\\"")
+                );
                 return Ok(json_response(502, msg));
             }
         };
+
         if !upstream.status().is_success() {
             return Ok(text_response(502, "upstream_error"));
         }
-        let content_type = upstream
-            .headers()
+
+        let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::OK);
+        let headers = upstream.headers();
+        let content_type = headers
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("video/mp4")
             .to_string();
-        let content_length = upstream.headers().get("content-length").cloned();
-        // Stream the body so the video can start playing as bytes arrive (no ~1 min wait for full download)
+        let content_length = headers.get("content-length").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+        let content_range = headers
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let accept_ranges = headers
+            .get("accept-ranges")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        if method == Method::HEAD {
+            let mut res = Response::new(Body::empty());
+            *res.status_mut() = status;
+            res.headers_mut()
+                .insert("Content-Type", content_type.parse().unwrap());
+            if let Some(ref cl) = content_length {
+                if let Ok(hv) = cl.parse() {
+                    res.headers_mut().insert("Content-Length", hv);
+                }
+            }
+            if let Some(ref cr) = content_range {
+                if let Ok(hv) = cr.parse() {
+                    res.headers_mut().insert("Content-Range", hv);
+                }
+            }
+            if let Some(ref ar) = accept_ranges {
+                if let Ok(hv) = ar.parse() {
+                    res.headers_mut().insert("Accept-Ranges", hv);
+                }
+            } else if content_length.is_some() || content_range.is_some() {
+                res.headers_mut()
+                    .insert("Accept-Ranges", "bytes".parse().unwrap());
+            }
+            res.headers_mut()
+                .insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+            return Ok(res);
+        }
+
+        // GET: stream body; preserve 200 vs 206 and range headers from upstream.
         let body = Body::wrap_stream(upstream.bytes_stream());
         let mut res = Response::new(body);
-        *res.status_mut() = StatusCode::OK;
+        *res.status_mut() = status;
         res.headers_mut()
             .insert("Content-Type", content_type.parse().unwrap());
-        if let Some(clen) = content_length {
-            res.headers_mut().insert("Content-Length", clen);
+        if let Some(ref cl) = content_length {
+            if let Ok(hv) = cl.parse() {
+                res.headers_mut().insert("Content-Length", hv);
+            }
+        }
+        if let Some(ref cr) = content_range {
+            if let Ok(hv) = cr.parse() {
+                res.headers_mut().insert("Content-Range", hv);
+            }
+        }
+        if let Some(ref ar) = accept_ranges {
+            if let Ok(hv) = ar.parse() {
+                res.headers_mut().insert("Accept-Ranges", hv);
+            }
+        } else if content_length.is_some() || content_range.is_some() {
+            res.headers_mut()
+                .insert("Accept-Ranges", "bytes".parse().unwrap());
         }
         res.headers_mut()
             .insert("Access-Control-Allow-Origin", "*".parse().unwrap());
