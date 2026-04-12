@@ -327,11 +327,7 @@ fn main() {
     let _ = std::fs::write(env::temp_dir().join("clipagent_proof.txt"), "MAIN EXECUTED\n");
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_deep_link::init())
+        // single_instance must be registered before deep-link (Tauri desktop + deep-link docs).
         .plugin(single_instance(|app, argv, _cwd| {
             for arg in argv {
                 if arg.starts_with("clipagent://") {
@@ -346,6 +342,11 @@ fn main() {
                 }
             }
         }))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::download::get_default_export_dir,
             commands::download::get_export_path,
@@ -362,6 +363,16 @@ fn main() {
             commands::license_commands::get_stored_session_tokens,
         ])
         .setup(|app| {
+            // Register clipagent:// with the OS (required for browser "Open Klipprr"; WiX/NSIS use
+            // plugins.deep-link.desktop.schemes). register_all points the scheme at this executable,
+            // which also makes deep links work in `tauri dev` without an MSI install.
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            if let Err(e) = app.deep_link().register_all() {
+                let msg = format!("[DEEP LINK] register_all failed: {e}");
+                eprintln!("{msg}");
+                append_file_log(&msg);
+            }
+
             // Windows: set resource dir so paths.rs can resolve bundled bin/ (yt-dlp, ffmpeg, ffprobe)
             if let Ok(res_dir) = app.path().resource_dir() {
                 crate::paths::init_resource_dir(res_dir);
