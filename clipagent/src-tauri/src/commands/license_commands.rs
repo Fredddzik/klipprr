@@ -92,6 +92,7 @@ pub(crate) fn set_license_from_server(
     let normalized = plan.to_lowercase();
     let plan_enum = match normalized.as_str() {
         "pro" => Plan::Pro,
+        "max" => Plan::Max,
         _ => Plan::Free,
     };
 

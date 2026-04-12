@@ -13,8 +13,12 @@ use ed25519_dalek::{Signature, VerifyingKey};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Plan {
+    #[serde(rename = "free", alias = "Free")]
     Free,
+    #[serde(rename = "pro", alias = "Pro")]
     Pro,
+    #[serde(rename = "max", alias = "Max")]
+    Max,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +90,7 @@ pub fn get_license_status(app: &AppHandle) -> LicenseStatus {
             Ok(claims) => LicenseStatus::Ok {
                 plan: match claims.plan {
                     Plan::Pro => "pro".to_string(),
+                    Plan::Max => "max".to_string(),
                     Plan::Free => "free".to_string(),
                 },
                 claims,
@@ -110,6 +115,12 @@ pub fn get_license_status(app: &AppHandle) -> LicenseStatus {
 pub fn capabilities_for_plan(plan: &str) -> Capabilities {
     match plan {
         "pro" => Capabilities {
+            can_rename_clips: true,
+            can_edit_clip_range: true,
+            can_set_custom_export_path: true,
+            has_watermark: false,
+        },
+        "max" => Capabilities {
             can_rename_clips: true,
             can_edit_clip_range: true,
             can_set_custom_export_path: true,
