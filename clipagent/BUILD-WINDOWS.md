@@ -35,6 +35,8 @@
 
 ## Login (magic link / "Open Klipprr?")
 
+- The **`clipagent://` URL scheme** must be declared in `src-tauri/tauri.conf.json` under `plugins.deep-link.desktop.schemes` (`["clipagent"]`) so the Windows installer registers it with the OS. Without that, the browser shows *scheme does not have a registered handler*.
+- On first run, the app calls `register_all()` on Windows/Linux so the current executable is associated with `clipagent://` (needed for `cargo tauri dev` without installing an MSI).
 - The **"Allow browser to open Klipprr?"** prompt only appears if the OS has registered the `clipagent://` URL scheme.
 - **Installed MSI**: The installer should register the scheme; after installing, click the magic link in the browser and Windows should offer to open Klipprr.
 - **Running from bundle folder** (e.g. exe inside `target/release/bundle/msi/` without installing): The scheme is usually **not** registered, so the browser won't show the prompt. Install the MSI and try again.

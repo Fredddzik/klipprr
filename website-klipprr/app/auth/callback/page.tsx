@@ -119,15 +119,12 @@ function CallbackInner() {
         </p>
         {deepLink && (
           <>
-            <button
-              type="button"
-              onClick={() => {
-                window.location.href = deepLink;
-              }}
+            <a
+              href={deepLink}
               className="inline-flex items-center rounded-full bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 transition"
             >
               Open Klipprr
-            </button>
+            </a>
             <p className="text-xs text-zinc-500 mt-3">
               If nothing happens, run the built app (not dev) and try again — the custom link only works when Klipprr is installed.
             </p>
