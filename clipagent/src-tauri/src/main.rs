@@ -366,6 +366,10 @@ fn main() {
             // Register clipagent:// with the OS (required for browser "Open Klipprr"; WiX/NSIS use
             // plugins.deep-link.desktop.schemes). register_all points the scheme at this executable,
             // which also makes deep links work in `tauri dev` without an MSI install.
+            //
+            // macOS: do not call register_all here — Tauri documents it for Windows/Linux only.
+            // The .app bundle registers the scheme via Info.plist (bundle.macOS.infoPlist); the
+            // bundler merges that file after generated keys, so CFBundleURLTypes from Info.plist wins.
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             if let Err(e) = app.deep_link().register_all() {
                 let msg = format!("[DEEP LINK] register_all failed: {e}");
