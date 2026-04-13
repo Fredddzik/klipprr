@@ -15,7 +15,8 @@ target
 
 # Tauri
 src-tauri/target
-.vercel
 
-# Claude Code local worktrees (large; not portable)
-.claude/worktrees/
+# Local tool config (Vercel, IDE, Claude Code) — not portable
+.vercel
+.claude/
+.cursor/
