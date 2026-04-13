@@ -1,0 +1,2 @@
+# Keep only the public key - private key must never be committed
+*.pem
