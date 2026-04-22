@@ -174,20 +174,6 @@ fn log_to_file(msg: &str) {
     }
 }
 
-fn parse_ffmpeg_time_to_secs(line: &str) -> Option<f64> {
-    // Example:
-    // "frame=  101 fps=0.0 q=-0.0 size=       0kB time=00:00:01.66 bitrate=..."
-    let idx = line.find("time=")?;
-    let rest = &line[idx + 5..];
-    let token = rest.split_whitespace().next()?;
-    let token = token.trim_start_matches('-'); // sometimes negative at start
-    let mut parts = token.split(':');
-    let h = parts.next()?.parse::<f64>().ok()?;
-    let m = parts.next()?.parse::<f64>().ok()?;
-    let s = parts.next()?.parse::<f64>().ok()?;
-    Some(h * 3600.0 + m * 60.0 + s)
-}
-
 fn parse_ffmpeg_out_time_ms(line: &str) -> Option<i64> {
     // When using `-progress pipe:2`, ffmpeg prints lines like:
     // out_time_ms=12345678
@@ -1093,7 +1079,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             let clip_dur = (end - start).max(0.001);
             let (vw, vh) = probe_video_dims(&PathBuf::from(&full_str)).unwrap_or((1280, 720));
             let wm_w = watermark_target_width(vw, vh);
-            let mut child = Command::new(ffmpeg_path())
+            let child = Command::new(ffmpeg_path())
                 .current_dir(&base_dir)
                 .args([
                     "-ss", &format!("{:.3}", start),

@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::AppHandle;
 use tauri::Manager;
-use keyring::Entry;
 use once_cell::sync::Lazy;
 
 use crate::license::LicenseToken;
@@ -13,11 +12,6 @@ use serde::{Deserialize, Serialize};
 const LICENSE_FILE: &str = "license.json";
 const SUPABASE_SESSION_FILE: &str = "supabase_session.json";
 const EXPORT_PATH_FILE: &str = "export_path.txt";
-
-// OS secure storage entry used for Supabase session tokens.
-// Service should be stable and unique to avoid collisions with other apps.
-const KEYRING_SERVICE: &str = "com.klipprr.clipagent";
-const KEYRING_USERNAME: &str = "supabase_session";
 
 /// Stored Supabase session for sync_license_from_supabase (set by frontend when user is logged in).
 /// refresh_token is persisted so the frontend can restore its session when it loses it (e.g. after focus).
@@ -37,27 +31,6 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map_err(|_| "cannot_resolve_app_data_dir".to_string())
-}
-
-fn keyring_get_session() -> Option<String> {
-    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USERNAME).ok()?;
-    entry.get_password().ok()
-}
-
-fn keyring_set_session(raw: &str) -> Result<(), String> {
-    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-        .map_err(|e| format!("keyring_entry_create_failed: {e}"))?;
-    entry
-        .set_password(raw)
-        .map_err(|e| format!("keyring_set_failed: {e}"))
-}
-
-fn keyring_delete_session() -> Result<(), String> {
-    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)
-        .map_err(|e| format!("keyring_entry_create_failed: {e}"))?;
-    entry
-        .delete_credential()
-        .map_err(|e| format!("keyring_delete_failed: {e}"))
 }
 
 /// Load license from disk
