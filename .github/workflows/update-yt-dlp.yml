@@ -8,7 +8,7 @@ name: Update yt-dlp
 
 on:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: '0 12 * * 1'  # Mondays — yt-dlp releases ~every 2-4 weeks
   workflow_dispatch:
 
 jobs:
