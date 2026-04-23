@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "clipagent"
-version = "0.1.19"
+version = "0.1.21"
 dependencies = [
  "base64 0.21.7",
  "dirs 5.0.1",

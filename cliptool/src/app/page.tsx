@@ -25,6 +25,7 @@ import ClipsPanel from "@/components/ClipsPanel";
 import ExportPanel from "@/components/ExportPanel";
 import LeftSidebar from "@/components/LeftSidebar";
 import AccessModal from "@/components/AccessModal";
+import WatermarkInterstitial from "@/components/WatermarkInterstitial";
 import SettingsModal, {
   type ThemePreference,
   type ClipSortOption,
@@ -82,6 +83,10 @@ export default function HomePage() {
   const [clipSort, setClipSortState] = useState<ClipSortOption>("timeline");
   const [defaultExportFormat, setDefaultExportFormatState] = useState<DefaultExportFormat>("universal");
   const [exportCompleteToast, setExportCompleteToast] = useState<{
+    count: number;
+    exportDir: string;
+  } | null>(null);
+  const [watermarkInterstitial, setWatermarkInterstitial] = useState<{
     count: number;
     exportDir: string;
   } | null>(null);
@@ -1315,7 +1320,7 @@ useEffect(() => {
   }, [isTauri, updateStatus, updateInfo?.version]);
 
   return (
-  <div className="h-screen min-h-dvh flex overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-white">
+  <div className="h-screen min-h-dvh flex overflow-hidden bg-zinc-950 text-zinc-200">
     <LeftSidebar
       onOpenSettings={() => setShowSettings(true)}
       collapsed={sidebarCollapsed}
@@ -1363,7 +1368,7 @@ useEffect(() => {
       showUpdateToast &&
       (updateStatus === "available" || updateStatus === "downloading") &&
       updateInfo?.version && (
-      <div className="fixed bottom-5 right-5 z-50 w-[360px] max-w-[calc(100vw-2.5rem)] rounded-xl border border-zinc-700/40 bg-zinc-900/95 text-white shadow-xl p-4">
+      <div className="fixed bottom-5 right-5 z-50 w-[360px] max-w-[calc(100vw-2.5rem)] rounded-md border border-zinc-800 bg-zinc-900 text-white shadow-xl p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="text-sm font-semibold">
@@ -1385,7 +1390,7 @@ useEffect(() => {
         <div className="mt-3 flex items-center justify-end gap-2">
           <button
             type="button"
-            className="px-3 py-1.5 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-sm"
+            className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-sm text-zinc-300 transition"
             onClick={() => setShowUpdateToast(false)}
             disabled={updateStatus === "downloading"}
           >
@@ -1393,7 +1398,7 @@ useEffect(() => {
           </button>
           <button
             type="button"
-            className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-sm font-semibold disabled:opacity-60"
+            className="px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-sm font-semibold text-white disabled:opacity-50 transition"
             onClick={handleInstallUpdate}
             disabled={updateStatus === "downloading"}
           >
@@ -1418,33 +1423,48 @@ useEffect(() => {
       {exportToasts.map((t) => (
         <div
           key={t.id}
-          className="flex items-center gap-2 rounded-xl border border-zinc-300 bg-white/95 dark:border-zinc-700 dark:bg-zinc-900/95 backdrop-blur px-3 py-2.5 text-sm shadow-xl"
+          className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm shadow-xl"
         >
-          <span className="flex-1 truncate text-zinc-900 dark:text-white font-medium" title={t.clipName}>
+          <svg className="w-3.5 h-3.5 shrink-0 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+          <span className="flex-1 truncate text-zinc-200 font-medium text-xs" title={t.clipName}>
             {t.clipName}
           </span>
-          <span className="shrink-0 text-violet-400" aria-hidden>✓</span>
           <button
             type="button"
             onClick={() => {
               openExportFolder(t.exportDir);
               dismissExportToast(t.id);
             }}
-            className="shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition"
+            className="shrink-0 rounded px-2.5 py-1 text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition"
           >
-            Open folder
+            Open
           </button>
           <button
             type="button"
             onClick={() => dismissExportToast(t.id)}
-            className="shrink-0 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white p-0.5 rounded"
+            className="shrink-0 text-zinc-600 hover:text-zinc-300 p-0.5 rounded transition"
             aria-label="Dismiss"
           >
-            ×
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
           </button>
         </div>
       ))}
     </div>
+
+    {watermarkInterstitial && (
+      <WatermarkInterstitial
+        open={true}
+        count={watermarkInterstitial.count}
+        exportDir={watermarkInterstitial.exportDir}
+        onUpgrade={() => {
+          setWatermarkInterstitial(null);
+          setUpgradeReason("feature_locked");
+          setShowUpgrade(true);
+        }}
+        onOpenFolder={() => openExportFolder(watermarkInterstitial.exportDir)}
+        onClose={() => setWatermarkInterstitial(null)}
+      />
+    )}
 
     <AccessModal
   open={showUpgrade}
@@ -1481,15 +1501,15 @@ useEffect(() => {
   }}
 />
     {undoToast && (
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-white/95 dark:bg-zinc-900/95 border border-zinc-300 dark:border-zinc-700 px-4 py-2 rounded-xl text-sm text-zinc-900 dark:text-white animate-toast">
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-zinc-900 border border-zinc-800 px-4 py-2 rounded-md text-sm text-zinc-300 animate-toast">
         {undoToast}
       </div>
     )}
     {exportCompleteToast && (
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white/95 dark:bg-zinc-900/95 backdrop-blur px-4 py-3 shadow-xl">
-        <span className="text-violet-500 dark:text-violet-400 text-lg font-medium" aria-hidden>✓</span>
-        <span className="text-zinc-900 dark:text-white font-medium">
-          Export complete — {exportCompleteToast.count} clip{exportCompleteToast.count !== 1 ? "s" : ""} saved
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 rounded-md border border-zinc-800 bg-zinc-900 px-4 py-3 shadow-xl">
+        <svg className="w-4 h-4 shrink-0 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+        <span className="text-zinc-200 font-medium text-sm">
+          {exportCompleteToast.count} clip{exportCompleteToast.count !== 1 ? "s" : ""} exported
         </span>
         <button
           type="button"
@@ -1497,30 +1517,30 @@ useEffect(() => {
             openExportFolder(exportCompleteToast.exportDir);
             setExportCompleteToast(null);
           }}
-          className="shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white transition"
+          className="shrink-0 rounded px-3 py-1.5 text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition"
         >
           Open folder
         </button>
         <button
           type="button"
           onClick={() => setExportCompleteToast(null)}
-          className="shrink-0 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-white p-0.5 rounded"
+          className="shrink-0 text-zinc-600 hover:text-zinc-300 p-0.5 rounded transition"
           aria-label="Dismiss"
         >
-          ×
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
         </button>
       </div>
     )}
     {/* URL bar */}
-    <div className="shrink-0 px-4 py-3 border-b border-zinc-200 bg-zinc-100/80 dark:border-zinc-800 dark:bg-zinc-900/50">
+    <div className="shrink-0 px-4 py-3 border-b border-zinc-800 bg-zinc-900">
       <div className="flex items-center gap-3 flex-wrap">
         <div className="flex items-center gap-2 flex-1 min-w-0">
           {videoData && (
-            <span className="text-[10px] font-medium text-zinc-500 uppercase tracking-wider px-2 py-1 rounded-md bg-zinc-800/80 text-white dark:text-zinc-300 shrink-0">
-              Preview
+            <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest px-2 py-1 rounded bg-zinc-800 shrink-0">
+              LIVE
             </span>
           )}
-          <span className="text-zinc-500 shrink-0">URL</span>
+          <span className="text-zinc-600 text-sm shrink-0">URL</span>
           <input
             type="text"
             placeholder="YouTube, Twitch clips, X, Instagram, or video URL…"
@@ -1534,14 +1554,14 @@ useEffect(() => {
                 }
               }
             }}
-            className="flex-1 min-w-0 max-w-xl px-3 py-2 rounded-lg bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-white placeholder-zinc-500 focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none"
+            className="flex-1 min-w-0 max-w-xl px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 placeholder-zinc-600 text-sm focus:border-violet-500 focus:ring-1 focus:ring-violet-500/30 outline-none transition"
             suppressHydrationWarning
           />
         </div>
         <button
           onClick={loadVideo}
           disabled={loading}
-          className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold text-sm disabled:opacity-50 transition"
+          className="px-4 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white font-semibold text-sm disabled:opacity-40 transition"
         >
           <span className={`inline-flex items-center gap-2 ${loading ? "animate-pulse" : ""}`}>
             {loading && <span className="inline-block w-2 h-2 rounded-full bg-white animate-bounce" />}
@@ -1553,7 +1573,7 @@ useEffect(() => {
             type="button"
             onClick={loadLocalFile}
             disabled={loading}
-            className="px-4 py-2 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-white font-medium text-sm disabled:opacity-50 transition"
+            className="px-4 py-1.5 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 font-medium text-sm disabled:opacity-40 transition"
           >
             Load local file
           </button>
@@ -1561,24 +1581,24 @@ useEffect(() => {
       </div>
       {loading && (
         <div className="max-w-5xl mx-auto mt-2 space-y-1">
-          <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+          <div className="h-0.5 bg-zinc-800 overflow-hidden">
             <div
-              className="h-full bg-violet-500 dark:bg-violet-400 transition-all duration-300"
+              className="h-full bg-violet-500 transition-all duration-300"
               style={{ width: `${loadProgress}%` }}
             />
           </div>
           <p className="text-xs text-zinc-500">Resolving video…</p>
         </div>
       )}
-      <p className="text-xs text-zinc-500 mt-1.5">YouTube, Twitch clips, X (Twitter), Instagram Reels, Vimeo, and direct video URLs</p>
+      <p className="text-[11px] text-zinc-600 mt-1.5">YouTube · Twitch clips · X · Instagram Reels · Vimeo · Direct video URLs</p>
     </div>
 
     {resolveError && (
-      <div className="max-w-5xl mx-auto mb-4 rounded border border-yellow-700 bg-yellow-900/20 p-4 text-sm text-yellow-200">
-        <div className="font-semibold mb-1">Can’t load this video directly</div>
-        <div className="opacity-90">{resolveError}</div>
-        <div className="mt-2 text-xs text-yellow-200/80">
-          Quick workaround: record your screen (OBS / macOS screen recording) while playing, then clip the local file.
+      <div className="mx-4 mt-3 rounded-md border border-zinc-700 bg-zinc-900 p-3 text-sm">
+        <div className="font-semibold text-zinc-300 mb-1">Can’t load this video</div>
+        <div className="text-zinc-400 text-xs">{resolveError}</div>
+        <div className="mt-2 text-xs text-zinc-600">
+          Workaround: record your screen with OBS or macOS screen recording, then use Load local file.
         </div>
       </div>
     )}
@@ -1589,8 +1609,8 @@ useEffect(() => {
         {/* Content area: video + clips; scrolls horizontally when export open and narrow */}
         <div className="flex flex-col min-[1200px]:flex-row gap-4 p-4 flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-hidden min-[1200px]:min-w-0">
           {/* Video + timeline: fills space */}
-          <div className="flex flex-col min-h-[280px] min-[1200px]:min-h-0 min-w-0 flex-1 min-[1200px]:min-w-[300px] rounded-xl border border-zinc-200 dark:border-zinc-800 bg-black shrink-0">
-            <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400 px-3 pt-2 truncate shrink-0" title={videoData.title}>
+          <div className="flex flex-col min-h-[280px] min-[1200px]:min-h-0 min-w-0 flex-1 min-[1200px]:min-w-[300px] rounded-md border border-zinc-800 bg-zinc-950 shrink-0">
+            <h2 className="text-xs font-medium text-zinc-600 px-3 pt-2 truncate shrink-0" title={videoData.title}>
               {videoData.title}
             </h2>
             <div className="relative flex-1 min-h-0 w-full">
@@ -1616,7 +1636,7 @@ useEffect(() => {
                 }}
               />
             </div>
-            <div className="shrink-0 p-2 border-t border-zinc-200 dark:border-zinc-800">
+            <div className="shrink-0 p-2 border-t border-zinc-800">
               <Timeline
                 duration={videoData.duration}
                 clips={clips}
@@ -1639,7 +1659,7 @@ useEffect(() => {
                 }}
               />
             </div>
-            <div className="shrink-0 p-3 flex flex-wrap gap-2 border-t border-zinc-200 dark:border-zinc-800">
+            <div className="shrink-0 p-3 flex flex-wrap gap-2 border-t border-zinc-800">
                 <button
                   type="button"
                   onClick={() => {
@@ -1669,20 +1689,15 @@ useEffect(() => {
                       setMarkOut(null);
                     }
                   }}
-                  className={`px-4 py-2 rounded-lg font-semibold text-sm transition ${
+                  className={`px-4 py-1.5 rounded font-semibold text-sm transition ${
                     editTarget
-                      ? "bg-zinc-600 cursor-not-allowed text-zinc-400"
+                      ? "bg-zinc-700 cursor-not-allowed text-zinc-500"
                       : markIn === null && markOut === null
-                      ? "text-white"
+                      ? "bg-emerald-600 hover:bg-emerald-500 text-white"
                       : markIn !== null && markOut === null
-                      ? "bg-[#ef4444] hover:bg-[#dc2626] text-white"
-                      : "text-white"
+                      ? "bg-red-600 hover:bg-red-500 text-white"
+                      : "bg-emerald-600 hover:bg-emerald-500 text-white"
                   }`}
-                  style={
-                    !editTarget && ((markIn === null && markOut === null) || (markIn !== null && markOut !== null))
-                      ? { background: "linear-gradient(135deg, #059669 0%, #10b981 50%, #34d399 100%)" }
-                      : undefined
-                  }
                 >
                   {editTarget
                     ? `Editing ${editTarget.field.toUpperCase()}`
@@ -1716,15 +1731,14 @@ useEffect(() => {
                         });
                         setEditTarget(null);
                       }}
-                      className="px-3 py-1 rounded-lg text-white text-sm font-medium"
-                      style={{ background: "linear-gradient(135deg, #059669 0%, #10b981 50%, #34d399 100%)" }}
+                      className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition"
                     >
                       Apply {editTarget.field.toUpperCase()} (Enter)
                     </button>
                     <button
                       type="button"
                       onClick={() => setEditTarget(null)}
-                      className="px-3 py-1 rounded-lg bg-zinc-600 hover:bg-zinc-500 text-sm"
+                      className="px-3 py-1 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-sm transition"
                     >
                       Cancel (Esc)
                     </button>
@@ -1734,7 +1748,7 @@ useEffect(() => {
           </div>
 
           {/* Clips panel: fills height in column mode (no gap below); can shrink (min 200px) in row so Export never clipped */}
-          <div className={`flex flex-col min-w-0 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-100/80 dark:bg-zinc-900/80 flex-1 min-h-0 min-[1200px]:flex-initial min-[1200px]:shrink-0 ${exportPanelOpen ? "min-[1200px]:w-80 min-[1200px]:min-w-[200px] min-[1200px]:max-w-[320px]" : "min-[1200px]:w-80"}`}>
+          <div className={`flex flex-col min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-900 flex-1 min-h-0 min-[1200px]:flex-initial min-[1200px]:shrink-0 ${exportPanelOpen ? "min-[1200px]:w-80 min-[1200px]:min-w-[200px] min-[1200px]:max-w-[320px]" : "min-[1200px]:w-80"}`}>
             <div className="flex-1 min-h-0 overflow-x-hidden overflow-y-auto p-4 min-w-0">
               <ClipsPanel
                 clips={sortedClips}
@@ -1782,13 +1796,13 @@ useEffect(() => {
               />
             </div>
             {!exportPanelOpen && (
-              <div className="shrink-0 p-4 pt-0 border-t border-zinc-200 dark:border-zinc-800">
+              <div className="shrink-0 p-3 pt-0 border-t border-zinc-800">
                 <button
                   type="button"
                   onClick={() => setExportPanelOpen(true)}
-                  className="btn-brand w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2"
+                  className="btn-brand w-full py-2.5 rounded flex items-center justify-center gap-2"
                 >
-                  <span>↓</span>
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
                   Export
                 </button>
               </div>
@@ -1798,13 +1812,13 @@ useEffect(() => {
 
         {/* Export panel: fixed on the right, never clipped (clips panel shrinks first on narrow screens) */}
         {exportPanelOpen && (
-          <div className="w-96 flex-shrink-0 flex flex-col overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 self-stretch">
-            <div className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-zinc-800">
-              <span className="font-semibold text-zinc-900 dark:text-white">Export Settings</span>
+          <div className="w-96 flex-shrink-0 flex flex-col overflow-hidden rounded-md border border-zinc-800 bg-zinc-900 self-stretch">
+            <div className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-zinc-800">
+              <span className="text-sm font-semibold text-zinc-200">Export Settings</span>
               <button
                 type="button"
                 onClick={() => setExportPanelOpen(false)}
-                className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-white dark:hover:bg-zinc-800 transition"
+                className="p-1.5 rounded text-zinc-600 hover:text-zinc-200 hover:bg-zinc-800 transition"
                 aria-label="Close export panel"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
@@ -1843,7 +1857,7 @@ useEffect(() => {
                 defaultExportDir={defaultExportDir}
                 sanitizeExportPath={sanitizeExportPath}
                 canEditExportPath={caps.canSetCustomExportPath}
-                hasWatermark={caps.hasWatermark}
+                hasWatermark={caps.hasWatermark && plan === "Free"}
                 onExportPathChosen={async (path) => {
                   try {
                     await invoke("set_export_path", { path });
@@ -1868,9 +1882,13 @@ useEffect(() => {
                   savePendingReservation(0);
                   refreshUsage();
                 }}
-                onExportComplete={(count, exportDir) => {
-                  setExportCompleteToast({ count, exportDir });
-                  setTimeout(() => setExportCompleteToast(null), 12000);
+                onExportComplete={(count, exportDir, hadWatermark) => {
+                  if (hadWatermark) {
+                    setWatermarkInterstitial({ count, exportDir });
+                  } else {
+                    setExportCompleteToast({ count, exportDir });
+                    setTimeout(() => setExportCompleteToast(null), 12000);
+                  }
                 }}
               />
             </div>

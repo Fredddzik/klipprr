@@ -79,8 +79,8 @@ interface ExportPanelProps {
   onExportClipSettled?: () => void;
   onExportReservationComplete?: () => void;
 
-  /** Called when export finishes successfully (count, exportDir). Replaces alert. */
-  onExportComplete?: (count: number, exportDir: string) => void;
+  /** Called when export finishes successfully. hadWatermark reflects what was actually sent to the backend. */
+  onExportComplete?: (count: number, exportDir: string, hadWatermark: boolean) => void;
 }
 
 function fmtRes(h: number) {
@@ -159,6 +159,7 @@ export default function ExportPanel({
   const exportOkCountRef = useRef(0);
   const exportFailedCountRef = useRef(0);
   const exportDirRef = useRef<string>("");
+  const exportHadWatermarkRef = useRef(false);
   const refundedFailedClipIndicesRef = useRef<Record<number, true>>({});
   const [exportClipNames, setExportClipNames] = useState<string[]>([]);
   const exportClipNamesRef = useRef<string[]>([]);
@@ -185,6 +186,7 @@ export default function ExportPanel({
     exportOkCountRef.current = 0;
     exportFailedCountRef.current = 0;
     exportDirRef.current = "";
+    exportHadWatermarkRef.current = false;
     refundedFailedClipIndicesRef.current = {};
   }
 
@@ -350,7 +352,7 @@ export default function ExportPanel({
                 onExportReservationComplete?.();
                 clearExportingUI("export-all-done accepted (after retry)", { total, completedNow, failedNow, okCount, exportDir });
                 if (onExportComplete && exportDir && okCount > 0) {
-                  onExportComplete(okCount, exportDir);
+                  onExportComplete(okCount, exportDir, exportHadWatermarkRef.current);
                 } else if (okCount === 0) {
                   alert("Export failed. No clips were exported.");
                 }
@@ -364,7 +366,7 @@ export default function ExportPanel({
           onExportReservationComplete?.();
           clearExportingUI("export-all-done accepted", { total, completed, failed, okCount, exportDir });
           if (onExportComplete && exportDir && okCount > 0) {
-            onExportComplete(okCount, exportDir);
+            onExportComplete(okCount, exportDir, exportHadWatermarkRef.current);
           } else if (okCount === 0) {
             alert("Export failed. No clips were exported.");
           }
@@ -495,6 +497,9 @@ export default function ExportPanel({
         clipHalfDurMsRef.current = halfDur;
       }
 
+      // Capture watermark state at export start — don't re-evaluate at completion time
+      exportHadWatermarkRef.current = Boolean(hasWatermark);
+
       const exportUrl = resolvedUrl && resolvedUrl.trim().length > 0
         ? resolvedUrl
         : videoUrl.trim();
@@ -571,6 +576,31 @@ export default function ExportPanel({
 
   return (
     <div className="space-y-4">
+      {/* WATERMARK BANNER — shown when on Free plan */}
+      {hasWatermark && !localFilePath && (
+        <div className="rounded-md border border-zinc-700 bg-zinc-900 flex items-center gap-3 px-3 py-2.5">
+          <p className="flex-1 text-xs text-zinc-400 min-w-0 leading-relaxed">
+            {fastMax > 720 ? (
+              <>
+                This video is available at up to{" "}
+                <span className="text-white font-medium">{fastMax}p</span>
+                {" "}— free mode caps at{" "}
+                <span className="text-zinc-300">720p</span> with a watermark
+              </>
+            ) : (
+              <>Free exports include a <span className="text-zinc-300">watermark</span></>
+            )}
+          </p>
+          <button
+            type="button"
+            onClick={onUpgradeRequested}
+            className="shrink-0 px-3 py-1.5 rounded btn-brand text-xs"
+          >
+            Upgrade
+          </button>
+        </div>
+      )}
+
       {/* CAPABILITIES */}
       {!localFilePath && (
       <div className="text-xs text-zinc-600 dark:text-gray-300/80 space-y-1">
@@ -657,10 +687,10 @@ export default function ExportPanel({
             <button
               type="button"
               onClick={() => setExportCodec("universal")}
-              className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
+              className={`flex-1 py-2 rounded text-sm font-medium transition ${
                 exportCodec === "universal"
-                  ? "btn-brand text-white"
-                  : "bg-zinc-200 border border-zinc-300 text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                  ? "btn-brand"
+                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
               }`}
             >
               H.264 – Universal
@@ -669,10 +699,10 @@ export default function ExportPanel({
             <button
               type="button"
               onClick={() => setExportCodec("original")}
-              className={`flex-1 py-2 rounded-lg text-sm font-medium transition ${
+              className={`flex-1 py-2 rounded text-sm font-medium transition ${
                 exportCodec === "original"
-                  ? "btn-brand text-white"
-                  : "bg-zinc-200 border border-zinc-300 text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                  ? "btn-brand"
+                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
               }`}
             >
               AV1 – Original
@@ -710,7 +740,7 @@ export default function ExportPanel({
             onChange={(e) =>
               setFastCap(e.target.value === "auto" ? null : Number(e.target.value))
             }
-            className="w-full rounded-lg bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-white text-sm px-3 py-2 focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none cursor-pointer"
+            className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-sm px-3 py-2 focus:border-violet-500 focus:ring-1 focus:ring-violet-500/30 outline-none cursor-pointer"
           >
             <option value="auto">
               Auto (up to {fmtRes(hasWatermark ? Math.min(fastMax, 720) : fastMax)})
@@ -748,9 +778,9 @@ export default function ExportPanel({
       )}
 
       {isExporting && (
-        <div className="rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-900/80 p-3 space-y-2">
+        <div className="rounded border border-zinc-800 bg-zinc-900/80 p-3 space-y-2">
           <div className="flex items-center gap-2">
-            <span className="inline-block w-5 h-5 border-2 border-violet-500 dark:border-violet-400 border-t-transparent rounded-full animate-spin" />
+            <span className="inline-block w-4 h-4 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
             <span className="text-sm font-medium text-zinc-900 dark:text-white">
               {exportProgress?.totalClips
                 ? (() => {
@@ -776,9 +806,9 @@ export default function ExportPanel({
                     {isPending ? (
                       <span className="text-xs text-zinc-500 dark:text-zinc-400">pending</span>
                     ) : (
-                      <div className="flex-1 min-w-0 h-2 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+                      <div className="flex-1 min-w-0 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
                         <div
-                          className="h-full bg-violet-500 dark:bg-violet-400 transition-all duration-300"
+                          className="h-full bg-violet-500 transition-all duration-300"
                           style={{ width: `${percent}%` }}
                         />
                       </div>
@@ -806,13 +836,13 @@ export default function ExportPanel({
         <div
           className={`flex gap-2 items-center rounded border min-w-0 max-w-full
             ${canEditExportPath
-              ? "bg-zinc-200 border-zinc-300 dark:bg-gray-800 dark:border-gray-700"
-              : "bg-zinc-100 border-zinc-200 dark:bg-gray-900 dark:border-gray-800"
+              ? "bg-zinc-800 border-zinc-700"
+              : "bg-zinc-900 border-zinc-800"
             }`}
         >
           <span
-            className={`flex-1 min-w-0 max-w-[14rem] py-1 px-2 text-sm font-mono block overflow-hidden text-ellipsis whitespace-nowrap
-              ${canEditExportPath ? "text-zinc-900 dark:text-white" : "text-zinc-500 dark:text-gray-500"}
+            className={`flex-1 min-w-0 max-w-[14rem] py-1 px-2 text-xs font-mono block overflow-hidden text-ellipsis whitespace-nowrap
+              ${canEditExportPath ? "text-zinc-300" : "text-zinc-600"}
             `}
             title={displayPath}
           >
@@ -822,25 +852,25 @@ export default function ExportPanel({
             <button
               type="button"
               onClick={chooseExportFolder}
-              className="shrink-0 py-1 px-2 rounded text-sm bg-zinc-600 hover:bg-zinc-500 text-white"
+              className="shrink-0 py-1 px-2 rounded text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition"
             >
-              Choose folder…
+              Browse
             </button>
           ) : !canEditExportPath ? (
             <button
               type="button"
               onClick={() => onUpgradeRequested?.()}
-              className="shrink-0 py-1 px-2 rounded text-sm bg-zinc-500 hover:bg-zinc-600 text-white dark:bg-gray-700 dark:hover:bg-gray-600"
+              className="shrink-0 py-1 px-2 rounded text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-400 transition"
             >
-              🔒 Pro
+              Pro
             </button>
           ) : null}
         </div>
       </div>
 
       {isExporting && exportHQ && qualityGlobal && (
-        <div className="rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900/50 p-3 space-y-2">
-          <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+        <div className="rounded border border-zinc-800 bg-zinc-900/50 p-3 space-y-2">
+          <p className="text-xs font-medium text-zinc-400">
             {qualityGlobal.phase === "quality_download_video"
               ? "Quality: downloading video…"
               : qualityGlobal.phase === "quality_download_audio"
@@ -849,9 +879,9 @@ export default function ExportPanel({
               ? "Quality: preparing full video…"
               : "Quality: working…"}
           </p>
-          <div className="h-2 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+          <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
             <div
-              className="h-full bg-violet-500 dark:bg-violet-400 transition-all duration-300"
+              className="h-full bg-violet-500 transition-all duration-300"
               style={{ width: `${qualityGlobal.percent}%` }}
             />
           </div>
@@ -863,18 +893,18 @@ export default function ExportPanel({
           <button
             disabled={selectedClipIds.length === 0}
             onClick={() => doExport(true)}
-            className="btn-brand-green w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-50"
+            className="btn-brand-green w-full py-2.5 rounded font-semibold text-white flex items-center justify-center gap-2"
           >
-            <span>↓</span>
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
             Export selected {selectedClipIds.length > 0 && `(${selectedClipIds.length})`}
           </button>
 
           <button
             disabled={clips.length === 0}
             onClick={() => doExport(false)}
-            className="btn-brand w-full py-3 rounded-xl font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-50"
+            className="btn-brand w-full py-2.5 rounded flex items-center justify-center gap-2"
           >
-            <span>↓</span>
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
             Export all {clips.length > 0 && `(${clips.length})`}
           </button>
         </>

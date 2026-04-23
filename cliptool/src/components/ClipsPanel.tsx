@@ -62,18 +62,18 @@ export default function ClipsPanel({
 
   return (
     <div className="space-y-3 min-w-0">
-      {/* Header: Clips title + icon actions */}
+      {/* Header */}
       <div className="flex items-center justify-between gap-2 flex-wrap min-w-0">
-        <div className="flex items-center gap-2 flex-wrap">
-          <h3 className="text-base font-semibold text-zinc-900 dark:text-white">Clips ({clips.length})</h3>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <h3 className="text-sm font-semibold text-white mr-1">Clips ({clips.length})</h3>
           <button
             onClick={undo}
             disabled={!canUndo}
             aria-label="Undo"
             title="Undo"
-            className="w-9 h-9 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-white disabled:opacity-40 disabled:cursor-not-allowed transition inline-flex items-center justify-center"
+            className="w-8 h-8 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition inline-flex items-center justify-center"
           >
-            <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" className="w-3.5 h-3.5" aria-hidden="true">
               <path d="M9 7L4 12L9 17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
               <path d="M20 12H5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
@@ -83,9 +83,9 @@ export default function ClipsPanel({
             disabled={!canRedo}
             aria-label="Redo"
             title="Redo"
-            className="w-9 h-9 rounded-lg bg-zinc-700 hover:bg-zinc-600 text-white disabled:opacity-40 disabled:cursor-not-allowed transition inline-flex items-center justify-center"
+            className="w-8 h-8 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition inline-flex items-center justify-center"
           >
-            <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" className="w-3.5 h-3.5" aria-hidden="true">
               <path d="M15 7L20 12L15 17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
               <path d="M4 12H19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
@@ -96,9 +96,9 @@ export default function ClipsPanel({
           onClick={onDeleteSelected}
           aria-label="Delete selected"
           title="Delete selected"
-          className="w-9 h-9 rounded-lg bg-red-600 hover:bg-red-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0 inline-flex items-center justify-center"
+          className="w-8 h-8 rounded bg-red-600/80 hover:bg-red-600 text-white disabled:opacity-30 disabled:cursor-not-allowed transition shrink-0 inline-flex items-center justify-center"
         >
-          <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" className="w-3.5 h-3.5" aria-hidden="true">
             <path d="M4 7H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             <path d="M9 7V5C9 4.45 9.45 4 10 4H14C14.55 4 15 4.45 15 5V7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             <path d="M7 7L8 19C8.05 19.55 8.5 20 9.05 20H14.95C15.5 20 15.95 19.55 16 19L17 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -108,17 +108,19 @@ export default function ClipsPanel({
       </div>
 
       {clips.length === 0 && (
-        <p className="text-zinc-500 text-sm">No clips yet.</p>
+        <p className="text-zinc-600 text-sm">No clips yet.</p>
       )}
 
-      <ul className="space-y-2 min-w-0">
+      <ul className="space-y-1.5 min-w-0">
         {clips.map((c, idx) => (
           <li
             key={c.id}
-            className={`flex items-center gap-2 py-2 px-2 rounded-lg min-w-0 w-full box-border
-              ${selectedClipIds.includes(c.id) ? "ring-2 ring-violet-400 ring-inset" : ""}
+            className={`flex items-center gap-2 py-2 px-2 rounded border min-w-0 w-full box-border transition
+              ${selectedClipIds.includes(c.id)
+                ? "border-violet-500/50 bg-violet-500/5"
+                : "border-zinc-800 bg-zinc-900/50"
+              }
               ${!canEditClips ? "opacity-90" : ""}
-              transition-opacity
             `}
           >
             <input
@@ -127,15 +129,15 @@ export default function ClipsPanel({
               onChange={(e) =>
                 onToggleSelect(c.id, e.target.checked)
               }
-              className="shrink-0"
+              className="shrink-0 accent-violet-500"
             />
 
-            <span className="text-sm opacity-50 shrink-0">#{idx + 1}</span>
+            <span className="text-xs text-zinc-600 shrink-0 font-variant-numeric tabular-nums">#{idx + 1}</span>
 
             <button
               type="button"
               onClick={() => onPlayClip(c.start, c.end)}
-              className="px-2 py-1 text-xs rounded bg-gray-700 hover:bg-gray-600 text-white shrink-0"
+              className="px-2 py-1 text-xs rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 shrink-0 transition"
             >
               ▶
             </button>
@@ -153,10 +155,10 @@ export default function ClipsPanel({
                 }}
                 disabled={!canEditClips}
                 title={!canEditClips ? "Rename clips with Pro" : undefined}
-                className={`bg-transparent border-b outline-none text-sm min-w-0 w-full max-w-full
+                className={`bg-transparent border-b outline-none text-xs min-w-0 w-full max-w-full
                   ${canEditClips
-                    ? "border-zinc-600 focus:border-violet-500"
-                    : "border-zinc-700 text-zinc-400 cursor-not-allowed"
+                    ? "border-zinc-700 focus:border-violet-500 text-zinc-200"
+                    : "border-zinc-800 text-zinc-500 cursor-not-allowed"
                   }`}
               />
 
@@ -164,14 +166,14 @@ export default function ClipsPanel({
                 <div
                   onClick={onUpgradeRequested}
                   className="absolute inset-0 hidden group-hover:flex
-                    items-center justify-center bg-black/40 rounded cursor-pointer"
+                    items-center justify-center bg-black/50 rounded cursor-pointer"
                 >
-                  <span className="text-sm">🔒</span>
+                  <svg className="w-3.5 h-3.5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
                 </div>
               )}
             </div>
 
-            <div className="flex flex-col gap-1.5 ml-auto items-end text-xs shrink-0">
+            <div className="flex flex-col gap-1 ml-auto items-end text-xs shrink-0">
               <div className="relative group">
                 <button
                   type="button"
@@ -180,9 +182,9 @@ export default function ClipsPanel({
                   title={!canEditClips ? "Edit clip in/out with Pro" : undefined}
                   className={`clip-badge-in text-left w-full min-w-[4.5rem] ${
                     editTarget?.clipId === c.id && editTarget.field === "in"
-                      ? "!bg-[#10b981] !text-[#0a0a0a] !border-[#10b981] ring-2 ring-[#10b981]/50"
+                      ? "!bg-emerald-500/20 !text-emerald-400 !border-emerald-500/50"
                       : !canEditClips
-                        ? "opacity-60 cursor-not-allowed"
+                        ? "opacity-50 cursor-not-allowed"
                         : ""
                   }`}
                 >
@@ -191,9 +193,9 @@ export default function ClipsPanel({
                 {!canEditClips && (
                   <div
                     onClick={onUpgradeRequested}
-                    className="absolute inset-0 hidden group-hover:flex items-center justify-center bg-black/40 rounded cursor-pointer"
+                    className="absolute inset-0 hidden group-hover:flex items-center justify-center bg-black/50 rounded cursor-pointer"
                   >
-                    <span className="text-xs">🔒</span>
+                    <svg className="w-3 h-3 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
                   </div>
                 )}
               </div>
@@ -206,9 +208,9 @@ export default function ClipsPanel({
                   title={!canEditClips ? "Edit clip in/out with Pro" : undefined}
                   className={`clip-badge-out text-left w-full min-w-[4.5rem] ${
                     editTarget?.clipId === c.id && editTarget.field === "out"
-                      ? "!bg-[#ef4444] !text-white !border-[#ef4444] ring-2 ring-[#ef4444]/50"
+                      ? "!bg-red-500/20 !text-red-400 !border-red-500/50"
                       : !canEditClips
-                        ? "opacity-60 cursor-not-allowed"
+                        ? "opacity-50 cursor-not-allowed"
                         : ""
                   }`}
                 >
@@ -217,14 +219,14 @@ export default function ClipsPanel({
                 {!canEditClips && (
                   <div
                     onClick={onUpgradeRequested}
-                    className="absolute inset-0 hidden group-hover:flex items-center justify-center bg-black/40 rounded cursor-pointer"
+                    className="absolute inset-0 hidden group-hover:flex items-center justify-center bg-black/50 rounded cursor-pointer"
                   >
-                    <span className="text-xs">🔒</span>
+                    <svg className="w-3 h-3 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
                   </div>
                 )}
               </div>
 
-              <div className="text-zinc-500 text-[11px]">
+              <div className="text-zinc-600 text-[10px] font-variant-numeric tabular-nums">
                 {formatTime(c.end - c.start)}
               </div>
             </div>
