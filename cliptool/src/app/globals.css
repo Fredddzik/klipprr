@@ -8,7 +8,7 @@
   --foreground: #fafafa;
 }
 
-/* Light mode: white background, dark text (no white-on-white) */
+/* Light mode */
 html.light {
   --background: #ffffff;
   --foreground: #18181b;
@@ -56,7 +56,7 @@ body {
   animation: toast 1.2s ease-in-out forwards;
 }
 
-/* Export progress: bar always moves so export doesn’t feel stuck */
+/* Export progress bar */
 @keyframes export-progress-indeterminate {
   0% {
     width: 0%;
@@ -76,7 +76,7 @@ body {
   animation: export-progress-indeterminate 4s ease-in-out infinite;
 }
 
-/* Brand gradient — production version */
+/* Brand gradient */
 :root {
   --brand-gradient: linear-gradient(
     135deg,
@@ -88,85 +88,86 @@ body {
   --brand-glow: rgba(108, 59, 255, 0.35);
 }
 
-/* Primary “weapon” buttons: Export, active toggles */
+/* Primary action button — Export, active toggles */
 .btn-brand {
   background: var(--brand-gradient);
   color: #ffffff;
   border: none;
-  box-shadow: 0 8px 20px var(--brand-glow);
-  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+  font-weight: 600;
+  box-shadow: 0 4px 14px var(--brand-glow);
+  transition: box-shadow 0.15s ease, filter 0.15s ease, opacity 0.1s ease;
 }
 .btn-brand:hover:not(:disabled) {
-  transform: scale(1.02);
-  box-shadow: 0 10px 28px rgba(108, 59, 255, 0.5);
   filter: brightness(1.08);
+  box-shadow: 0 6px 20px rgba(108, 59, 255, 0.5);
 }
 .btn-brand:active:not(:disabled) {
-  transform: scale(0.98);
-  box-shadow: 0 4px 12px rgba(108, 59, 255, 0.4);
+  opacity: 0.88;
+  box-shadow: 0 2px 8px rgba(108, 59, 255, 0.4);
 }
 .btn-brand:disabled {
-  opacity: 0.5;
+  opacity: 0.35;
   cursor: not-allowed;
 }
 
-/* Green gradient — Export selected */
+/* Secondary export button */
 .btn-brand-green {
   background: linear-gradient(135deg, #059669 0%, #10b981 40%, #34d399 100%);
   color: #ffffff;
   border: none;
-  box-shadow: 0 8px 20px rgba(16, 185, 129, 0.35);
-  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.3);
+  transition: box-shadow 0.15s ease, filter 0.15s ease, opacity 0.1s ease;
 }
 .btn-brand-green:hover:not(:disabled) {
-  transform: scale(1.02);
-  box-shadow: 0 10px 28px rgba(16, 185, 129, 0.5);
   filter: brightness(1.08);
+  box-shadow: 0 6px 20px rgba(16, 185, 129, 0.45);
 }
 .btn-brand-green:active:not(:disabled) {
-  transform: scale(0.98);
-  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
+  opacity: 0.88;
 }
 .btn-brand-green:disabled {
-  opacity: 0.5;
+  opacity: 0.35;
   cursor: not-allowed;
 }
 
-/* Clip IN/OUT badges — saturated pure green / pure red */
+/* Clip IN/OUT badges */
 .clip-badge-in {
-  background: rgba(16, 185, 129, 0.25);
+  background: rgba(16, 185, 129, 0.15);
   color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.5);
-  border-radius: 6px;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  border-radius: 4px;
   padding: 2px 8px;
   font-size: 11px;
-  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
 }
 .clip-badge-in:hover:not(:disabled) {
+  background: rgba(16, 185, 129, 0.3);
+  border-color: rgba(16, 185, 129, 0.6);
+}
+.clip-badge-in:active:not(:disabled) {
   background: #10b981;
   color: #0a0a0a;
   border-color: #10b981;
 }
-.clip-badge-in:active:not(:disabled) {
-  transform: scale(0.97);
-  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.5);
-}
 
 .clip-badge-out {
-  background: rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.15);
   color: #ef4444;
-  border: 1px solid rgba(239, 68, 68, 0.5);
-  border-radius: 6px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 4px;
   padding: 2px 8px;
   font-size: 11px;
-  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
 }
 .clip-badge-out:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.3);
+  border-color: rgba(239, 68, 68, 0.6);
+}
+.clip-badge-out:active:not(:disabled) {
   background: #ef4444;
   color: #fff;
   border-color: #ef4444;
-}
-.clip-badge-out:active:not(:disabled) {
-  transform: scale(0.97);
-  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.5);
 }
