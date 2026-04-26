@@ -1,6 +1,7 @@
  "use client";
 
 import { useEffect, useState, useRef, useMemo } from "react";
+import posthog from "posthog-js";
 import { supabase, getSupabaseConfigForBackend } from "@/lib/supabase";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -1883,6 +1884,11 @@ useEffect(() => {
                   refreshUsage();
                 }}
                 onExportComplete={(count, exportDir, hadWatermark) => {
+                  posthog.capture("clip_exported", {
+                    clip_count: count,
+                    had_watermark: hadWatermark,
+                    plan: plan,
+                  });
                   if (hadWatermark) {
                     setWatermarkInterstitial({ count, exportDir });
                   } else {
