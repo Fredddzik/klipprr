@@ -329,6 +329,10 @@ useEffect(() => {
   const [qualityReencodeH264, setQualityReencodeH264] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
+  /** Local path to a yt-dlp–downloaded preview for platforms like TikTok whose CDN
+   *  URLs cannot be fetched directly by WKWebView (cookie/CORS barrier). */
+  const [ytPreviewPath, setYtPreviewPath] = useState<string | null>(null);
+  const [ytPreviewLoading, setYtPreviewLoading] = useState(false);
   // Remove resolveRequestId state, use ref instead for request tracking
   const resolveReqRef = useRef(0);
   const pendingSeekRef = useRef<number | null>(null);
@@ -663,9 +667,9 @@ function readPendingReservation(): number {
       const title = selected.split(/[/\\]/).pop() ?? "Local video";
       const localId = "local-" + selected.replace(/[/\\:]/g, "_").slice(-64);
       // Use backend stream URL so video works on Windows (convertFileSrc is unreliable there)
+      const ac = typeof audioCodec === "string" ? audioCodec.toLowerCase() : "";
       const needsPcmFix =
-        typeof audioCodec === "string" &&
-        (audioCodec.toLowerCase().startsWith("pcm") || audioCodec.toLowerCase() === "lpcm");
+        ac.startsWith("pcm") || ac === "lpcm" || ac === "alac" || ac === "flac";
       const previewUrlForVideo = `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(selected)}${needsPcmFix ? "&pcm_fix=1" : ""}`;
       const data: ResolvedVideo = {
         id: localId,
@@ -699,6 +703,38 @@ function readPendingReservation(): number {
       setTimeout(() => setLoading(false), 400);
     }
   }
+
+  // For TikTok (and similar platforms where WKWebView can't fetch CDN URLs directly):
+  // trigger a backend yt-dlp preview download and serve it via /local-preview.
+  useEffect(() => {
+    // Reset yt preview state whenever the resolved video changes
+    setYtPreviewPath(null);
+    setYtPreviewLoading(false);
+
+    if (!resolvedUrl || !videoData || !isTauri) return;
+    // Only TikTok needs this; other platforms either work via proxy or HLS natively
+    const needsYtPreview =
+      resolvedUrl.includes("tiktok.com") || resolvedUrl.includes("tiktokcdn.com");
+    if (!needsYtPreview) return;
+
+    setYtPreviewLoading(true);
+    fetch(`${CLIPAGENT_HTTP}/yt-preview-cache?url=${encodeURIComponent(resolvedUrl)}`)
+      .then((r) => r.json())
+      .then((data: any) => {
+        if (data?.ok && data?.path) {
+          setYtPreviewPath(data.path as string);
+        } else {
+          console.warn("[TikTok preview] yt-preview-cache failed:", data);
+          setYtPreviewPath(null);
+        }
+      })
+      .catch((e) => {
+        console.warn("[TikTok preview] fetch error:", e);
+        setYtPreviewPath(null);
+      })
+      .finally(() => setYtPreviewLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedUrl, videoData?.id]);
 
   // Advance load progress while loading (simulated 0→90% over ~5s so bar moves; 100% set when done)
   useEffect(() => {
@@ -1615,15 +1651,39 @@ useEffect(() => {
               {videoData.title}
             </h2>
             <div className="relative flex-1 min-h-0 w-full">
+              {/* TikTok preview: show spinner while yt-dlp downloads the cached preview */}
+              {ytPreviewLoading && (
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-900 rounded gap-2">
+                  <svg className="w-5 h-5 animate-spin text-violet-400" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z" />
+                  </svg>
+                  <span className="text-xs text-zinc-400">Preparing preview…</span>
+                </div>
+              )}
               <VideoViewport
-                src={
-                  isTauri &&
-                  videoData.previewUrl &&
-                  !videoData.previewUrl.includes("/local-preview") &&
-                  (videoData.previewUrl.startsWith("http://") || videoData.previewUrl.startsWith("https://"))
-                    ? `${CLIPAGENT_HTTP}/preview-stream?url=${encodeURIComponent(videoData.previewUrl)}`
-                    : videoData.previewUrl
-                }
+                src={(() => {
+                  if (!isTauri || !videoData.previewUrl) return videoData.previewUrl;
+                  const isRemote =
+                    videoData.previewUrl.startsWith("http://") ||
+                    videoData.previewUrl.startsWith("https://");
+                  const isAlreadyLocal = videoData.previewUrl.includes("/local-preview");
+                  if (!isRemote || isAlreadyLocal) return videoData.previewUrl;
+
+                  // TikTok: use locally-cached yt-dlp preview (CDN URLs fail in WKWebView)
+                  const isTikTok =
+                    resolvedUrl?.includes("tiktok.com") || resolvedUrl?.includes("tiktokcdn.com");
+                  if (isTikTok) {
+                    if (!ytPreviewPath) return null; // loading or failed → VideoViewport shows placeholder
+                    return `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(ytPreviewPath)}`;
+                  }
+
+                  // HLS: WKWebView handles .m3u8 natively; proxying breaks segment resolution
+                  if (videoData.previewUrl.includes("m3u8")) return videoData.previewUrl;
+
+                  // Everything else: proxy through ClipAgent so WKWebView can seek (Range support)
+                  return `${CLIPAGENT_HTTP}/preview-stream?url=${encodeURIComponent(videoData.previewUrl)}`;
+                })()}
                 videoKey={videoData.id}
                 currentTime={currentTime}
                 debugInfo={{

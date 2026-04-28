@@ -8,7 +8,7 @@ use tauri::AppHandle;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use crate::commands::download;
-use crate::paths::{ffmpeg_path, ffprobe_path};
+use crate::paths::{ffmpeg_path, ffprobe_path, yt_dlp_path, running_from_sandboxed_app, skip_browser_cookies_for_yt_dlp, yt_dlp_cookies_browser};
 use urlencoding::decode as url_decode;
 use std::net::IpAddr;
 use url::Url;
@@ -94,7 +94,9 @@ fn needs_pcm_preview_fix(file_path: &Path) -> bool {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase(),
         Err(_) => return false,
     };
-    codec.starts_with("pcm") || codec == "lpcm"
+    // PCM variants, Apple Lossless (ALAC), FLAC — none of these are natively playable
+    // in a browser <video> element embedded in Tauri's WebView.
+    codec.starts_with("pcm") || codec == "lpcm" || codec == "alac" || codec == "flac"
 }
 
 fn make_pcm_fixed_preview(file_path: &Path) -> Option<PathBuf> {
@@ -354,6 +356,10 @@ pub async fn handle_http(
         }
         if decoded.contains("youtube.com") || decoded.contains("youtu.be") {
             proxy_req = proxy_req.header("Referer", "https://www.youtube.com/");
+        } else if decoded.contains("tiktok.com") {
+            proxy_req = proxy_req.header("Referer", "https://www.tiktok.com/");
+        } else if decoded.contains("twimg.com") || decoded.contains("twitter.com") || decoded.contains("t.co") {
+            proxy_req = proxy_req.header("Referer", "https://x.com/");
         }
 
         let upstream = match proxy_req.send().await {
@@ -443,6 +449,100 @@ pub async fn handle_http(
         res.headers_mut()
             .insert("Access-Control-Allow-Origin", "*".parse().unwrap());
         return Ok(res);
+    }
+
+    // yt-dlp backed preview cache for platforms where direct URL playback fails in WKWebView
+    // (TikTok CDN requires signed tokens yt-dlp knows how to obtain; WKWebView/fetch API cannot).
+    // Downloads the smallest quality clip to a temp cache file; frontend plays it via /local-preview.
+    if method == Method::GET && path == "/yt-preview-cache" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
+        let query = req.uri().query().unwrap_or("");
+        let mut raw_url: Option<String> = None;
+        for part in query.split('&') {
+            let mut it = part.splitn(2, '=');
+            if it.next() == Some("url") {
+                raw_url = it.next().map(|s| s.to_string());
+                break;
+            }
+        }
+        let encoded = match raw_url {
+            Some(u) if !u.is_empty() => u,
+            _ => return Ok(json_response(400, r#"{"error":"missing_url"}"#.to_string())),
+        };
+        let original_url = match url_decode(&encoded) {
+            Ok(u) => u.into_owned(),
+            Err(_) => return Ok(text_response(400, "bad_url_encoding")),
+        };
+
+        // Deterministic cache key from URL
+        let url_hash = {
+            let mut h = DefaultHasher::new();
+            original_url.hash(&mut h);
+            h.finish()
+        };
+
+        let cache_dir = std::env::temp_dir().join("clipagent_preview_cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        // yt-dlp template: append .%(ext)s so it writes e.g. yt_preview_abc123.mp4
+        let out_base = cache_dir.join(format!("yt_preview_{:x}", url_hash));
+        let out_mp4 = cache_dir.join(format!("yt_preview_{:x}.mp4", url_hash));
+
+        // Serve from cache if already downloaded and valid
+        if out_mp4.is_file() {
+            let sz = std::fs::metadata(&out_mp4).map(|m| m.len()).unwrap_or(0);
+            if sz > 1024 {
+                let path_str = out_mp4.to_string_lossy().to_string();
+                let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+                return Ok(json_response(200, format!(r#"{{"ok":true,"path":"{}"}}"#, escaped)));
+            }
+            // Stale/empty cache file — remove and re-download
+            let _ = std::fs::remove_file(&out_mp4);
+        }
+
+        // Run yt-dlp in a blocking thread (subprocess)
+        let ffmpeg_str = ffmpeg_path().to_string_lossy().to_string();
+        let out_template = format!("{}.%(ext)s", out_base.to_string_lossy());
+        let url_for_dl = original_url.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let mut args: Vec<String> = vec![];
+            if !running_from_sandboxed_app() && !skip_browser_cookies_for_yt_dlp() {
+                args.push("--cookies-from-browser".to_string());
+                args.push(yt_dlp_cookies_browser().to_string());
+            }
+            args.extend([
+                // Prefer lowest quality mp4 with audio; fallback to any format yt-dlp can get
+                "-f".to_string(),
+                "worstvideo[ext=mp4]+worstaudio[ext=m4a]/worstvideo+worstaudio/worst[ext=mp4]/worst".to_string(),
+                "--merge-output-format".to_string(), "mp4".to_string(),
+                // Cap to first 60s so preview downloads quickly even for long videos
+                "--download-sections".to_string(), "*0-60".to_string(),
+                "--no-playlist".to_string(),
+                "--ffmpeg-location".to_string(), ffmpeg_str,
+                "-o".to_string(), out_template,
+                url_for_dl,
+            ]);
+
+            std::process::Command::new(yt_dlp_path())
+                .args(&args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }).await;
+
+        let dl_ok = result.unwrap_or(false);
+        if !dl_ok {
+            return Ok(json_response(500, r#"{"ok":false,"reason":"yt_dlp_failed"}"#.to_string()));
+        }
+        if !out_mp4.is_file() || std::fs::metadata(&out_mp4).map(|m| m.len()).unwrap_or(0) < 1024 {
+            return Ok(json_response(500, r#"{"ok":false,"reason":"output_missing_or_empty"}"#.to_string()));
+        }
+
+        let path_str = out_mp4.to_string_lossy().to_string();
+        let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+        return Ok(json_response(200, format!(r#"{{"ok":true,"path":"{}"}}"#, escaped)));
     }
 
     if method == Method::GET && path == "/resolve" {

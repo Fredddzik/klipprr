@@ -133,7 +133,7 @@ let parsed: Value = match serde_json::from_str(json_str) {
         .iter()
         .filter(|f| {
             f["vcodec"] != "none"
-                && f["ext"].as_str() == Some("mp4")
+                && matches!(f["ext"].as_str(), Some("mp4") | Some("ts"))
                 && f["height"].as_i64().unwrap_or(0) >= 360
         })
         .filter_map(|f| f["height"].as_i64())
@@ -163,10 +163,11 @@ let parsed: Value = match serde_json::from_str(json_str) {
         .filter(|f| {
             f["acodec"] != "none"
                 && f["vcodec"] != "none"
-                && f["ext"].as_str() == Some("mp4")
+                && matches!(f["ext"].as_str(), Some("mp4") | Some("ts"))
                 && f["vcodec"]
                     .as_str()
-                    .map(|v| v.starts_with("avc1"))
+                    // avc1 (YouTube/Twitch clips), h264 (TikTok, some HLS streams)
+                    .map(|v| v.starts_with("avc1") || v == "h264")
                     .unwrap_or(false)
                 && f["height"].as_i64().unwrap_or(0) > 0
         })
@@ -198,7 +199,8 @@ let parsed: Value = match serde_json::from_str(json_str) {
             })
             .filter(|f| {
                 let ext = f["ext"].as_str().unwrap_or("");
-                ext == "mp4" || ext == "webm"
+                // mp4/webm are always safe; ts covers HLS-delivered streams (Twitch VODs etc.)
+                ext == "mp4" || ext == "webm" || ext == "ts"
             })
             .max_by_key(|f| f["height"].as_i64().unwrap_or(0));
         if let Some(f) = fallback {
