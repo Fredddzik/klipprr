@@ -181,7 +181,8 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
           }}
           onError={async () => {
             const audioCodec = debugInfo?.audioCodec ? String(debugInfo.audioCodec) : null;
-            const isPcm = audioCodec ? audioCodec.toLowerCase().startsWith("pcm") || audioCodec.toLowerCase() === "lpcm" : false;
+            const ac = audioCodec ? audioCodec.toLowerCase() : "";
+            const isPcm = ac.startsWith("pcm") || ac === "lpcm" || ac === "alac" || ac === "flac";
 
             let extra: string | null = null;
             if (src) {
@@ -200,7 +201,7 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
               "Preview failed to load in the app.\n\n" +
               (audioCodec ? `Detected audio codec: ${audioCodec}\n` : "") +
               (isPcm
-                ? "This file uses Linear PCM audio, which is commonly not supported for in-app preview.\n"
+                ? "This file uses lossless/PCM audio (Linear PCM, ALAC, or FLAC), which is not supported for in-app preview. The app will re-encode it for preview automatically — if you see this error, the re-encode may have failed.\n"
                 : "");
 
             const tail =

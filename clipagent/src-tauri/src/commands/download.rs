@@ -495,9 +495,18 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 None => "bv*+ba/best".to_string(),
             }
         } else {
+            // "Original" / stream-copy mode: prefer MP4 container for clean remux.
+            // Tiered fallback so platforms without separate m4a (X/Twitter, TikTok) still work:
+            //   1. bv[mp4]+ba[m4a]   — best-case: separate H.264/m4a → perfect stream copy
+            //   2. bv[mp4]+ba        — MP4 video + any audio codec
+            //   3. best[ext=mp4]     — best single progressive MP4 (handles TikTok h264, X/Twitter)
+            //   4. best              — absolute fallback (may be WebM/VP9 but still valid)
             match fast_cap {
-                Some(h) => format!("bv*[ext=mp4][height<={}] + ba[ext=m4a]/best", h),
-                None => "bv*[ext=mp4]+ba[ext=m4a]/best".to_string(),
+                Some(h) => format!(
+                    "bv*[ext=mp4][height<={}]+ba[ext=m4a]/bv*[ext=mp4][height<={}]+ba/best[ext=mp4][height<={}]/best[height<={}]",
+                    h, h, h, h
+                ),
+                None => "bv*[ext=mp4]+ba[ext=m4a]/bv*[ext=mp4]+ba/best[ext=mp4]/best".to_string(),
             }
         };
         let needs_reencode_branch: bool = has_watermark || codec == "universal";
@@ -636,32 +645,89 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     }
 
                     log_to_file(&format!("[EXPORT] fast yt-dlp done i={} -> encoding", i));
+
+                    // --- Validate section-download output ---
+                    // Some platforms (X/Twitter HLS CMAF, certain Twitch formats) produce an
+                    // empty or corrupt intermediate file when --download-sections splices CMAF
+                    // segments (ffmpeg logs "Invalid NAL unit size" / "Output file is empty").
+                    // Detect by checking size + probeable duration. If bad, retry as a full
+                    // download and use FFmpeg input-side -ss to seek to the clip start instead.
+                    let section_dl_path = pick_existing_with_ext(&tmp_base, &["mp4", "webm", "mkv"]);
+                    let section_bad = match &section_dl_path {
+                        Some(p) => {
+                            let sz = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                            let dur_ok = probe_duration_secs(p).is_some();
+                            if !dur_ok || sz < 1024 {
+                                log_to_file(&format!(
+                                    "[FAST] section dl bad i={} size={} dur_ok={}, will retry as full dl",
+                                    i, sz, dur_ok
+                                ));
+                                if let Some(bad) = &section_dl_path { let _ = std::fs::remove_file(bad); }
+                                true
+                            } else { false }
+                        }
+                        None => true,
+                    };
+
+                    // `ffmpeg_input_ss`: pre-input seek injected when we fall back to full download.
+                    // For normal section downloads this is None (tail-trim handles any padding).
+                    let ffmpeg_input_ss: Option<f64>;
+
+                    if section_bad {
+                        // Full download fallback: yt-dlp without --download-sections.
+                        // FFmpeg will seek to `start` in the complete source file.
+                        log_to_file(&format!("[FAST] running full-download fallback i={} start={:.3}", i, start));
+                        let mut rdl: Vec<&str> = yt_dlp_cookie_args();
+                        rdl.extend(yt_dlp_speed_args());
+                        rdl.extend([
+                            "-f", format_selector,
+                            "--ffmpeg-location", &ffmpeg_str,
+                            "-o", tmp_template.as_str(),
+                            url,
+                        ]);
+                        let rdl_ok = Command::new(yt_dlp_path())
+                            .current_dir(base_dir)
+                            .args(&rdl)
+                            .output()
+                            .map(|o| {
+                                log_to_file(&format!("[FAST] full-dl status={:?} stderr={}", o.status,
+                                    String::from_utf8_lossy(&o.stderr).chars().take(800).collect::<String>()));
+                                o.status.success()
+                            })
+                            .unwrap_or(false);
+                        if !rdl_ok {
+                            emit_failed("yt_dlp_full_dl_failed");
+                            return serde_json::json!({"index": i, "name": name, "ok": false, "reason": "yt_dlp_full_dl_failed"});
+                        }
+                        ffmpeg_input_ss = Some(start); // seek to clip start in full video
+                    } else {
+                        ffmpeg_input_ss = None; // normal section download; use tail-trim if needed
+                    }
+
                     let tmp_path = match pick_existing_with_ext(&tmp_base, &["mp4", "webm", "mkv"]) {
                         Some(p) => p,
                         None => {
-                            log_to_file(&format!("[FAST] could not find yt-dlp output for base {}", tmp_base.display()));
+                            log_to_file(&format!("[FAST] no output after download i={}", i));
                             emit_failed("yt_dlp_output_missing");
                             return serde_json::json!({
-                                "index": i,
-                                "name": name,
-                                "ok": false,
-                                "reason": "yt_dlp_output_missing"
+                                "index": i, "name": name, "ok": false, "reason": "yt_dlp_output_missing"
                             });
                         }
                     };
                     let tmp_str = tmp_path.to_string_lossy().to_string();
 
-                    // yt-dlp section downloads often include keyframe padding (often at the start),
-                    // making the intermediate file longer and causing a frozen first frame.
-                    // Trim by taking the last desired_dur seconds.
+                    // For section downloads: detect keyframe padding and trim from tail.
+                    // For full downloads (ffmpeg_input_ss is Some): no tail padding; -ss handles start.
                     let mut trim_tail_start: Option<f64> = None;
-                    if let Some(actual) = probe_duration_secs(&tmp_path) {
-                        if actual > desired_dur + 0.25 {
-                            trim_tail_start = Some((actual - desired_dur).max(0.0));
-                            log_to_file(&format!(
-                                "[FAST] section padding detected i={} actual_dur={:.3}s desired={:.3}s -> trim_start={:.3}s",
-                                i, actual, desired_dur, trim_tail_start.unwrap_or(0.0)
-                            ));
+                    if ffmpeg_input_ss.is_none() {
+                        if let Some(actual) = probe_duration_secs(&tmp_path) {
+                            if actual > desired_dur + 0.25 {
+                                trim_tail_start = Some((actual - desired_dur).max(0.0));
+                                log_to_file(&format!(
+                                    "[FAST] section padding detected i={} actual={:.3}s desired={:.3}s trim={:.3}s",
+                                    i, actual, desired_dur, trim_tail_start.unwrap_or(0.0)
+                                ));
+                            }
                         }
                     }
 
@@ -692,8 +758,11 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
                     // IMPORTANT: ffmpeg options between `-i` inputs apply to the *next input*.
                     // We must not place `-ss/-t` between the video input and watermark input.
+                    // Pre-input seek: ffmpeg_input_ss (full-dl seek) takes priority over trim_tail_start
+                    // (section-dl keyframe padding). Only one is ever non-None at a time.
                     let mut ffmpeg_args: Vec<String> = vec![];
-                    if let Some(ss) = trim_tail_start {
+                    let pre_input_ss = ffmpeg_input_ss.or(trim_tail_start);
+                    if let Some(ss) = pre_input_ss {
                         ffmpeg_args.push("-ss".to_string());
                         ffmpeg_args.push(format!("{:.3}", ss));
                     }
