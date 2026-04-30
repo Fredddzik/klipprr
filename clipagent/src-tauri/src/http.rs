@@ -99,22 +99,30 @@ fn needs_pcm_preview_fix(file_path: &Path) -> bool {
     codec.starts_with("pcm") || codec == "lpcm" || codec == "alac" || codec == "flac"
 }
 
-fn make_pcm_fixed_preview(file_path: &Path) -> Option<PathBuf> {
-    let meta = std::fs::metadata(file_path).ok()?;
+/// Compute a stable cache key for `file_path` based on path + size + mtime.
+fn file_cache_key(file_path: &Path) -> u64 {
+    let meta = std::fs::metadata(file_path).ok();
     let mut hasher = DefaultHasher::new();
     file_path.to_string_lossy().hash(&mut hasher);
-    meta.len().hash(&mut hasher);
-    if let Ok(modified) = meta.modified() {
-        if let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) {
-            since_epoch.as_secs().hash(&mut hasher);
-            since_epoch.subsec_nanos().hash(&mut hasher);
+    if let Some(m) = meta {
+        m.len().hash(&mut hasher);
+        if let Ok(modified) = m.modified() {
+            if let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH) {
+                since_epoch.as_secs().hash(&mut hasher);
+                since_epoch.subsec_nanos().hash(&mut hasher);
+            }
         }
     }
-    let key = hasher.finish();
+    hasher.finish()
+}
+
+fn make_pcm_fixed_preview(file_path: &Path) -> Option<PathBuf> {
+    let key = file_cache_key(file_path);
 
     let mut cache_dir = std::env::temp_dir();
     cache_dir.push("clipagent_preview_cache");
     let _ = std::fs::create_dir_all(&cache_dir);
+    // Phase 1: stream-copy video, re-encode audio → fast, loads immediately.
     let out_path = cache_dir.join(format!("local_preview_pcmfix_{key:x}.mp4"));
     if out_path.is_file() {
         return Some(out_path);
@@ -139,6 +147,90 @@ fn make_pcm_fixed_preview(file_path: &Path) -> Option<PathBuf> {
         return None;
     }
     if out_path.is_file() { Some(out_path) } else { None }
+}
+
+/// Path for the smooth HQ proxy (hardware-accelerated 720p H.264 re-encode).
+fn hq_proxy_path(file_path: &Path) -> PathBuf {
+    let key = file_cache_key(file_path);
+    let cache_dir = std::env::temp_dir().join("clipagent_preview_cache");
+    cache_dir.join(format!("local_preview_hq_{key:x}.mp4"))
+}
+
+/// Sentinel written while the HQ encode is in-flight so a second request doesn't
+/// spawn a duplicate FFmpeg process.
+fn hq_proxy_lock_path(hq: &Path) -> PathBuf {
+    hq.with_extension("lock")
+}
+
+/// Kick off a background thread that re-encodes `file_path` to a smooth 720p H.264
+/// proxy. Returns immediately; the caller polls `/local-proxy-status` for readiness.
+/// The proxy is cached keyed on file identity so it is only generated once.
+fn start_hq_proxy_bg(file_path: &Path) {
+    let hq = hq_proxy_path(file_path);
+    // Already done or already in progress — no-op.
+    if hq.is_file() { return; }
+    let lock = hq_proxy_lock_path(&hq);
+    if lock.is_file() { return; }
+
+    // Mark in-flight
+    let _ = std::fs::write(&lock, b"");
+
+    let in_str = file_path.to_string_lossy().into_owned();
+    let out_str = hq.to_string_lossy().into_owned();
+    let lock_str = lock.to_string_lossy().into_owned();
+    let ffmpeg = ffmpeg_path();
+
+    std::thread::spawn(move || {
+        // Hardware-accelerated H.264 on macOS; libx264 ultrafast elsewhere.
+        // Scale down to at most 1280 px wide (720-ish), keep aspect ratio.
+        // This turns a 10 GB ProRes 4K file into a ~300 MB scrub-friendly proxy.
+        #[cfg(target_os = "macos")]
+        let vcodec_args: &[&str] = &[
+            "-c:v", "h264_videotoolbox",
+            "-prio_speed", "1",
+            "-power_efficient", "0",
+            "-b:v", "4M",
+        ];
+        #[cfg(not(target_os = "macos"))]
+        let vcodec_args: &[&str] = &[
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-b:v", "4M",
+        ];
+
+        let mut args: Vec<&str> = vec![
+            "-y",
+            "-i", &in_str,
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            // Scale to at most 720p tall; -2 keeps the width divisible-by-2.
+            // Avoid shell-style quoting (single quotes) — Command::new passes args
+            // directly without a shell, so they would be passed literally to FFmpeg.
+            // `scale=-2:720` is unambiguous and sufficient for a preview proxy.
+            "-vf", "scale=-2:720",
+        ];
+        args.extend_from_slice(vcodec_args);
+        args.extend_from_slice(&[
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            &out_str,
+        ]);
+
+        let ok = std::process::Command::new(ffmpeg)
+            .args(&args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if !ok {
+            // FFmpeg failed: remove any partial output so /local-proxy-status never
+            // reports "ready" for an invalid/incomplete file.
+            let _ = std::fs::remove_file(&out_str);
+        }
+        // Always remove the lock so a retry is possible on the next load.
+        let _ = std::fs::remove_file(&lock_str);
+    });
 }
 
 pub fn json_response(status: u16, body: String) -> Response<Body> {
@@ -218,13 +310,29 @@ pub async fn handle_http(
         if force_pcm_fix {
             let p = Path::new(&decoded);
             if p.is_file() && needs_pcm_preview_fix(p) {
-                if let Some(converted) = make_pcm_fixed_preview(p) {
-                    resolved_path = converted;
+                // Check if the smooth HQ proxy already exists (from a prior background encode).
+                let hq = hq_proxy_path(p);
+                let hq_ready = hq.is_file()
+                    && std::fs::metadata(&hq).map(|m| m.len()).unwrap_or(0) > 1024;
+
+                if hq_ready {
+                    // Best path: serve the fully re-encoded, scrub-friendly proxy directly.
+                    resolved_path = hq;
                 } else {
-                    return Ok(text_response(
-                        500,
-                        "pcm_fix_failed: ffmpeg could not create a preview-safe file (attempted -c:v copy -c:a aac). This usually means the container/streams are unusual or the file is partially corrupted.",
-                    ));
+                    // Phase 1: stream-copy video + AAC audio → immediate playback (may lag on
+                    // large ProRes/DNxHD files).
+                    if let Some(converted) = make_pcm_fixed_preview(p) {
+                        resolved_path = converted;
+                    } else {
+                        return Ok(text_response(
+                            500,
+                            "pcm_fix_failed: ffmpeg could not create a preview-safe file (attempted -c:v copy -c:a aac). This usually means the container/streams are unusual or the file is partially corrupted.",
+                        ));
+                    }
+                    // Phase 2 (async): kick off a background 720p H.264 re-encode so future
+                    // seeks are smooth. The frontend polls /local-proxy-status and swaps the src
+                    // once ready, without requiring a manual reload.
+                    start_hq_proxy_bg(p);
                 }
             }
         }
@@ -449,6 +557,53 @@ pub async fn handle_http(
         res.headers_mut()
             .insert("Access-Control-Allow-Origin", "*".parse().unwrap());
         return Ok(res);
+    }
+
+    // Poll for the HQ proxy generated by start_hq_proxy_bg (background 720p H.264 re-encode).
+    // Frontend calls this every few seconds after loading a PCM local file; when status=="ready"
+    // it swaps the video src to the smooth proxy path.
+    if method == Method::GET && path == "/local-proxy-status" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
+        let query = req.uri().query().unwrap_or("");
+        let mut raw_path: Option<String> = None;
+        for part in query.split('&') {
+            let mut it = part.splitn(2, '=');
+            if it.next() == Some("path") {
+                raw_path = it.next().map(|s| s.to_string());
+                break;
+            }
+        }
+        let encoded = match raw_path {
+            Some(p) if !p.is_empty() => p,
+            _ => return Ok(json_response(400, r#"{"error":"missing_path"}"#.to_string())),
+        };
+        let decoded = match url_decode(&encoded) {
+            Ok(u) => u.into_owned(),
+            Err(_) => return Ok(text_response(400, "bad_path_encoding")),
+        };
+        let orig = Path::new(&decoded);
+        let hq = hq_proxy_path(orig);
+        let lock = hq_proxy_lock_path(&hq);
+
+        // Check lock FIRST: while FFmpeg is writing, the output file may already exist
+        // with >1024 bytes but not yet be a valid MP4. Reporting "ready" at that point
+        // would send the frontend a broken file and trigger onError in the video element.
+        let status_json = if lock.is_file() {
+            r#"{"status":"encoding"}"#.to_string()
+        } else if hq.is_file()
+            && std::fs::metadata(&hq).map(|m| m.len()).unwrap_or(0) > 65536
+        {
+            // Lock is gone and file is substantial (>64 KB) — safe to use.
+            let path_str = hq.to_string_lossy().to_string();
+            let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#"{{"status":"ready","path":"{}"}}"#, escaped)
+        } else {
+            r#"{"status":"not_started"}"#.to_string()
+        };
+
+        return Ok(json_response(200, status_json));
     }
 
     // yt-dlp backed preview cache for platforms where direct URL playback fails in WKWebView

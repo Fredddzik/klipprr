@@ -235,6 +235,43 @@ fn parse_ffmpeg_out_time_ms(line: &str) -> Option<i64> {
     None
 }
 
+fn parse_ytdlp_progress_pct(line: &str) -> Option<f32> {
+    // [download]  45.2% of 123.45MiB at 2.34MiB/s ETA 00:30
+    let rest = line.trim().strip_prefix("[download]")?.trim_start();
+    let pct_str = rest.split('%').next()?.trim();
+    pct_str.parse::<f32>().ok().filter(|&p| p >= 0.0 && p <= 100.0)
+}
+
+/// Spawn yt-dlp with stderr piped, calling `on_progress(pct)` for each parsed download
+/// percentage (0.0..=100.0). Returns (success, stderr_string) after the process exits.
+fn run_ytdlp_with_progress<F>(cmd: &mut Command, mut on_progress: F) -> (bool, String)
+where
+    F: FnMut(f32),
+{
+    let mut child = match cmd.stdout(Stdio::null()).stderr(Stdio::piped()).spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            log_to_file(&format!("yt-dlp spawn error: {}", e));
+            return (false, String::new());
+        }
+    };
+    let mut stderr_buf = String::new();
+    if let Some(stderr) = child.stderr.take() {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            if stderr_buf.len() < 200_000 {
+                stderr_buf.push_str(&line);
+                stderr_buf.push('\n');
+            }
+            if let Some(pct) = parse_ytdlp_progress_pct(&line) {
+                on_progress(pct);
+            }
+        }
+    }
+    let success = child.wait().map(|s| s.success()).unwrap_or(false);
+    (success, stderr_buf)
+}
+
 fn pick_existing_with_ext(base: &Path, exts: &[&str]) -> Option<PathBuf> {
     for ext in exts {
         let p = PathBuf::from(format!("{}.{}", base.display(), ext));
@@ -613,25 +650,26 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         &ffmpeg_str,
                         "-o",
                         tmp_template.as_str(),
+                        "--newline",
                         &url,
                     ]);
-                    let dl_output = Command::new(yt_dlp_path())
-                        .current_dir(&base_dir)
-                        .args(&dl_args)
-                        .output();
-
-                    let dl_success = match dl_output {
-                        Ok(o) => {
-                            log_to_file(&format!("yt-dlp status: {:?}", o.status));
-                            log_to_file(&format!("yt-dlp stdout: {}", String::from_utf8_lossy(&o.stdout)));
-                            log_to_file(&format!("yt-dlp stderr: {}", String::from_utf8_lossy(&o.stderr)));
-                            o.status.success()
-                        }
-                        Err(e) => {
-                            log_to_file(&format!("yt-dlp spawn error: {}", e));
-                            false
-                        }
-                    };
+                    let mut last_dl_pct: i64 = -1;
+                    let (dl_success, dl_stderr) = run_ytdlp_with_progress(
+                        Command::new(yt_dlp_path())
+                            .current_dir(&base_dir)
+                            .args(&dl_args),
+                        |pct| {
+                            let p = (pct / 2.0).round() as i64;
+                            if p > last_dl_pct {
+                                last_dl_pct = p;
+                                let _ = app.emit("export-progress", serde_json::json!({
+                                    "clipIndex": i, "totalClips": total_clips, "phase": "clip", "clipPercent": p, "client_export_id": client_export_id
+                                }));
+                            }
+                        },
+                    );
+                    log_to_file(&format!("yt-dlp status: success={}", dl_success));
+                    log_to_file(&format!("yt-dlp stderr: {}", dl_stderr));
 
                     if !dl_success {
                         println!("[FAST] yt-dlp failed");
@@ -683,18 +721,26 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                             "-f", format_selector,
                             "--ffmpeg-location", &ffmpeg_str,
                             "-o", tmp_template.as_str(),
+                            "--newline",
                             url,
                         ]);
-                        let rdl_ok = Command::new(yt_dlp_path())
-                            .current_dir(base_dir)
-                            .args(&rdl)
-                            .output()
-                            .map(|o| {
-                                log_to_file(&format!("[FAST] full-dl status={:?} stderr={}", o.status,
-                                    String::from_utf8_lossy(&o.stderr).chars().take(800).collect::<String>()));
-                                o.status.success()
-                            })
-                            .unwrap_or(false);
+                        let mut last_rdl_pct: i64 = -1;
+                        let (rdl_ok, rdl_stderr) = run_ytdlp_with_progress(
+                            Command::new(yt_dlp_path())
+                                .current_dir(base_dir)
+                                .args(&rdl),
+                            |pct| {
+                                let p = (pct / 2.0).round() as i64;
+                                if p > last_rdl_pct {
+                                    last_rdl_pct = p;
+                                    let _ = app.emit("export-progress", serde_json::json!({
+                                        "clipIndex": i, "totalClips": total_clips, "phase": "clip", "clipPercent": p, "client_export_id": client_export_id
+                                    }));
+                                }
+                            },
+                        );
+                        log_to_file(&format!("[FAST] full-dl success={} stderr={}", rdl_ok,
+                            rdl_stderr.chars().take(800).collect::<String>()));
                         if !rdl_ok {
                             emit_failed("yt_dlp_full_dl_failed");
                             return serde_json::json!({"index": i, "name": name, "ok": false, "reason": "yt_dlp_full_dl_failed"});
@@ -945,95 +991,98 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         &ffmpeg_str,
                         "-o",
                         &temp_out_str,
+                        "--newline",
                         &url,
                     ]);
-                    match Command::new(yt_dlp_path())
-                        .current_dir(&base_dir)
-                        .args(&dl_args)
-                        .output()
-                    {
-                        Ok(o) => {
-                            log_to_file(&format!("yt-dlp status: {:?}", o.status));
-                            log_to_file(&format!("yt-dlp stdout: {}", String::from_utf8_lossy(&o.stdout)));
-                            log_to_file(&format!("yt-dlp stderr: {}", String::from_utf8_lossy(&o.stderr)));
-                            // Newer yt-dlp may leave the merged file as .part; use it if final path is missing
-                            if !temp_out.exists() {
-                                let part_path = PathBuf::from(format!("{}.part", temp_out.display()));
-                                if part_path.exists() {
-                                    let _ = std::fs::rename(&part_path, &temp_out);
-                                    log_to_file(&format!("[FAST] renamed yt-dlp .part to {}", temp_out.display()));
-                                }
-                            }
-                            if o.status.success() {
-                                log_to_file(&format!("[EXPORT] fast yt-dlp done (copy) i={} -> finalize", i));
+                    let mut last_dl_pct: i64 = -1;
+                    let (dl_ok, dl_stderr) = run_ytdlp_with_progress(
+                        Command::new(yt_dlp_path())
+                            .current_dir(&base_dir)
+                            .args(&dl_args),
+                        |pct| {
+                            let p = (pct / 2.0).round() as i64;
+                            if p > last_dl_pct {
+                                last_dl_pct = p;
                                 let _ = app.emit("export-progress", serde_json::json!({
-                                    "clipIndex": i, "totalClips": total_clips, "phase": "encoding", "clipPercent": 50, "client_export_id": client_export_id
+                                    "clipIndex": i, "totalClips": total_clips, "phase": "clip", "clipPercent": p, "client_export_id": client_export_id
                                 }));
+                            }
+                        },
+                    );
+                    log_to_file(&format!("yt-dlp status: success={}", dl_ok));
+                    log_to_file(&format!("yt-dlp stderr: {}", dl_stderr));
+                    // Newer yt-dlp may leave the merged file as .part; use it if final path is missing
+                    if !temp_out.exists() {
+                        let part_path = PathBuf::from(format!("{}.part", temp_out.display()));
+                        if part_path.exists() {
+                            let _ = std::fs::rename(&part_path, &temp_out);
+                            log_to_file(&format!("[FAST] renamed yt-dlp .part to {}", temp_out.display()));
+                        }
+                    }
+                    if dl_ok {
+                        log_to_file(&format!("[EXPORT] fast yt-dlp done (copy) i={} -> finalize", i));
+                        let _ = app.emit("export-progress", serde_json::json!({
+                            "clipIndex": i, "totalClips": total_clips, "phase": "encoding", "clipPercent": 50, "client_export_id": client_export_id
+                        }));
 
-                                // If yt-dlp padded the section, trim from the tail so duration matches.
-                                if let Some(actual) = probe_duration_secs(&temp_out) {
-                                    if actual > desired_dur + 0.25 {
-                                        let ss = (actual - desired_dur).max(0.0);
+                        // If yt-dlp padded the section, trim from the tail so duration matches.
+                        if let Some(actual) = probe_duration_secs(&temp_out) {
+                            if actual > desired_dur + 0.25 {
+                                let ss = (actual - desired_dur).max(0.0);
+                                log_to_file(&format!(
+                                    "[FAST] copy trim padded section i={} desired={:.3}s actual={:.3}s ss={:.3}s",
+                                    i, desired_dur, actual, ss
+                                ));
+                                let trimmed = std::env::temp_dir().join(format!(
+                                    "klipprr_export_trim_{}_{}.mp4",
+                                    export_stamp, i
+                                ));
+                                let trimmed_str = trimmed.to_string_lossy().to_string();
+                                let status = Command::new(ffmpeg_path())
+                                    .args([
+                                        "-y",
+                                        "-ss",
+                                        &format!("{:.3}", ss),
+                                        "-t",
+                                        &format!("{:.3}", desired_dur),
+                                        "-i",
+                                        &temp_out_str,
+                                        "-c",
+                                        "copy",
+                                        &trimmed_str,
+                                    ])
+                                    .status();
+                                match status {
+                                    Ok(s) if s.success() => {
+                                        let _ = std::fs::remove_file(&temp_out);
+                                        let _ = std::fs::rename(&trimmed, &temp_out);
+                                    }
+                                    Ok(s) => {
                                         log_to_file(&format!(
-                                            "[FAST] copy trim padded section i={} desired={:.3}s actual={:.3}s ss={:.3}s",
-                                            i, desired_dur, actual, ss
+                                            "[FAST] copy trim ffmpeg failed status={:?} i={}",
+                                            s, i
                                         ));
-                                        let trimmed = std::env::temp_dir().join(format!(
-                                            "klipprr_export_trim_{}_{}.mp4",
-                                            export_stamp, i
+                                        let _ = std::fs::remove_file(&trimmed);
+                                    }
+                                    Err(e) => {
+                                        log_to_file(&format!(
+                                            "[FAST] copy trim ffmpeg spawn error {:?} i={}",
+                                            e, i
                                         ));
-                                        let trimmed_str = trimmed.to_string_lossy().to_string();
-                                        let status = Command::new(ffmpeg_path())
-                                            .args([
-                                                "-y",
-                                                "-ss",
-                                                &format!("{:.3}", ss),
-                                                "-t",
-                                                &format!("{:.3}", desired_dur),
-                                                "-i",
-                                                &temp_out_str,
-                                                "-c",
-                                                "copy",
-                                                &trimmed_str,
-                                            ])
-                                            .status();
-                                        match status {
-                                            Ok(s) if s.success() => {
-                                                let _ = std::fs::remove_file(&temp_out);
-                                                let _ = std::fs::rename(&trimmed, &temp_out);
-                                            }
-                                            Ok(s) => {
-                                                log_to_file(&format!(
-                                                    "[FAST] copy trim ffmpeg failed status={:?} i={}",
-                                                    s, i
-                                                ));
-                                                let _ = std::fs::remove_file(&trimmed);
-                                            }
-                                            Err(e) => {
-                                                log_to_file(&format!(
-                                                    "[FAST] copy trim ffmpeg spawn error {:?} i={}",
-                                                    e, i
-                                                ));
-                                                let _ = std::fs::remove_file(&trimmed);
-                                            }
-                                        }
+                                        let _ = std::fs::remove_file(&trimmed);
                                     }
                                 }
-
-                                let move_ok = move_temp_to_final(&temp_out, &out_path).is_ok();
-                                if !move_ok {
-                                    log_to_file(&format!("[FAST] move to final failed, clip left at {}", temp_out.display()));
-                                }
-                                Ok((o.status, if move_ok { None } else { Some(temp_out_str) }))
-                            } else {
-                                let _ = std::fs::remove_file(&temp_out);
-                                Err(std::io::Error::new(std::io::ErrorKind::Other, "move_failed"))
                             }
                         }
-                        Err(e) => {
-                            log_to_file(&format!("yt-dlp spawn error: {}", e));
-                            Err(e)
+
+                        let move_ok = move_temp_to_final(&temp_out, &out_path).is_ok();
+                        if !move_ok {
+                            log_to_file(&format!("[FAST] move to final failed, clip left at {}", temp_out.display()));
                         }
+                        Ok((std::process::ExitStatus::from_raw(0), if move_ok { None } else { Some(temp_out_str) }))
+                    } else {
+                        let _ = std::fs::remove_file(&temp_out);
+                        Err(std::io::Error::new(std::io::ErrorKind::Other, "yt_dlp_failed"))
                     }
                 }
             };
@@ -1124,11 +1173,25 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
     let mut video_args: Vec<&str> = yt_dlp_cookie_args();
     video_args.extend(yt_dlp_speed_args());
-    video_args.extend(["-f", "bestvideo/bv*", "-o", &video_template, &url]);
-    let _ = Command::new(yt_dlp_path())
-        .current_dir(&base_dir)
-        .args(&video_args)
-        .status();
+    video_args.extend(["-f", "bestvideo/bv*", "-o", &video_template, "--newline", &url]);
+    let mut last_video_pct: i64 = 10;
+    run_ytdlp_with_progress(
+        Command::new(yt_dlp_path())
+            .current_dir(&base_dir)
+            .args(&video_args),
+        |pct| {
+            let p = (10.0 + pct * 0.25).round() as i64; // 10..35
+            if p > last_video_pct {
+                last_video_pct = p;
+                let _ = app.emit("export-progress", serde_json::json!({
+                    "totalClips": total_clips,
+                    "phase": "quality_download_video",
+                    "globalPercent": p,
+                    "client_export_id": client_export_id,
+                }));
+            }
+        },
+    );
 
     let _ = app.emit("export-progress", serde_json::json!({
         "totalClips": total_clips,
@@ -1139,11 +1202,25 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
     let mut audio_args: Vec<&str> = yt_dlp_cookie_args();
     audio_args.extend(yt_dlp_speed_args());
-    audio_args.extend(["-f", "bestaudio/ba*", "-o", &audio_template, &url]);
-    let _ = Command::new(yt_dlp_path())
-        .current_dir(&base_dir)
-        .args(&audio_args)
-        .status();
+    audio_args.extend(["-f", "bestaudio/ba*", "-o", &audio_template, "--newline", &url]);
+    let mut last_audio_pct: i64 = 35;
+    run_ytdlp_with_progress(
+        Command::new(yt_dlp_path())
+            .current_dir(&base_dir)
+            .args(&audio_args),
+        |pct| {
+            let p = (35.0 + pct * 0.20).round() as i64; // 35..55
+            if p > last_audio_pct {
+                last_audio_pct = p;
+                let _ = app.emit("export-progress", serde_json::json!({
+                    "totalClips": total_clips,
+                    "phase": "quality_download_audio",
+                    "globalPercent": p,
+                    "client_export_id": client_export_id,
+                }));
+            }
+        },
+    );
 
     let video_path = match pick_existing_with_ext(&video_base, &["mp4", "webm", "mkv"]) {
         Some(p) => p,
