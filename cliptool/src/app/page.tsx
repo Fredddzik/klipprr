@@ -39,6 +39,12 @@ import {
   releaseClipExports,
   reserveClipExports,
 } from "@/lib/usage";
+import { track, type AnalyticsBase } from "@/lib/analytics";
+import {
+  fetchAppFeatureFlags,
+  clearAppFeatureFlagsCache,
+  type AppFeatureFlags,
+} from "@/lib/posthog-flags";
 
 const SETTINGS_KEYS = {
   theme: "klipprr-theme",
@@ -67,6 +73,10 @@ export default function HomePage() {
   const [email, setEmail] = useState<string | null>(null);
   const [plan, setPlan] = useState<"Free" | "Pro" | "Max">("Free");
   const [accountLoading, setAccountLoading] = useState(true);
+  const [abFlags, setAbFlags] = useState<AppFeatureFlags>({
+    subscribeCtaVariant: "control",
+    pricingProCtaVariant: "control",
+  });
   const [usage, setUsage] = useState<{ used: number; limit: number; remaining: number } | null>(null);
 
   const [updateStatus, setUpdateStatus] = useState<
@@ -170,6 +180,23 @@ export default function HomePage() {
   }
 
   useEffect(() => {
+    const platform = navigator.userAgent.toLowerCase().includes("win") ? "windows" : "mac";
+    track({ externalId: null, email: null, plan: "free" }, "session_started", { platform });
+    sessionStartRef.current = Date.now();
+
+    let ended = false;
+    const handleSessionEnd = () => {
+      if (ended) return;
+      ended = true;
+      const duration = Math.round((Date.now() - sessionStartRef.current) / 1000);
+      track(analyticsBaseRef.current, "session_ended", { session_duration_seconds: duration });
+    };
+    window.addEventListener("beforeunload", handleSessionEnd);
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") handleSessionEnd();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     loadAuthAndPlan();
 
     const sub = supabase.auth.onAuthStateChange(() => {
@@ -181,6 +208,8 @@ export default function HomePage() {
     });
 
     return () => {
+      window.removeEventListener("beforeunload", handleSessionEnd);
+      document.removeEventListener("visibilitychange", onVisibility);
       sub.data.subscription.unsubscribe();
       unlistenPromise.then((unlisten) => unlisten());
     };
@@ -333,6 +362,9 @@ useEffect(() => {
    *  URLs cannot be fetched directly by WKWebView (cookie/CORS barrier). */
   const [ytPreviewPath, setYtPreviewPath] = useState<string | null>(null);
   const [ytPreviewLoading, setYtPreviewLoading] = useState(false);
+  /** Path to the smooth HQ proxy (720p H.264) generated in background for PCM local files.
+   *  Null while encoding; set when /local-proxy-status reports "ready". */
+  const [pcmHqProxyUrl, setPcmHqProxyUrl] = useState<string | null>(null);
   // Remove resolveRequestId state, use ref instead for request tracking
   const resolveReqRef = useRef(0);
   const pendingSeekRef = useRef<number | null>(null);
@@ -352,6 +384,9 @@ useEffect(() => {
   const [exportToasts, setExportToasts] = useState<{ id: number; clipName: string; exportDir: string }[]>([]);
   const exportToastIdRef = useRef(0);
   const suppressAutoSessionRestoreRef = useRef(false);
+  const analyticsBaseRef = useRef<AnalyticsBase>({ externalId: null, email: null, plan: "free" });
+  const sessionStartRef = useRef(Date.now());
+  const [upgradeFeature, setUpgradeFeature] = useState<string | null>(null);
   const {
     undo,
     redo,
@@ -390,6 +425,20 @@ useEffect(() => {
     redo,
     showUndoToast,
   }); 
+
+// Keep analyticsBase ref in sync so event handlers closed over it use current values.
+// eslint-disable-next-line react-hooks/rules-of-hooks
+useEffect(() => {
+  analyticsBaseRef.current = {
+    externalId: session?.user?.id ?? null,
+    email,
+    plan: plan.toLowerCase() as "free" | "pro" | "max",
+  };
+}, [session, email, plan]);
+
+function trackEvent(event: string, extra: Record<string, unknown> = {}) {
+  track(analyticsBaseRef.current, event, extra);
+}
 
 async function fetchCapabilitiesHttp(): Promise<Capabilities | null> {
   try {
@@ -453,6 +502,8 @@ async function refreshCapabilities() {
 
 async function reserveExportQuota(clipCount: number): Promise<boolean> {
   if (!session?.user?.id) {
+    trackEvent("paywall_hit", { feature: "sign_in" });
+    setUpgradeFeature("sign_in");
     setUpgradeReason("feature_locked");
     setShowUpgrade(true);
     return false;
@@ -466,6 +517,8 @@ async function reserveExportQuota(clipCount: number): Promise<boolean> {
   }
 
   if (!result.result.allowed) {
+    trackEvent("export_limit_reached");
+    setUpgradeFeature("clip_limit");
     setUpgradeReason("clip_limit_reached");
     setShowUpgrade(true);
     return false;
@@ -636,6 +689,11 @@ function readPendingReservation(): number {
         setResolveError(null);
         setVideoData(res.data);
         setResolvedUrl(normalized);
+        trackEvent("source_added", { source_type: "url" });
+        if (!localStorage.getItem("klipprr-onboarding-import-first-video")) {
+          localStorage.setItem("klipprr-onboarding-import-first-video", "1");
+          trackEvent("onboarding_step_completed", { step: "import_first_video" });
+        }
       }
     } catch (err) {
       console.error(err);
@@ -693,6 +751,11 @@ function readPendingReservation(): number {
         },
       };
       setVideoData(data);
+      trackEvent("source_added", { source_type: "file" });
+      if (!localStorage.getItem("klipprr-onboarding-import-first-video")) {
+        localStorage.setItem("klipprr-onboarding-import-first-video", "1");
+        trackEvent("onboarding_step_completed", { step: "import_first_video" });
+      }
     } catch (e) {
       console.warn("Load local file failed:", e);
       setResolveError("Could not load the selected file.");
@@ -736,14 +799,60 @@ function readPendingReservation(): number {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedUrl, videoData?.id]);
 
-  // Advance load progress while loading (simulated 0→90% over ~5s so bar moves; 100% set when done)
+  // Background HQ proxy polling: after a PCM local file loads (stream-copy phase 1 may lag
+  // on large ProRes/DNxHD files), the backend encodes a smooth 720p H.264 proxy in a
+  // background thread. Poll every 4s and silently swap the video src when ready.
+  useEffect(() => {
+    setPcmHqProxyUrl(null);
+    if (!localFilePath || !isTauri) return;
+    // Only poll when a pcm_fix was applied (URL carries pcm_fix=1 param)
+    if (!videoData?.previewUrl?.includes("pcm_fix=1")) return;
+
+    let active = true;
+    let intervalId: number | null = null;
+
+    const check = async () => {
+      if (!active) return;
+      try {
+        const res = await fetch(
+          `${CLIPAGENT_HTTP}/local-proxy-status?path=${encodeURIComponent(localFilePath)}`
+        );
+        const data = (await res.json()) as { status: string; path?: string };
+        if (!active) return;
+        if (data.status === "ready" && data.path) {
+          setPcmHqProxyUrl(
+            `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(data.path)}`
+          );
+          if (intervalId !== null) clearInterval(intervalId);
+        }
+      } catch {
+        // Ignore transient polling errors; keep retrying
+      }
+    };
+
+    // Check once immediately (file may already be cached from a prior session), then every 4s
+    check();
+    intervalId = window.setInterval(check, 4000);
+    return () => {
+      active = false;
+      if (intervalId !== null) clearInterval(intervalId);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localFilePath, videoData?.id]);
+
+  // Advance load progress while loading: fast start, exponential deceleration toward 90%.
   useEffect(() => {
     if (!loading) return;
     const cap = 90;
-    const step = 4;
     const interval = setInterval(() => {
-      setLoadProgress((p) => (p >= cap ? cap : Math.min(p + step, cap)));
-    }, 220);
+      setLoadProgress((p) => {
+        if (p >= cap) return cap;
+        const remaining = cap - p;
+        // Jump shrinks as we approach cap: fast early, crawl near 90
+        const jump = Math.max(0.6, remaining * 0.11);
+        return Math.min(p + jump, cap);
+      });
+    }, 180);
     return () => clearInterval(interval);
   }, [loading]);
 
@@ -769,6 +878,14 @@ useEffect(() => {
   refreshUsage();
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [session?.user?.id, plan]);
+
+// Fetch PostHog feature flags once per session when the user is identified.
+useEffect(() => {
+  const uid = session?.user?.id;
+  if (!uid) return;
+  fetchAppFeatureFlags(uid).then(setAbFlags).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [session?.user?.id]);
 
 useEffect(() => {
   const recoverPendingReservation = async () => {
@@ -1379,6 +1496,8 @@ useEffect(() => {
       onInstallUpdate={handleInstallUpdate}
       onLogout={async () => {
         suppressAutoSessionRestoreRef.current = true;
+        clearAppFeatureFlagsCache();
+        setAbFlags({ subscribeCtaVariant: "control", pricingProCtaVariant: "control" });
         setSession(null);
         setLicense(null);
         setEmail(null);
@@ -1495,6 +1614,8 @@ useEffect(() => {
         exportDir={watermarkInterstitial.exportDir}
         onUpgrade={() => {
           setWatermarkInterstitial(null);
+          trackEvent("paywall_hit", { feature: "watermark_removal" });
+          setUpgradeFeature("watermark_removal");
           setUpgradeReason("feature_locked");
           setShowUpgrade(true);
         }}
@@ -1506,15 +1627,22 @@ useEffect(() => {
     <AccessModal
   open={showUpgrade}
   reason={upgradeReason}
+  upgradeFeature={upgradeFeature}
+  abFlags={abFlags}
   onClose={() => {
     setShowUpgrade(false);
     setUpgradeReason(null);
+    setUpgradeFeature(null);
   }}
   onUpgraded={async () => {
     await refreshCapabilities();
     await refreshUsage();
     setShowUpgrade(false);
     setUpgradeReason(null);
+    setUpgradeFeature(null);
+  }}
+  onUpgradeClicked={(feature) => {
+    trackEvent("upgrade_clicked", { feature });
   }}
   isLoggedIn={!!session?.user?.id}
   onRedeemCode={async (code) => {
@@ -1617,11 +1745,14 @@ useEffect(() => {
         )}
       </div>
       {loading && (
-        <div className="max-w-5xl mx-auto mt-2 space-y-1">
-          <div className="h-0.5 bg-zinc-800 overflow-hidden">
+        <div className="max-w-5xl mx-auto mt-2 space-y-1.5">
+          <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
             <div
-              className="h-full bg-violet-500 transition-all duration-300"
-              style={{ width: `${loadProgress}%` }}
+              className="h-full rounded-full transition-all duration-500 ease-out"
+              style={{
+                width: `${loadProgress}%`,
+                background: "linear-gradient(90deg, #7c3cff 0%, #c935ff 60%, #ff2e92 100%)",
+              }}
             />
           </div>
           <p className="text-xs text-zinc-500">Resolving video…</p>
@@ -1636,6 +1767,49 @@ useEffect(() => {
         <div className="text-zinc-400 text-xs">{resolveError}</div>
         <div className="mt-2 text-xs text-zinc-600">
           Workaround: record your screen with OBS or macOS screen recording, then use Load local file.
+        </div>
+      </div>
+    )}
+
+    {/* Skeleton workspace — shown while resolving a URL for the first time */}
+    {loading && !videoData && (
+      <div className="flex-1 min-h-0 flex flex-row min-w-0 overflow-hidden">
+        <div className="flex flex-col min-[1200px]:flex-row gap-4 p-4 flex-1 min-h-0 min-w-0">
+          {/* Video + timeline skeleton */}
+          <div className="flex flex-col min-h-[280px] min-[1200px]:min-h-0 min-w-0 flex-1 min-[1200px]:min-w-[300px] rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden shrink-0">
+            {/* Title bar */}
+            <div className="px-3 pt-2.5 pb-2 shrink-0">
+              <div className="h-2.5 w-44 rounded-full bg-zinc-800 skeleton-shimmer" />
+            </div>
+            {/* Video area */}
+            <div className="flex-1 min-h-0 bg-zinc-900 skeleton-shimmer flex items-center justify-center">
+              <svg className="w-10 h-10 text-zinc-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
+              </svg>
+            </div>
+            {/* Timeline skeleton */}
+            <div className="shrink-0 p-2 border-t border-zinc-800">
+              <div className="h-8 rounded bg-zinc-900 skeleton-shimmer" />
+            </div>
+            {/* Controls skeleton */}
+            <div className="shrink-0 p-3 border-t border-zinc-800 flex gap-2">
+              <div className="h-7 w-24 rounded bg-zinc-800 skeleton-shimmer" />
+              <div className="h-7 w-16 rounded bg-zinc-800 skeleton-shimmer" />
+            </div>
+          </div>
+          {/* Clips panel skeleton */}
+          <div className="w-72 flex flex-col rounded-md border border-zinc-800 bg-zinc-950 shrink-0 overflow-hidden">
+            <div className="px-3 pt-3 pb-2 border-b border-zinc-800 shrink-0">
+              <div className="h-2.5 w-16 rounded-full bg-zinc-800 skeleton-shimmer" />
+            </div>
+            <div className="flex-1 p-3 space-y-2">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <div className="h-8 flex-1 rounded bg-zinc-900 skeleton-shimmer" />
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     )}
@@ -1668,6 +1842,17 @@ useEffect(() => {
                     videoData.previewUrl.startsWith("http://") ||
                     videoData.previewUrl.startsWith("https://");
                   const isAlreadyLocal = videoData.previewUrl.includes("/local-preview");
+
+                  // PCM local file: when the background HQ proxy (720p H.264) is ready,
+                  // swap to it so seeks and scrubbing are smooth instead of laggy.
+                  if (
+                    isAlreadyLocal &&
+                    videoData.previewUrl.includes("pcm_fix=1") &&
+                    pcmHqProxyUrl
+                  ) {
+                    return pcmHqProxyUrl;
+                  }
+
                   if (!isRemote || isAlreadyLocal) return videoData.previewUrl;
 
                   // TikTok: use locally-cached yt-dlp preview (CDN URLs fail in WKWebView)
@@ -1732,6 +1917,15 @@ useEffect(() => {
                       setMarkIn(t);
                     } else if (markIn !== null && markOut === null) {
                       setMarkOut(t);
+                      const clipDuration = Math.abs(t - markIn);
+                      trackEvent("clip_created", {
+                        source_type: localFilePath ? "file" : "url",
+                        clip_duration_seconds: Math.round(clipDuration),
+                      });
+                      if (!localStorage.getItem("klipprr-onboarding-first-trim")) {
+                        localStorage.setItem("klipprr-onboarding-first-trim", "1");
+                        trackEvent("onboarding_step_completed", { step: "first_trim" });
+                      }
                       setClips((prev) => {
                         pushHistory();
                         const next = [
@@ -1851,6 +2045,8 @@ useEffect(() => {
                 }}
                 canEditClips={caps.canRenameClips}
                 onUpgradeRequested={() => {
+                  trackEvent("paywall_hit", { feature: "rename_clips" });
+                  setUpgradeFeature("rename_clips");
                   setUpgradeReason("feature_locked");
                   setShowUpgrade(true);
                 }}
@@ -1919,6 +2115,7 @@ useEffect(() => {
                 sanitizeExportPath={sanitizeExportPath}
                 canEditExportPath={caps.canSetCustomExportPath}
                 hasWatermark={caps.hasWatermark && plan === "Free"}
+                clipsRemaining={plan === "Free" ? (usage?.remaining ?? null) : null}
                 onExportPathChosen={async (path) => {
                   try {
                     await invoke("set_export_path", { path });
@@ -1926,7 +2123,9 @@ useEffect(() => {
                     console.warn("Persist export path failed:", e);
                   }
                 }}
-                onUpgradeRequested={() => {
+                onUpgradeRequested={(feature) => {
+                  trackEvent("paywall_hit", { feature });
+                  setUpgradeFeature(feature);
                   setUpgradeReason("feature_locked");
                   setShowUpgrade(true);
                 }}
@@ -1943,18 +2142,35 @@ useEffect(() => {
                   savePendingReservation(0);
                   refreshUsage();
                 }}
-                onExportComplete={(count, exportDir, hadWatermark) => {
+                onExportComplete={(count, exportDir, hadWatermark, totalDurationSeconds) => {
                   posthog.capture("clip_exported", {
                     clip_count: count,
                     had_watermark: hadWatermark,
                     plan: plan,
                   });
+                  const quality = exportHQ ? "quality" : "speed";
+                  trackEvent("clip_exported", {
+                    clip_count: count,
+                    quality,
+                    clip_duration_seconds: Math.round(totalDurationSeconds),
+                  });
+                  if (!localStorage.getItem("klipprr-first-export-done")) {
+                    localStorage.setItem("klipprr-first-export-done", "1");
+                    trackEvent("first_export", {
+                      clip_count: count,
+                      quality,
+                      clip_duration_seconds: Math.round(totalDurationSeconds),
+                    });
+                  }
                   if (hadWatermark) {
                     setWatermarkInterstitial({ count, exportDir });
                   } else {
                     setExportCompleteToast({ count, exportDir });
                     setTimeout(() => setExportCompleteToast(null), 12000);
                   }
+                }}
+                onExportFailed={(errorType) => {
+                  trackEvent("export_failed", { error_type: errorType });
                 }}
               />
             </div>
