@@ -17,18 +17,33 @@ export type AgentResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string; agentState?: AgentState; status?: number; details?: string };
 
-type FetchOpts = RequestInit & { timeoutMs?: number };
+type FetchOpts = RequestInit & { timeoutMs?: number; signal?: AbortSignal };
 
 async function fetchWithTimeout(url: string, opts: FetchOpts = {}) {
-  const { timeoutMs = 4000, ...rest } = opts;
+  const { timeoutMs = 4000, signal: externalSignal, ...rest } = opts;
   const ctrl = new AbortController();
   const t = window.setTimeout(() => ctrl.abort(), timeoutMs);
+
+  // If an external signal is provided, also abort our controller when it fires.
+  let externalAbortListener: (() => void) | null = null;
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      window.clearTimeout(t);
+      ctrl.abort();
+    } else {
+      externalAbortListener = () => ctrl.abort();
+      externalSignal.addEventListener("abort", externalAbortListener);
+    }
+  }
 
   try {
     const res = await fetch(url, { ...rest, signal: ctrl.signal });
     return res;
   } finally {
     window.clearTimeout(t);
+    if (externalSignal && externalAbortListener) {
+      externalSignal.removeEventListener("abort", externalAbortListener);
+    }
   }
 }
 
@@ -231,7 +246,8 @@ export interface DownloadAllResponse {
 }
 
 export async function downloadAll(
-  payload: DownloadAllPayload
+  payload: DownloadAllPayload,
+  opts?: { signal?: AbortSignal }
 ): Promise<AgentResult<DownloadAllResponse>> {
   try {
     const base = CLIPAGENT_HTTP;
@@ -244,6 +260,7 @@ export async function downloadAll(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       timeoutMs,
+      signal: opts?.signal,
     });
 
     const status = res.status;
