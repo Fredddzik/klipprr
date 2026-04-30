@@ -68,11 +68,13 @@ interface ExportPanelProps {
   canEditExportPath: boolean;
   /** True when exports should include a watermark (Free plan). */
   hasWatermark: boolean;
+  /** Monthly clips remaining for the current user (Free plan). Null = unknown/Pro. */
+  clipsRemaining?: number | null;
 
   /** When user picks a folder (Pro), persist it via Tauri. */
   onExportPathChosen?: (path: string) => void;
 
-  onUpgradeRequested?: () => void;
+  onUpgradeRequested?: (feature: string) => void;
 
   onBeforeExport?: (clipCount: number) => Promise<boolean>;
   onExportReservationStart?: (clipCount: number) => void;
@@ -80,7 +82,9 @@ interface ExportPanelProps {
   onExportReservationComplete?: () => void;
 
   /** Called when export finishes successfully. hadWatermark reflects what was actually sent to the backend. */
-  onExportComplete?: (count: number, exportDir: string, hadWatermark: boolean) => void;
+  onExportComplete?: (count: number, exportDir: string, hadWatermark: boolean, totalDurationSeconds: number) => void;
+  /** Called when export fails (all clips failed or request error). */
+  onExportFailed?: (errorType: string) => void;
 }
 
 function fmtRes(h: number) {
@@ -126,8 +130,10 @@ export default function ExportPanel({
   sanitizeExportPath,
   canEditExportPath,
   hasWatermark,
+  clipsRemaining,
   onExportPathChosen,
   onUpgradeRequested,
+  onExportFailed,
   onBeforeExport,
   onExportReservationStart,
   onExportClipSettled,
@@ -135,6 +141,7 @@ export default function ExportPanel({
   onExportComplete,
 }: ExportPanelProps) {
   const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI__;
+  const exportAbortControllerRef = useRef<AbortController | null>(null);
   const [exportProgress, setExportProgress] = useState<{
     clipIndex: number;
     totalClips: number;
@@ -160,6 +167,7 @@ export default function ExportPanel({
   const exportFailedCountRef = useRef(0);
   const exportDirRef = useRef<string>("");
   const exportHadWatermarkRef = useRef(false);
+  const exportTotalDurationRef = useRef(0);
   const refundedFailedClipIndicesRef = useRef<Record<number, true>>({});
   const [exportClipNames, setExportClipNames] = useState<string[]>([]);
   const exportClipNamesRef = useRef<string[]>([]);
@@ -169,6 +177,10 @@ export default function ExportPanel({
   function clearExportingUI(reason: string, extra?: any) {
     dbg(`clearExportingUI: ${reason}`, extra);
     exportInProgressRef.current = false;
+    if (exportAbortControllerRef.current) {
+      exportAbortControllerRef.current.abort();
+      exportAbortControllerRef.current = null;
+    }
     setConnectionLost(false);
     setIsExporting(false);
     setExportProgress(null);
@@ -187,6 +199,7 @@ export default function ExportPanel({
     exportFailedCountRef.current = 0;
     exportDirRef.current = "";
     exportHadWatermarkRef.current = false;
+    exportTotalDurationRef.current = 0;
     refundedFailedClipIndicesRef.current = {};
   }
 
@@ -352,8 +365,9 @@ export default function ExportPanel({
                 onExportReservationComplete?.();
                 clearExportingUI("export-all-done accepted (after retry)", { total, completedNow, failedNow, okCount, exportDir });
                 if (onExportComplete && exportDir && okCount > 0) {
-                  onExportComplete(okCount, exportDir, exportHadWatermarkRef.current);
+                  onExportComplete(okCount, exportDir, exportHadWatermarkRef.current, exportTotalDurationRef.current);
                 } else if (okCount === 0) {
+                  onExportFailed?.("all_clips_failed");
                   alert("Export failed. No clips were exported.");
                 }
               }
@@ -366,8 +380,9 @@ export default function ExportPanel({
           onExportReservationComplete?.();
           clearExportingUI("export-all-done accepted", { total, completed, failed, okCount, exportDir });
           if (onExportComplete && exportDir && okCount > 0) {
-            onExportComplete(okCount, exportDir, exportHadWatermarkRef.current);
+            onExportComplete(okCount, exportDir, exportHadWatermarkRef.current, exportTotalDurationRef.current);
           } else if (okCount === 0) {
+            onExportFailed?.("all_clips_failed");
             alert("Export failed. No clips were exported.");
           }
         }
@@ -398,7 +413,9 @@ export default function ExportPanel({
         if (!cfg) continue;
         const elapsed = Math.max(0, now - cfg.t0);
         const frac = cfg.durMs > 0 ? Math.min(1, elapsed / cfg.durMs) : 1;
-        const pct = Math.round(frac * 50); // 0..50
+        // Ease-out: fast start, decelerates approaching 50% to avoid the bar freezing visibly
+        const easedFrac = 1 - Math.pow(1 - frac, 1.6);
+        const pct = Math.round(easedFrac * 47); // 0..47, leaving room for real progress to take over
         updates[idx] = pct;
         changed = true;
       }
@@ -469,6 +486,7 @@ export default function ExportPanel({
 
     exportInProgressRef.current = true;
     exportClientIdRef.current = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    exportAbortControllerRef.current = new AbortController();
     setConnectionLost(false);
     setIsExporting(true);
     setExportProgress(null);
@@ -497,8 +515,12 @@ export default function ExportPanel({
         clipHalfDurMsRef.current = halfDur;
       }
 
-      // Capture watermark state at export start — don't re-evaluate at completion time
+      // Capture watermark state and total duration at export start
       exportHadWatermarkRef.current = Boolean(hasWatermark);
+      exportTotalDurationRef.current = chosen.reduce(
+        (sum, c) => sum + Math.max(0, c.end - c.start),
+        0
+      );
 
       const exportUrl = resolvedUrl && resolvedUrl.trim().length > 0
         ? resolvedUrl
@@ -527,7 +549,7 @@ export default function ExportPanel({
         export_path: sanitizeExportPath(exportPath),
         has_watermark: Boolean(hasWatermark),
         codec: exportCodec,
-      });
+      }, { signal: exportAbortControllerRef.current?.signal });
 
       if (!result.ok) {
         dbg("downloadAll returned error", result);
@@ -551,6 +573,7 @@ export default function ExportPanel({
         }
 
         clearExportingUI("downloadAll error", result);
+        onExportFailed?.(String(result.error ?? "unknown_error").toLowerCase().replace(/\s+/g, "_").slice(0, 64));
         alert("Export failed: " + result.error);
         return;
       }
@@ -559,6 +582,8 @@ export default function ExportPanel({
       // Do NOT toast success here; rely on export-all-done + clip-done/failed events so the UI
       // doesn't say "Exported 0 clips" or get stuck at 50% on failures.
     } catch (e) {
+      // User-initiated cancel: AbortError from our own AbortController — do nothing; UI is already cleared.
+      if (e instanceof Error && e.name === "AbortError" && !exportInProgressRef.current) return;
       // Do NOT clear loading here. The HTTP connection may have timed out or dropped
       // while the backend is still exporting (long clips). We only clear when we
       // receive export-all-done.
@@ -593,7 +618,26 @@ export default function ExportPanel({
           </p>
           <button
             type="button"
-            onClick={onUpgradeRequested}
+            onClick={() => onUpgradeRequested?.("watermark_removal")}
+            className="shrink-0 px-3 py-1.5 rounded btn-brand text-xs"
+          >
+            Upgrade
+          </button>
+        </div>
+      )}
+
+      {/* LOW-CLIP NUDGE — shown when ≤ 3 clips remain this month (used 7+) */}
+      {hasWatermark && !isExporting && typeof clipsRemaining === "number" && clipsRemaining <= 3 && clipsRemaining > 0 && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 flex items-center gap-3 px-3 py-2.5">
+          <p className="flex-1 text-xs text-amber-300 min-w-0 leading-relaxed">
+            {clipsRemaining === 1
+              ? <>Only <span className="font-semibold">1 clip</span> left this month</>
+              : <><span className="font-semibold">{clipsRemaining} clips</span> left this month</>
+            }
+          </p>
+          <button
+            type="button"
+            onClick={() => onUpgradeRequested?.("clip_limit")}
             className="shrink-0 px-3 py-1.5 rounded btn-brand text-xs"
           >
             Upgrade
@@ -644,7 +688,7 @@ export default function ExportPanel({
               type="button"
               onClick={() => {
                 if (!canUseQualityMode) {
-                  onUpgradeRequested?.();
+                  onUpgradeRequested?.("quality_mode");
                   return;
                 }
                 setExportHQ(!exportHQ);
@@ -671,7 +715,7 @@ export default function ExportPanel({
             <button
               type="button"
               className="text-xs text-zinc-500 underline"
-              onClick={() => onUpgradeRequested?.()}
+              onClick={() => onUpgradeRequested?.("quality_mode")}
             >
               Quality mode is Pro-only
             </button>
@@ -779,9 +823,9 @@ export default function ExportPanel({
 
       {isExporting && (
         <div className="rounded border border-zinc-800 bg-zinc-900/80 p-3 space-y-2">
-          <div className="flex items-center gap-2">
-            <span className="inline-block w-4 h-4 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
-            <span className="text-sm font-medium text-zinc-900 dark:text-white">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="inline-block w-4 h-4 border-2 border-violet-500 border-t-transparent rounded-full animate-spin shrink-0" />
+            <span className="text-sm font-medium text-zinc-900 dark:text-white flex-1 min-w-0 truncate">
               {exportProgress?.totalClips
                 ? (() => {
                     const idx = exportProgress.clipIndex ?? 0;
@@ -790,6 +834,17 @@ export default function ExportPanel({
                   })()
                 : "Preparing export…"}
             </span>
+            <button
+              type="button"
+              onClick={() => clearExportingUI("user_cancelled")}
+              className="shrink-0 p-1 rounded text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition"
+              aria-label="Cancel export"
+              title="Cancel export"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
           </div>
           {exportProgress && exportProgress.totalClips > 0 && (
             <div className="space-y-2">
@@ -799,17 +854,25 @@ export default function ExportPanel({
                 const isPending = percent === undefined;
                 const label = exportClipNames[i] ?? `Clip ${i + 1}`;
                 return (
-                  <div key={i} className="flex items-center gap-3">
-                    <span className="text-sm text-zinc-700 dark:text-zinc-300 w-14 shrink-0">
+                  <div key={i} className="flex items-center gap-2 min-w-0">
+                    <span
+                      className="text-xs text-zinc-700 dark:text-zinc-300 w-24 min-w-0 shrink-0 truncate overflow-hidden"
+                      title={label}
+                    >
                       {label}
                     </span>
                     {isPending ? (
-                      <span className="text-xs text-zinc-500 dark:text-zinc-400">pending</span>
+                      <span className="text-xs text-zinc-500 dark:text-zinc-400 shrink-0">pending</span>
                     ) : (
                       <div className="flex-1 min-w-0 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
                         <div
-                          className="h-full bg-violet-500 transition-all duration-300"
-                          style={{ width: `${percent}%` }}
+                          className="h-full rounded-full transition-all duration-500 ease-out"
+                          style={{
+                            width: `${percent}%`,
+                            background: percent >= 100
+                              ? "linear-gradient(90deg, #059669 0%, #10b981 100%)"
+                              : "linear-gradient(90deg, #7c3cff 0%, #c935ff 60%, #ff2e92 100%)",
+                          }}
                         />
                       </div>
                     )}
@@ -859,7 +922,7 @@ export default function ExportPanel({
           ) : !canEditExportPath ? (
             <button
               type="button"
-              onClick={() => onUpgradeRequested?.()}
+              onClick={() => onUpgradeRequested?.("custom_export_path")}
               className="shrink-0 py-1 px-2 rounded text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-400 transition"
             >
               Pro
@@ -881,8 +944,11 @@ export default function ExportPanel({
           </p>
           <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
             <div
-              className="h-full bg-violet-500 transition-all duration-300"
-              style={{ width: `${qualityGlobal.percent}%` }}
+              className="h-full rounded-full transition-all duration-500 ease-out"
+              style={{
+                width: `${qualityGlobal.percent}%`,
+                background: "linear-gradient(90deg, #7c3cff 0%, #c935ff 60%, #ff2e92 100%)",
+              }}
             />
           </div>
         </div>

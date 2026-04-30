@@ -2,30 +2,48 @@
 
 import { useEffect, useState } from "react";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
+import {
+  getSubscribeCtaCopy,
+  getPricingProCtaCopy,
+  type AppFeatureFlags,
+} from "@/lib/posthog-flags";
 
 interface AccessModalProps {
   open: boolean;
   onClose: () => void;
   onUpgraded?: () => void;
   reason?: "feature_locked" | "clip_limit_reached" | null;
+  /** Feature slug that triggered the upgrade modal (e.g. "quality_mode"). Used for analytics. */
+  upgradeFeature?: string | null;
   /** When true, show "Enter activation code" so logged-in user can redeem a beta code in-app. */
   isLoggedIn?: boolean;
   /** Redeem an activation code (uses current session). Returns error message or undefined on success. */
   onRedeemCode?: (code: string) => Promise<{ error?: string }>;
+  /** Called when user clicks an upgrade CTA button. */
+  onUpgradeClicked?: (feature: string) => void;
+  /** A/B flag values for CTA copy. Falls back to control if omitted. */
+  abFlags?: AppFeatureFlags;
 }
 
 const LOGIN_URL =
   "https://klipprr.com/login?redirect=" +
   encodeURIComponent("clipagent://auth-callback");
-const UPGRADE_URL = "https://klipprr.com/#pricing";
+const UPGRADE_BASE = "https://klipprr.com/";
 
 export default function AccessModal({
   open,
   onClose,
   reason = null,
+  upgradeFeature = null,
   isLoggedIn = false,
   onRedeemCode,
+  onUpgradeClicked,
+  abFlags,
 }: AccessModalProps) {
+  const subscribeVariant = abFlags?.subscribeCtaVariant ?? "control";
+  const pricingVariant = abFlags?.pricingProCtaVariant ?? "control";
+  const subscribeCta = getSubscribeCtaCopy(subscribeVariant);
+  const pricingProCta = getPricingProCtaCopy(pricingVariant);
   const [launched, setLaunched] = useState(false);
   const [activationCode, setActivationCode] = useState("");
   const [redeemStatus, setRedeemStatus] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
@@ -48,6 +66,7 @@ export default function AccessModal({
 
   const handleOpenLogin = async () => {
     try {
+      onUpgradeClicked?.(upgradeFeature ?? "sign_in");
       await openExternal(LOGIN_URL);
       setLaunched(true);
     } catch (err) {
@@ -55,9 +74,11 @@ export default function AccessModal({
     }
   };
 
-  const handleOpenUpgrade = async () => {
+  const handleOpenUpgrade = async (flagVariant: string) => {
     try {
-      await openExternal(UPGRADE_URL);
+      onUpgradeClicked?.(upgradeFeature ?? "upgrade");
+      const url = `${UPGRADE_BASE}?ph_flag_cta=${encodeURIComponent(flagVariant)}#pricing`;
+      await openExternal(url);
     } catch (err) {
       console.error("[AccessModal] Failed to open browser:", err);
     }
@@ -159,6 +180,13 @@ export default function AccessModal({
                     <li>✓ 120 clips per month</li>
                     <li>✓ No watermark</li>
                   </ul>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenUpgrade(pricingVariant)}
+                    className="mt-3 w-full rounded-lg bg-violet-600 hover:bg-violet-500 py-1.5 text-xs font-semibold text-white transition"
+                  >
+                    {pricingProCta}
+                  </button>
                 </div>
 
                 <div className="rounded-xl border border-emerald-500/70 bg-gray-900/90 p-4 shadow-[0_0_18px_rgba(16,185,129,0.2)]">
@@ -186,10 +214,10 @@ export default function AccessModal({
               Upgrade in the browser to pay for Pro, or enter a beta code below.
             </p>
             <button
-              onClick={handleOpenUpgrade}
+              onClick={() => handleOpenUpgrade(subscribeVariant)}
               className="w-full rounded-lg bg-yellow-500 py-2 font-semibold text-black hover:brightness-110"
             >
-              Upgrade for more clips
+              {subscribeCta}
             </button>
             <p className="mt-3 text-xs text-gray-500 mb-4">or</p>
             {onRedeemCode && (
