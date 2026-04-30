@@ -46,11 +46,12 @@ pub fn handle_resolve(url: String) -> String {
             arg0,
             arg1,
             arg2,
+            "--no-playlist",
             decoded_url.as_str(),
         ]
     } else {
         log_to_file("[RESOLVE] sandboxed app: not using browser cookies");
-        vec![arg0, arg1, arg2, decoded_url.as_str()]
+        vec![arg0, arg1, arg2, "--no-playlist", decoded_url.as_str()]
     };
 
     log_to_file("[RESOLVE] starting");
@@ -173,7 +174,14 @@ let parsed: Value = match serde_json::from_str(json_str) {
         })
         .collect();
 
-    progressive.sort_by_key(|f| f["height"].as_i64().unwrap_or(0));
+    progressive.sort_by_key(|f| {
+        let is_direct = f["protocol"].as_str()
+            .map(|p| p == "https" || p == "http")
+            .unwrap_or(false);
+        let h = f["height"].as_i64().unwrap_or(0);
+        // Strongly prefer direct HTTPS/HTTP over HLS/m3u8 (Chromium webview can't play m3u8)
+        if is_direct { h + 10000 } else { h }
+    });
 
     let best_preview = progressive
         .iter()
@@ -202,15 +210,23 @@ let parsed: Value = match serde_json::from_str(json_str) {
                 // mp4/webm are always safe; ts covers HLS-delivered streams (Twitch VODs etc.)
                 ext == "mp4" || ext == "webm" || ext == "ts"
             })
-            .max_by_key(|f| f["height"].as_i64().unwrap_or(0));
+            .max_by_key(|f| {
+                let is_direct = f["protocol"].as_str()
+                    .map(|p| p == "https" || p == "http")
+                    .unwrap_or(false);
+                let h = f["height"].as_i64().unwrap_or(0);
+                if is_direct { h + 10000 } else { h }
+            });
         if let Some(f) = fallback {
             preview_url = f["url"].as_str().unwrap_or("").to_string();
         }
     }
 
     if preview_url.is_empty() {
+        log_to_file(&format!("[RESOLVE] no preview found: progressive={} fallback=none", progressive.len()));
         return r#"{"error":"no_progressive_preview"}"#.to_string();
     }
+    log_to_file(&format!("[RESOLVE] selected preview url_len={}", preview_url.len()));
 
     let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or("");
