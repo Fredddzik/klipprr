@@ -182,6 +182,35 @@ jobs:
           echo "{\"version\":\"${VERSION}\",\"notes\":\"\",\"pub_date\":\"${PUB_DATE}\",\"platforms\":{\"darwin-aarch64\":{\"signature\":${SIGNATURE},\"url\":\"${DOWNLOAD_URL}\"}}}" > latest.json
           gh release upload "$TAG" --repo "$PUBLIC_REPO" latest.json --clobber
 
+      # Upload the .dmg to Vercel Blob as a stable, direct URL for the website
+      # download button. This is separate from Tauri auto-update, which uses
+      # .app.tar.gz + latest.json from GitHub and is not affected by this step.
+      #
+      # First run: copy the printed URL and set it as NEXT_PUBLIC_MAC_DOWNLOAD_URL
+      # in Vercel → website-klipprr → Settings → Environment Variables.
+      # Subsequent runs: the same URL is overwritten — no env var update needed.
+      #
+      # Required secret: VERCEL_BLOB_TOKEN (read-write token from Vercel Blob store)
+      - name: Upload .dmg to Vercel Blob (website download button)
+        if: secrets.VERCEL_BLOB_TOKEN != ''
+        env:
+          VERCEL_BLOB_TOKEN: ${{ secrets.VERCEL_BLOB_TOKEN }}
+        run: |
+          BUNDLE_DMG="clipagent/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg"
+          DMG_FILE=$(find "$BUNDLE_DMG" -name "*.dmg" | head -1)
+          [ -f "$DMG_FILE" ] || { echo "No .dmg found — skipping Vercel Blob upload"; exit 0; }
+          echo "Uploading $DMG_FILE to Vercel Blob as Klipprr_latest.dmg …"
+          RESPONSE=$(curl --fail -s \
+            --request PUT \
+            "https://blob.vercel-storage.com/Klipprr_latest.dmg" \
+            --header "authorization: Bearer $VERCEL_BLOB_TOKEN" \
+            --header "x-add-random-suffix: 0" \
+            --header "content-type: application/octet-stream" \
+            --data-binary "@$DMG_FILE")
+          BLOB_URL=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('url','PARSE_ERROR'))" 2>/dev/null || echo "PARSE_ERROR")
+          echo "✅ Vercel Blob URL: $BLOB_URL"
+          echo "   Set NEXT_PUBLIC_MAC_DOWNLOAD_URL=$BLOB_URL in Vercel (only needed on first run)"
+
   # Windows build (unsigned). Runs after Mac job; uploads .msi to same release.
   # continue-on-error: true so a Windows failure does not mark the workflow failed (Mac release is already done).
   release-windows:
