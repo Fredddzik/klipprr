@@ -25,10 +25,21 @@ jobs:
 
       - name: Get latest yt-dlp release
         id: ytdlp
+        env:
+          # Authenticated requests get 5000 req/hr instead of 60/hr — unauthenticated
+          # calls from shared Actions runner IPs were intermittently rate-limited,
+          # which made this step fail with a cryptic "jq: Cannot iterate over null" error.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           API="https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
-          TAG=$(curl -sL "$API" | jq -r '.tag_name')
-          URL=$(curl -sL "$API" | jq -r '.assets[] | select(.name == "yt-dlp_macos") | .browser_download_url')
+          RESPONSE=$(curl -sL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$API")
+          TAG=$(echo "$RESPONSE" | jq -r '.tag_name // empty')
+          if [ -z "$TAG" ]; then
+            echo "::error::Failed to resolve latest yt-dlp release. API response:"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          URL=$(echo "$RESPONSE" | jq -r '.assets[] | select(.name == "yt-dlp_macos") | .browser_download_url')
           echo "tag_name=$TAG" >> $GITHUB_OUTPUT
           echo "download_url=$URL" >> $GITHUB_OUTPUT
           echo "Latest yt-dlp: $TAG"

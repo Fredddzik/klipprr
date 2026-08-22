@@ -192,10 +192,13 @@ jobs:
       #
       # Required secret: VERCEL_BLOB_TOKEN (read-write token from Vercel Blob store)
       - name: Upload .dmg to Vercel Blob (website download button)
-        if: secrets.VERCEL_BLOB_TOKEN != ''
         env:
           VERCEL_BLOB_TOKEN: ${{ secrets.VERCEL_BLOB_TOKEN }}
         run: |
+          if [ -z "$VERCEL_BLOB_TOKEN" ]; then
+            echo "VERCEL_BLOB_TOKEN not set — skipping Vercel Blob upload"
+            exit 0
+          fi
           BUNDLE_DMG="clipagent/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg"
           DMG_FILE=$(find "$BUNDLE_DMG" -name "*.dmg" | head -1)
           [ -f "$DMG_FILE" ] || { echo "No .dmg found — skipping Vercel Blob upload"; exit 0; }
