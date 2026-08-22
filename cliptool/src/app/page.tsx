@@ -1889,7 +1889,22 @@ useEffect(() => {
               )}
               <VideoViewport
                 src={(() => {
-                  if (!isTauri || !videoData.previewUrl) return videoData.previewUrl;
+                  if (!isTauri) return videoData.previewUrl;
+
+                  // TikTok, and DASH-only sources like YouTube, play from a locally
+                  // merged copy. This has to be checked before the empty-URL guard
+                  // below: for DASH-only sources resolve intentionally returns no
+                  // preview URL, which is expected rather than a failure.
+                  const isTikTok =
+                    resolvedUrl?.includes("tiktok.com") || resolvedUrl?.includes("tiktokcdn.com");
+                  if (isTikTok || videoData.requiresLocalPreview) {
+                    // The 720p background download replaces the initial 360p one once ready.
+                    const path = ytHqPreviewPath ?? ytPreviewPath;
+                    if (!path) return null; // still downloading or failed → placeholder
+                    return `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(path)}`;
+                  }
+
+                  if (!videoData.previewUrl) return videoData.previewUrl;
                   const isRemote =
                     videoData.previewUrl.startsWith("http://") ||
                     videoData.previewUrl.startsWith("https://");
@@ -1906,17 +1921,6 @@ useEffect(() => {
                   }
 
                   if (!isRemote || isAlreadyLocal) return videoData.previewUrl;
-
-                  // TikTok, and DASH-only sources like YouTube, play from a locally
-                  // merged copy. For the latter the 720p background download replaces
-                  // the initial 360p one as soon as it is ready.
-                  const isTikTok =
-                    resolvedUrl?.includes("tiktok.com") || resolvedUrl?.includes("tiktokcdn.com");
-                  if (isTikTok || videoData.requiresLocalPreview) {
-                    const path = ytHqPreviewPath ?? ytPreviewPath;
-                    if (!path) return null; // loading or failed → VideoViewport shows placeholder
-                    return `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(path)}`;
-                  }
 
                   // HLS: WKWebView handles .m3u8 natively; proxying breaks segment resolution
                   if (videoData.previewUrl.includes("m3u8")) return videoData.previewUrl;
