@@ -104,7 +104,12 @@ export interface ResolveResponse {
   title: string;
   duration: number;
   thumbnail?: string;
-  preview?: { url: string };
+  preview?: {
+    url: string;
+    /** Set when the source has no muxed format (YouTube is DASH-only as of 2026) and
+     *  the preview must be merged locally via /yt-preview-cache instead of streamed. */
+    requires_local_preview?: boolean;
+  };
   best?: { url: string };
   /** Local-only diagnostic: detected audio codec from ffprobe (e.g. pcm_s16le, lpcm). */
   audio_codec?: string | null;
@@ -123,6 +128,9 @@ export interface ResolvedVideo {
   duration: number;
   thumbnail: string | null;
   previewUrl: string;
+  /** True when previewUrl is empty because no directly playable format exists and the
+   *  preview has to be built locally. */
+  requiresLocalPreview: boolean;
   capabilities: {
     fastMaxHeight: number;
     trueMaxHeight: number;
@@ -137,7 +145,11 @@ function normalizeResolve(raw: ResolveResponse): ResolvedVideo | null {
     raw.best?.url ??
     null;
 
-  if (!previewUrl) return null;
+  const requiresLocalPreview = Boolean(raw.preview?.requires_local_preview);
+
+  // An empty preview URL is expected when the source is DASH-only: the app builds a
+  // merged preview locally instead. Only bail out when there is no fallback either.
+  if (!previewUrl && !requiresLocalPreview) return null;
   if (!raw.id || !raw.title || typeof raw.duration !== "number") return null;
 
   const caps = raw.capabilities
@@ -153,7 +165,8 @@ function normalizeResolve(raw: ResolveResponse): ResolvedVideo | null {
     title: String(raw.title),
     duration: Number(raw.duration),
     thumbnail: raw.thumbnail ? String(raw.thumbnail) : null,
-    previewUrl: String(previewUrl),
+    previewUrl: previewUrl ? String(previewUrl) : "",
+    requiresLocalPreview,
     capabilities: caps,
     raw,
   };

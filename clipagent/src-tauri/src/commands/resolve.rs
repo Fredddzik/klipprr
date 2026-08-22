@@ -222,11 +222,23 @@ let parsed: Value = match serde_json::from_str(json_str) {
         }
     }
 
-    if preview_url.is_empty() {
-        log_to_file(&format!("[RESOLVE] no preview found: progressive={} fallback=none", progressive.len()));
-        return r#"{"error":"no_progressive_preview"}"#.to_string();
+    // YouTube no longer publishes muxed (audio+video) formats at all, so for many
+    // sources there is no single URL a <video> element can play. That is not a failure:
+    // the frontend falls back to a locally merged preview built by /yt-preview-cache.
+    // Only a source with no video streams whatsoever is genuinely unpreviewable.
+    let requires_local_preview = preview_url.is_empty();
+    if requires_local_preview {
+        if any_video.is_empty() {
+            log_to_file("[RESOLVE] no video formats at all — cannot preview");
+            return r#"{"error":"no_progressive_preview"}"#.to_string();
+        }
+        log_to_file(&format!(
+            "[RESOLVE] no muxed format (progressive={}); frontend will build a local merged preview",
+            progressive.len()
+        ));
+    } else {
+        log_to_file(&format!("[RESOLVE] selected preview url_len={}", preview_url.len()));
     }
-    log_to_file(&format!("[RESOLVE] selected preview url_len={}", preview_url.len()));
 
     let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or("");
@@ -243,7 +255,8 @@ let parsed: Value = match serde_json::from_str(json_str) {
         "duration": duration,
         "thumbnail": thumbnail,
         "preview": {
-            "url": preview_url
+            "url": preview_url,
+            "requires_local_preview": requires_local_preview
         },
         "capabilities": {
             "fast_max_height": fast_max_height,

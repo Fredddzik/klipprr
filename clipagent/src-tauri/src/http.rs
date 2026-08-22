@@ -233,6 +233,112 @@ fn start_hq_proxy_bg(file_path: &Path) {
     });
 }
 
+/// Cache path for a yt-dlp-built preview, keyed on source URL + quality tier.
+/// Tiers are independent files so the fast low-res copy stays playable while the
+/// high-res one is still downloading.
+fn yt_preview_path(url: &str, tier: &str) -> PathBuf {
+    let mut h = DefaultHasher::new();
+    url.hash(&mut h);
+    let key = h.finish();
+    let cache_dir = std::env::temp_dir().join("clipagent_preview_cache");
+    cache_dir.join(format!("yt_preview_{key:x}_{tier}.mp4"))
+}
+
+/// Sentinel written while a download is in flight so a second request does not
+/// spawn a duplicate yt-dlp process.
+fn yt_preview_lock_path(p: &Path) -> PathBuf {
+    p.with_extension("lock")
+}
+
+/// Legacy selector: smallest available muxed/any format. Used by the TikTok path,
+/// which only needs a throwaway 60s preview.
+const YT_PREVIEW_SELECTOR_WORST: &str =
+    "worstvideo[ext=mp4]+worstaudio[ext=m4a]/worstvideo+worstaudio/worst[ext=mp4]/worst";
+
+/// Format selector capped at `max_h` px tall, pinned to H.264 + AAC.
+/// WKWebView cannot decode VP9 or AV1, and YouTube serves those by default at most
+/// heights, so avc1/m4a is requested explicitly with progressively wider fallbacks.
+fn yt_preview_format_selector(max_h: u32) -> String {
+    format!(
+        "bestvideo[height<={h}][vcodec^=avc1]+bestaudio[ext=m4a]/\
+         bestvideo[height<={h}][vcodec^=avc1]+bestaudio/\
+         best[height<={h}][vcodec^=avc1]/best[height<={h}]/best",
+        h = max_h
+    )
+}
+
+/// Download a merged preview to `out_path`. Blocking; returns whether it succeeded.
+/// `max_secs` caps the downloaded span; `None` fetches the whole video so the entire
+/// timeline can be scrubbed.
+fn run_yt_preview_download(
+    url: &str,
+    out_path: &Path,
+    selector: &str,
+    max_secs: Option<u32>,
+) -> bool {
+    // yt-dlp appends the real container extension, so hand it a stem.
+    let stem = out_path.with_extension("");
+    let out_template = format!("{}.%(ext)s", stem.to_string_lossy());
+
+    let mut args: Vec<String> = vec![];
+    if !running_from_sandboxed_app() && !skip_browser_cookies_for_yt_dlp() {
+        args.push("--cookies-from-browser".to_string());
+        args.push(yt_dlp_cookies_browser().to_string());
+    }
+    args.extend([
+        "-f".to_string(),
+        selector.to_string(),
+        "--merge-output-format".to_string(),
+        "mp4".to_string(),
+        "--no-playlist".to_string(),
+        "--ffmpeg-location".to_string(),
+        ffmpeg_path().to_string_lossy().to_string(),
+    ]);
+    if let Some(secs) = max_secs {
+        args.push("--download-sections".to_string());
+        args.push(format!("*0-{}", secs));
+    }
+    args.push("-o".to_string());
+    args.push(out_template);
+    args.push(url.to_string());
+
+    std::process::Command::new(yt_dlp_path())
+        .args(&args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Kick off a background high-quality download for `url`. Returns immediately; the
+/// frontend polls `/yt-proxy-status` and swaps the video source once it is ready.
+/// Mirrors `start_hq_proxy_bg`, which does the same for local PCM files.
+fn start_yt_hq_bg(url: &str, max_h: u32) {
+    let out = yt_preview_path(url, "hq");
+    if out.is_file() {
+        return;
+    }
+    let lock = yt_preview_lock_path(&out);
+    if lock.is_file() {
+        return;
+    }
+    if let Some(dir) = out.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&lock, b"");
+
+    let url_owned = url.to_string();
+    std::thread::spawn(move || {
+        let out = yt_preview_path(&url_owned, "hq");
+        let selector = yt_preview_format_selector(max_h);
+        let ok = run_yt_preview_download(&url_owned, &out, &selector, None);
+        if !ok {
+            // Drop any partial file so the status endpoint never reports it ready.
+            let _ = std::fs::remove_file(&out);
+        }
+        let _ = std::fs::remove_file(yt_preview_lock_path(&out));
+    });
+}
+
 pub fn json_response(status: u16, body: String) -> Response<Body> {
     let mut res = Response::new(Body::from(body));
     *res.status_mut() = StatusCode::from_u16(status).unwrap();
@@ -606,10 +712,104 @@ pub async fn handle_http(
         return Ok(json_response(200, status_json));
     }
 
-    // yt-dlp backed preview cache for platforms where direct URL playback fails in WKWebView
-    // (TikTok CDN requires signed tokens yt-dlp knows how to obtain; WKWebView/fetch API cannot).
-    // Downloads the smallest quality clip to a temp cache file; frontend plays it via /local-preview.
+    // yt-dlp backed preview cache.
+    //
+    // Two platforms need this, for different reasons:
+    //   * TikTok  — CDN URLs require signed tokens WKWebView cannot obtain.
+    //   * YouTube — it no longer publishes muxed formats at all, so there is no single
+    //     progressive URL to stream; video and audio must be fetched and merged locally.
+    //
+    // Query params:
+    //   url   source page URL (required)
+    //   q     max height for this download; omitted = legacy "worst" (TikTok behaviour)
+    //   full  "1" downloads the whole video instead of only the first 60s, so the
+    //         entire timeline is scrubbable
+    //   hq    if set, also starts a background download at that height, collected
+    //         later via /yt-proxy-status and swapped in transparently
     if method == Method::GET && path == "/yt-preview-cache" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
+        let query = req.uri().query().unwrap_or("");
+        let mut raw_url: Option<String> = None;
+        let mut q_param: Option<u32> = None;
+        let mut hq_param: Option<u32> = None;
+        let mut full = false;
+        for part in query.split('&') {
+            let mut it = part.splitn(2, '=');
+            match it.next() {
+                Some("url") => raw_url = it.next().map(|s| s.to_string()),
+                Some("q") => q_param = it.next().and_then(|v| v.parse::<u32>().ok()),
+                Some("hq") => hq_param = it.next().and_then(|v| v.parse::<u32>().ok()),
+                Some("full") => full = it.next() == Some("1"),
+                _ => {}
+            }
+        }
+        let encoded = match raw_url {
+            Some(u) if !u.is_empty() => u,
+            _ => return Ok(json_response(400, r#"{"error":"missing_url"}"#.to_string())),
+        };
+        let original_url = match url_decode(&encoded) {
+            Ok(u) => u.into_owned(),
+            Err(_) => return Ok(text_response(400, "bad_url_encoding")),
+        };
+
+        let tier = match q_param {
+            Some(h) => h.to_string(),
+            None => "lq".to_string(),
+        };
+        let out_mp4 = yt_preview_path(&original_url, &tier);
+        if let Some(dir) = out_mp4.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+
+        // Start the background HQ fetch first so it overlaps this download rather
+        // than starting only after the low-res copy finishes.
+        if let Some(hq_h) = hq_param {
+            start_yt_hq_bg(&original_url, hq_h);
+        }
+
+        // Serve from cache when a previous run already produced a usable file.
+        if out_mp4.is_file() {
+            let sz = std::fs::metadata(&out_mp4).map(|m| m.len()).unwrap_or(0);
+            if sz > 1024 {
+                let path_str = out_mp4.to_string_lossy().to_string();
+                let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+                return Ok(json_response(200, format!(r#"{{"ok":true,"path":"{}"}}"#, escaped)));
+            }
+            let _ = std::fs::remove_file(&out_mp4);
+        }
+
+        let selector = match q_param {
+            Some(h) => yt_preview_format_selector(h),
+            None => YT_PREVIEW_SELECTOR_WORST.to_string(),
+        };
+        let max_secs = if full { None } else { Some(60) };
+        let url_for_dl = original_url.clone();
+        let out_for_dl = out_mp4.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            run_yt_preview_download(&url_for_dl, &out_for_dl, &selector, max_secs)
+        })
+        .await;
+
+        let dl_ok = result.unwrap_or(false);
+        if !dl_ok {
+            return Ok(json_response(500, r#"{"ok":false,"reason":"yt_dlp_failed"}"#.to_string()));
+        }
+        if !out_mp4.is_file() || std::fs::metadata(&out_mp4).map(|m| m.len()).unwrap_or(0) < 1024 {
+            return Ok(json_response(500, r#"{"ok":false,"reason":"output_missing_or_empty"}"#.to_string()));
+        }
+
+        let path_str = out_mp4.to_string_lossy().to_string();
+        let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+        return Ok(json_response(200, format!(r#"{{"ok":true,"path":"{}"}}"#, escaped)));
+    }
+
+    // Poll for the background high-quality preview started by start_yt_hq_bg.
+    // Returns "ready" only once the lock is gone AND the file is substantial, so the
+    // frontend never swaps to a half-written MP4.
+    if method == Method::GET && path == "/yt-proxy-status" {
         if !origin_is_allowed(&req) {
             return Ok(text_response(403, "forbidden_origin"));
         }
@@ -631,74 +831,22 @@ pub async fn handle_http(
             Err(_) => return Ok(text_response(400, "bad_url_encoding")),
         };
 
-        // Deterministic cache key from URL
-        let url_hash = {
-            let mut h = DefaultHasher::new();
-            original_url.hash(&mut h);
-            h.finish()
+        let hq = yt_preview_path(&original_url, "hq");
+        let lock = yt_preview_lock_path(&hq);
+
+        let status_json = if lock.is_file() {
+            r#"{"status":"downloading"}"#.to_string()
+        } else if hq.is_file() && std::fs::metadata(&hq).map(|m| m.len()).unwrap_or(0) > 65536 {
+            let path_str = hq.to_string_lossy().to_string();
+            let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#"{{"status":"ready","path":"{}"}}"#, escaped)
+        } else {
+            r#"{"status":"not_started"}"#.to_string()
         };
 
-        let cache_dir = std::env::temp_dir().join("clipagent_preview_cache");
-        let _ = std::fs::create_dir_all(&cache_dir);
-        // yt-dlp template: append .%(ext)s so it writes e.g. yt_preview_abc123.mp4
-        let out_base = cache_dir.join(format!("yt_preview_{:x}", url_hash));
-        let out_mp4 = cache_dir.join(format!("yt_preview_{:x}.mp4", url_hash));
-
-        // Serve from cache if already downloaded and valid
-        if out_mp4.is_file() {
-            let sz = std::fs::metadata(&out_mp4).map(|m| m.len()).unwrap_or(0);
-            if sz > 1024 {
-                let path_str = out_mp4.to_string_lossy().to_string();
-                let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
-                return Ok(json_response(200, format!(r#"{{"ok":true,"path":"{}"}}"#, escaped)));
-            }
-            // Stale/empty cache file — remove and re-download
-            let _ = std::fs::remove_file(&out_mp4);
-        }
-
-        // Run yt-dlp in a blocking thread (subprocess)
-        let ffmpeg_str = ffmpeg_path().to_string_lossy().to_string();
-        let out_template = format!("{}.%(ext)s", out_base.to_string_lossy());
-        let url_for_dl = original_url.clone();
-
-        let result = tokio::task::spawn_blocking(move || {
-            let mut args: Vec<String> = vec![];
-            if !running_from_sandboxed_app() && !skip_browser_cookies_for_yt_dlp() {
-                args.push("--cookies-from-browser".to_string());
-                args.push(yt_dlp_cookies_browser().to_string());
-            }
-            args.extend([
-                // Prefer lowest quality mp4 with audio; fallback to any format yt-dlp can get
-                "-f".to_string(),
-                "worstvideo[ext=mp4]+worstaudio[ext=m4a]/worstvideo+worstaudio/worst[ext=mp4]/worst".to_string(),
-                "--merge-output-format".to_string(), "mp4".to_string(),
-                // Cap to first 60s so preview downloads quickly even for long videos
-                "--download-sections".to_string(), "*0-60".to_string(),
-                "--no-playlist".to_string(),
-                "--ffmpeg-location".to_string(), ffmpeg_str,
-                "-o".to_string(), out_template,
-                url_for_dl,
-            ]);
-
-            std::process::Command::new(yt_dlp_path())
-                .args(&args)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }).await;
-
-        let dl_ok = result.unwrap_or(false);
-        if !dl_ok {
-            return Ok(json_response(500, r#"{"ok":false,"reason":"yt_dlp_failed"}"#.to_string()));
-        }
-        if !out_mp4.is_file() || std::fs::metadata(&out_mp4).map(|m| m.len()).unwrap_or(0) < 1024 {
-            return Ok(json_response(500, r#"{"ok":false,"reason":"output_missing_or_empty"}"#.to_string()));
-        }
-
-        let path_str = out_mp4.to_string_lossy().to_string();
-        let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
-        return Ok(json_response(200, format!(r#"{{"ok":true,"path":"{}"}}"#, escaped)));
+        return Ok(json_response(200, status_json));
     }
+
 
     if method == Method::GET && path == "/resolve" {
         if !origin_is_allowed(&req) {

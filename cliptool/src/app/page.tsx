@@ -365,6 +365,9 @@ useEffect(() => {
   /** Path to the smooth HQ proxy (720p H.264) generated in background for PCM local files.
    *  Null while encoding; set when /local-proxy-status reports "ready". */
   const [pcmHqProxyUrl, setPcmHqProxyUrl] = useState<string | null>(null);
+  /** Path to the background 720p preview for DASH-only sources (YouTube). Null until
+   *  /yt-proxy-status reports "ready"; then the player swaps up from the 360p copy. */
+  const [ytHqPreviewPath, setYtHqPreviewPath] = useState<string | null>(null);
   // Remove resolveRequestId state, use ref instead for request tracking
   const resolveReqRef = useRef(0);
   const pendingSeekRef = useRef<number | null>(null);
@@ -735,6 +738,8 @@ function readPendingReservation(): number {
         duration: Number(duration) || 0,
         thumbnail: null,
         previewUrl: previewUrlForVideo,
+        // Local files are served straight from disk; nothing to merge.
+        requiresLocalPreview: false,
         capabilities: {
           fastMaxHeight: 1080,
           trueMaxHeight: 1080,
@@ -773,31 +778,78 @@ function readPendingReservation(): number {
     // Reset yt preview state whenever the resolved video changes
     setYtPreviewPath(null);
     setYtPreviewLoading(false);
+    setYtHqPreviewPath(null);
 
     if (!resolvedUrl || !videoData || !isTauri) return;
-    // Only TikTok needs this; other platforms either work via proxy or HLS natively
-    const needsYtPreview =
+
+    // TikTok: CDN URLs can't be fetched by WKWebView, so a throwaway low-res copy is enough.
+    const isTikTok =
       resolvedUrl.includes("tiktok.com") || resolvedUrl.includes("tiktokcdn.com");
-    if (!needsYtPreview) return;
+    // DASH-only sources (YouTube): no muxed format exists, so the preview must be merged
+    // locally. Fetch 360p first so playback starts quickly, and kick off a 720p download
+    // in the background that gets swapped in when ready.
+    const needsLocalPreview = Boolean(videoData.requiresLocalPreview);
+    if (!isTikTok && !needsLocalPreview) return;
+
+    const params = isTikTok
+      ? `url=${encodeURIComponent(resolvedUrl)}`
+      : `url=${encodeURIComponent(resolvedUrl)}&q=360&full=1&hq=720`;
 
     setYtPreviewLoading(true);
-    fetch(`${CLIPAGENT_HTTP}/yt-preview-cache?url=${encodeURIComponent(resolvedUrl)}`)
+    fetch(`${CLIPAGENT_HTTP}/yt-preview-cache?${params}`)
       .then((r) => r.json())
       .then((data: any) => {
         if (data?.ok && data?.path) {
           setYtPreviewPath(data.path as string);
         } else {
-          console.warn("[TikTok preview] yt-preview-cache failed:", data);
+          console.warn("[local preview] yt-preview-cache failed:", data);
           setYtPreviewPath(null);
         }
       })
       .catch((e) => {
-        console.warn("[TikTok preview] fetch error:", e);
+        console.warn("[local preview] fetch error:", e);
         setYtPreviewPath(null);
       })
       .finally(() => setYtPreviewLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedUrl, videoData?.id]);
+
+  // Background 720p preview polling for DASH-only sources (YouTube). The 360p copy is
+  // already playing; when the higher-quality download finishes, swap the source up.
+  // VideoViewport preserves currentTime across a src change, so scrubbing is unaffected.
+  useEffect(() => {
+    setYtHqPreviewPath(null);
+    if (!resolvedUrl || !isTauri) return;
+    if (!videoData?.requiresLocalPreview) return;
+
+    let active = true;
+    let intervalId: number | null = null;
+
+    const check = async () => {
+      if (!active) return;
+      try {
+        const res = await fetch(
+          `${CLIPAGENT_HTTP}/yt-proxy-status?url=${encodeURIComponent(resolvedUrl)}`
+        );
+        const data = (await res.json()) as { status: string; path?: string };
+        if (!active) return;
+        if (data.status === "ready" && data.path) {
+          setYtHqPreviewPath(data.path);
+          if (intervalId !== null) clearInterval(intervalId);
+        }
+      } catch {
+        // Transient polling errors are ignored; the next tick retries.
+      }
+    };
+
+    check();
+    intervalId = window.setInterval(check, 4000);
+    return () => {
+      active = false;
+      if (intervalId !== null) clearInterval(intervalId);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedUrl, videoData?.id, videoData?.requiresLocalPreview]);
 
   // Background HQ proxy polling: after a PCM local file loads (stream-copy phase 1 may lag
   // on large ProRes/DNxHD files), the backend encodes a smooth 720p H.264 proxy in a
@@ -1855,12 +1907,15 @@ useEffect(() => {
 
                   if (!isRemote || isAlreadyLocal) return videoData.previewUrl;
 
-                  // TikTok: use locally-cached yt-dlp preview (CDN URLs fail in WKWebView)
+                  // TikTok, and DASH-only sources like YouTube, play from a locally
+                  // merged copy. For the latter the 720p background download replaces
+                  // the initial 360p one as soon as it is ready.
                   const isTikTok =
                     resolvedUrl?.includes("tiktok.com") || resolvedUrl?.includes("tiktokcdn.com");
-                  if (isTikTok) {
-                    if (!ytPreviewPath) return null; // loading or failed → VideoViewport shows placeholder
-                    return `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(ytPreviewPath)}`;
+                  if (isTikTok || videoData.requiresLocalPreview) {
+                    const path = ytHqPreviewPath ?? ytPreviewPath;
+                    if (!path) return null; // loading or failed → VideoViewport shows placeholder
+                    return `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(path)}`;
                   }
 
                   // HLS: WKWebView handles .m3u8 natively; proxying breaks segment resolution

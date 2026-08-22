@@ -22,6 +22,9 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
     }
   };
   const pendingSeekRef = useRef<number | null>(null);
+  /** Last observed playback position, used to resume in place when `src` is swapped
+   *  (e.g. a low-res preview being upgraded to the 720p copy). */
+  const lastTimeRef = useRef(0);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -109,6 +112,22 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
     setPreviewError(null);
   }, [src, videoKey]);
 
+  // A new video was loaded — forget the previous one's playback position.
+  useEffect(() => {
+    lastTimeRef.current = 0;
+    pendingSeekRef.current = null;
+  }, [videoKey]);
+
+  // The source changed for the *same* video (quality upgrade). The element reloads at
+  // 0, and the seek effect below won't fire because `currentTime` hasn't changed, so
+  // queue the resume explicitly; onLoadedMetadata applies it.
+  useEffect(() => {
+    if (lastTimeRef.current > 0.05) {
+      pendingSeekRef.current = lastTimeRef.current;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [src]);
+
   useEffect(() => {
     const v = videoRef.current;
     if (!v || currentTime == null) return;
@@ -167,7 +186,11 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
             e.stopPropagation();
             togglePlay();
           }}
-          onTimeUpdate={() => onTimeUpdate?.(videoRef.current?.currentTime ?? 0)}
+          onTimeUpdate={() => {
+            const t = videoRef.current?.currentTime ?? 0;
+            if (t > 0) lastTimeRef.current = t;
+            onTimeUpdate?.(t);
+          }}
           onLoadedMetadata={() => {
             const v = videoRef.current;
             if (!v) return;
