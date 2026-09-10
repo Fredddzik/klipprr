@@ -292,7 +292,12 @@ fn start_hq_proxy_bg(file_path: &Path) {
     let _ = std::fs::write(&lock, b"");
 
     let in_str = file_path.to_string_lossy().into_owned();
-    let out_str = hq.to_string_lossy().into_owned();
+    // Encode to a scratch name and rename on success. A rename is atomic, so the cache
+    // path only ever exists as a finished, playable file — even if the process is killed
+    // mid-encode, or a lock is lost, no reader can be handed a half-written proxy.
+    let final_path = hq.clone();
+    let tmp_path = hq.with_extension("partial.mp4");
+    let out_str = tmp_path.to_string_lossy().into_owned();
     let lock_str = lock.to_string_lossy().into_owned();
     let ffmpeg = ffmpeg_path();
 
@@ -343,10 +348,12 @@ fn start_hq_proxy_bg(file_path: &Path) {
             .map(|s| s.success())
             .unwrap_or(false);
 
-        if !ok {
-            // FFmpeg failed: remove any partial output so /local-proxy-status never
-            // reports "ready" for an invalid/incomplete file.
-            let _ = std::fs::remove_file(&out_str);
+        if ok && tmp_path.is_file() {
+            let _ = std::fs::rename(&tmp_path, &final_path);
+        } else {
+            // FFmpeg failed: drop the scratch file so nothing can ever report "ready" for
+            // an invalid or incomplete encode.
+            let _ = std::fs::remove_file(&tmp_path);
         }
         // Always remove the lock so a retry is possible on the next load.
         let _ = std::fs::remove_file(&lock_str);
@@ -468,8 +475,13 @@ fn resolve_local_preview_path(decoded: &str, force_pcm_fix: bool) -> Result<Path
         let p = Path::new(decoded);
         if p.is_file() && needs_pcm_preview_fix(p) {
             let hq = hq_proxy_path(p);
-            let hq_ready =
-                hq.is_file() && std::fs::metadata(&hq).map(|m| m.len()).unwrap_or(0) > 1024;
+            // The lock has to be checked first, exactly as /local-proxy-status does. While
+            // ffmpeg is writing, the output already exists and is enormous — a 2.6 GB
+            // source is hundreds of megabytes in within seconds — but has no moov atom
+            // yet, so the video element cannot parse it and fails. Size proves nothing.
+            let hq_ready = !lock_is_active(&hq_proxy_lock_path(&hq))
+                && hq.is_file()
+                && std::fs::metadata(&hq).map(|m| m.len()).unwrap_or(0) > 1024;
 
             if hq_ready {
                 // Best path: the whole-file proxy exists, so every seek is local and cheap.
