@@ -209,3 +209,57 @@ small paid desktop app does not want.
 - The **"AV1 – Original"** export label is wrong and tells users their export may not play.
   It reads as a broken product when it is a naming bug (`AUDIT` B12).
 - The repository is **388 MB** and grows 37 MB every week automatically (`AUDIT` A1).
+
+---
+
+## FR-6 — Large local recordings: whole file loads, seeking takes 30s
+
+**Asked:** *"cutting clips from a large raw recording from my client (Linear PCM, H.264,
+HD, 2.6 GB). The preview loads the whole massive file, and skipping 3 minutes into the
+video takes 30 seconds."*
+
+**Actual cause — two problems, only one of them the obvious one.**
+
+*The stall was a race, not a seek.* Local files with PCM/ALAC/FLAC audio go through a
+"pcm fix" that remuxes the source into a playable MP4. That remux had no lock, and its only
+readiness check was "does the output file exist". ffmpeg creates the output immediately and
+writes the index (`moov` atom) **last**, so one second in the file existed at 304 MB and was
+completely unparseable. The `<video>` element opens several range requests at once, so a
+second request was handed that unplayable file, could not read the index, and stalled until
+the remux finished and it happened to retry. Reproduced exactly: `moov atom not found`.
+
+*The whole-file read was waste.* The fix remuxed all 2.6 GB just to re-encode the audio
+track, and the background 720p proxy then re-read the same 2.6 GB. Two full passes before
+the file was comfortably scrubbable.
+
+**Fixed (2026-09-10):**
+
+- **Head proxy first.** Only the opening 30 s is prepared up front, so playback starts
+  almost immediately. It is built to a scratch name and renamed into place — a rename is
+  atomic, so the cache path only ever exists as a complete, playable file. A concurrent
+  request waits on a lock instead of being handed a partial.
+- **No pointless re-encode.** If the source video is already H.264 — every screen recorder,
+  most cameras, this client file — the proxy stream-copies the video and only fixes the
+  audio. That keeps the **original resolution** (previously the background proxy dropped
+  previews to 720p) and finishes several times faster. The 720p re-encode is now reserved
+  for sources the webview genuinely cannot play, like ProRes and DNxHD.
+- **Head length adapts:** 30 s when the full proxy is seconds away (stream copy), 120 s
+  when it is a slow re-encode.
+- **Sequential, not concurrent.** Overlapping the two ffmpeg passes made them fight for
+  disk; on a 40 Mbps source that pushed the first frame from ~1 s out to ~12 s.
+- `/local-preview` moved off the async executor — it ran ffmpeg inline, so concurrent range
+  requests each tied up a worker.
+
+Measured on a 1.1 GB / 4 min / 39 Mbps H.264 + Linear PCM file, cold cache:
+
+| | Before | After |
+|---|---|---|
+| First frame | full remux, then a stalled retry | **0.63 s** |
+| Whole file scrubbable | ~30 s, racing | **4.7 s** |
+| Seek to 3:00 | ~30 s | **0.002 s** |
+| Preview resolution | dropped to 720p | **stays 1080p** |
+
+Their 2.6 GB file should see the same first-frame time (the head is bounded by duration,
+not file size) and roughly 11 s to fully scrubbable.
+
+**Status:** `done`, pending founder verification on the real client file.

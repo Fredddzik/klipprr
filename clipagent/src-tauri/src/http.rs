@@ -116,36 +116,129 @@ fn file_cache_key(file_path: &Path) -> u64 {
     hasher.finish()
 }
 
-fn make_pcm_fixed_preview(file_path: &Path) -> Option<PathBuf> {
-    let key = file_cache_key(file_path);
+/// How much of the file the head proxy covers, chosen against how long the full proxy
+/// will take to arrive. When the video can be stream-copied the full proxy is seconds
+/// away, so a short head is enough to bridge the gap and is ready almost instantly. A
+/// re-encode (ProRes, DNxHD) can take minutes, so the head has to carry the user longer.
+fn head_proxy_seconds(copy_video: bool) -> u32 {
+    if copy_video { 30 } else { 120 }
+}
 
-    let mut cache_dir = std::env::temp_dir();
-    cache_dir.push("clipagent_preview_cache");
-    let _ = std::fs::create_dir_all(&cache_dir);
-    // Phase 1: stream-copy video, re-encode audio → fast, loads immediately.
-    let out_path = cache_dir.join(format!("local_preview_pcmfix_{key:x}.mp4"));
-    if out_path.is_file() {
+/// True when the source's video stream is something the webview can decode as-is, so the
+/// proxy only has to fix the audio and can stream-copy the video. H.264 covers camera and
+/// screen-recorder output; ProRes/DNxHD and friends genuinely need a re-encode.
+fn source_video_is_playable(file_path: &Path) -> bool {
+    let path_str = file_path.to_string_lossy().to_string();
+    let out = std::process::Command::new(ffprobe_path())
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path_str.as_str(),
+        ])
+        .output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().eq_ignore_ascii_case("h264"),
+        Err(_) => false,
+    }
+}
+
+fn head_proxy_path(file_path: &Path) -> PathBuf {
+    let key = file_cache_key(file_path);
+    let cache_dir = std::env::temp_dir().join("clipagent_preview_cache");
+    cache_dir.join(format!("local_preview_head_{key:x}.mp4"))
+}
+
+/// Build (or wait for) the head proxy: the first `HEAD_PROXY_SECONDS` of the source with
+/// playable audio, so the viewport has something real within about a second.
+///
+/// Two things this must never do, both of which the previous full-file remux did:
+///
+///  * **Serve a partially written file.** ffmpeg creates the output immediately and only
+///    writes the index at the end, so "the file exists" means nothing. A concurrent range
+///    request — and the video element always makes several — was handed a file with no
+///    moov atom, could not parse it, and stalled until the whole remux finished and it
+///    happened to retry. That was the reported "seeking takes 30 seconds".
+///  * **Read the entire source.** Remuxing 2.6 GB just to fix the audio track costs
+///    seconds of pure I/O before the first frame, and the full proxy re-reads it anyway.
+fn ensure_head_proxy(file_path: &Path) -> Option<PathBuf> {
+    let out_path = head_proxy_path(file_path);
+    let lock = out_path.with_extension("lock");
+    if let Some(dir) = out_path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    // Another request is already building it. Wait for that one rather than starting a
+    // second ffmpeg over the same source or, worse, serving its half-written output.
+    if lock_is_active(&lock) {
+        for _ in 0..600 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if !lock.is_file() {
+                break;
+            }
+        }
+    }
+    if out_path.is_file() && !lock.is_file() {
         return Some(out_path);
     }
 
+    let _ = std::fs::write(&lock, b"");
+    // Write to a scratch name and rename on success: a rename is atomic, so the cache
+    // path only ever exists as a complete, playable file.
+    let tmp_path = out_path.with_extension("partial.mp4");
     let in_str = file_path.to_string_lossy().to_string();
-    let out_str = out_path.to_string_lossy().to_string();
-    let status = std::process::Command::new(ffmpeg_path())
-        .args([
-            "-y",
-            "-i", in_str.as_str(),
-            "-map", "0:v:0",
-            "-map", "0:a:0?",
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-movflags", "+faststart",
-            out_str.as_str(),
-        ])
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
+    let tmp_str = tmp_path.to_string_lossy().to_string();
+    let copy_video = source_video_is_playable(file_path);
+    let secs = head_proxy_seconds(copy_video).to_string();
+
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-i".into(), in_str,
+        "-t".into(), secs,
+        "-map".into(), "0:v:0".into(),
+        "-map".into(), "0:a:0?".into(),
+    ];
+    if copy_video {
+        // Already H.264 — copying keeps the source resolution and costs well under a second.
+        args.extend(["-c:v".to_string(), "copy".to_string()]);
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            args.extend(["-vf".to_string(), "scale=-2:720".to_string()]);
+            args.extend(["-c:v".to_string(), "h264_videotoolbox".to_string()]);
+            args.extend(download::videotoolbox_speed_args().iter().map(|s| s.to_string()));
+            args.extend(["-b:v".to_string(), "6M".to_string()]);
+            args.extend(["-pix_fmt".to_string(), "yuv420p".to_string()]);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            args.extend(["-vf".to_string(), "scale=-2:720".to_string()]);
+            args.extend(["-c:v".to_string(), "libx264".to_string()]);
+            args.extend(["-preset".to_string(), "ultrafast".to_string()]);
+            args.extend(["-b:v".to_string(), "6M".to_string()]);
+            args.extend(["-pix_fmt".to_string(), "yuv420p".to_string()]);
+        }
     }
+    args.extend([
+        "-c:a".to_string(), "aac".to_string(),
+        "-movflags".to_string(), "+faststart".to_string(),
+        tmp_str,
+    ]);
+
+    let ok = std::process::Command::new(ffmpeg_path())
+        .args(&args)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if ok && tmp_path.is_file() {
+        let _ = std::fs::rename(&tmp_path, &out_path);
+    } else {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    let _ = std::fs::remove_file(&lock);
+
     if out_path.is_file() { Some(out_path) } else { None }
 }
 
@@ -203,42 +296,42 @@ fn start_hq_proxy_bg(file_path: &Path) {
     let lock_str = lock.to_string_lossy().into_owned();
     let ffmpeg = ffmpeg_path();
 
-    std::thread::spawn(move || {
-        // Hardware-accelerated H.264 on macOS; libx264 ultrafast elsewhere.
-        // Scale down to at most 1280 px wide (720-ish), keep aspect ratio.
-        // This turns a 10 GB ProRes 4K file into a ~300 MB scrub-friendly proxy.
-        // Built from a capability probe rather than hard-coded: -power_efficient only
-        // exists from ffmpeg 6.1, and an unknown option aborts the entire command.
-        #[cfg(target_os = "macos")]
-        let vcodec_args: Vec<&str> = {
-            let mut a = vec!["-c:v", "h264_videotoolbox"];
-            a.extend(download::videotoolbox_speed_args());
-            a.extend(["-b:v", "4M"]);
-            a
-        };
-        #[cfg(not(target_os = "macos"))]
-        let vcodec_args: &[&str] = &[
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-b:v", "4M",
-        ];
+    let copy_video = source_video_is_playable(file_path);
 
+    std::thread::spawn(move || {
         let mut args: Vec<&str> = vec![
             "-y",
             "-i", &in_str,
             "-map", "0:v:0",
             "-map", "0:a:0?",
-            // Scale to at most 720p tall; -2 keeps the width divisible-by-2.
-            // Avoid shell-style quoting (single quotes) — Command::new passes args
-            // directly without a shell, so they would be passed literally to FFmpeg.
-            // `scale=-2:720` is unambiguous and sufficient for a preview proxy.
-            "-vf", "scale=-2:720",
         ];
-        // iter().copied() rather than extend_from_slice: the macOS branch is a Vec built
-        // from a capability probe, the others are a static slice.
+
+        // Re-encoding is only worth it when the webview cannot play the source video at
+        // all (ProRes, DNxHD, a 10 GB 4K master). When the source is already H.264 —
+        // every screen recorder and most cameras — copying the video keeps the original
+        // resolution, finishes several times faster, and is just as scrubbable, because
+        // what makes a file scrub badly is the codec, not its size.
+        #[cfg(target_os = "macos")]
+        let vcodec_args: Vec<&str> = if copy_video {
+            vec!["-c:v", "copy"]
+        } else {
+            // Built from a capability probe rather than hard-coded: -power_efficient only
+            // exists from ffmpeg 6.1, and an unknown option aborts the entire command.
+            let mut a = vec!["-vf", "scale=-2:720", "-c:v", "h264_videotoolbox"];
+            a.extend(download::videotoolbox_speed_args());
+            a.extend(["-b:v", "4M", "-pix_fmt", "yuv420p"]);
+            a
+        };
+        #[cfg(not(target_os = "macos"))]
+        let vcodec_args: Vec<&str> = if copy_video {
+            vec!["-c:v", "copy"]
+        } else {
+            vec!["-vf", "scale=-2:720", "-c:v", "libx264", "-preset", "ultrafast",
+                 "-b:v", "4M", "-pix_fmt", "yuv420p"]
+        };
+
         args.extend(vcodec_args.iter().copied());
         args.extend_from_slice(&[
-            "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-movflags", "+faststart",
             &out_str,
@@ -366,6 +459,44 @@ fn start_yt_hq_bg(url: &str, max_h: u32) {
     });
 }
 
+
+/// Resolve which file `/local-preview` should actually stream: the whole-file proxy when
+/// it exists, otherwise a freshly built head. Blocking — call it from spawn_blocking.
+fn resolve_local_preview_path(decoded: &str, force_pcm_fix: bool) -> Result<PathBuf, String> {
+    let mut resolved_path = PathBuf::from(decoded);
+    if force_pcm_fix {
+        let p = Path::new(decoded);
+        if p.is_file() && needs_pcm_preview_fix(p) {
+            let hq = hq_proxy_path(p);
+            let hq_ready =
+                hq.is_file() && std::fs::metadata(&hq).map(|m| m.len()).unwrap_or(0) > 1024;
+
+            if hq_ready {
+                // Best path: the whole-file proxy exists, so every seek is local and cheap.
+                resolved_path = hq;
+            } else {
+                // Head first, then the full proxy. Overlapping them means two ffmpeg
+                // processes writing gigabytes to the same disk at once; on a 40 Mbps
+                // source that contention pushed the first frame from ~1s out to ~12s.
+                //
+                // The timeline still spans the whole source — its duration comes from
+                // ffprobe on the original, not from this file — so scrubbing past the
+                // head just waits for the full proxy to land.
+                match ensure_head_proxy(p) {
+                    Some(head) => {
+                        resolved_path = head;
+                        start_hq_proxy_bg(p);
+                    }
+                    None => {
+                        return Err("pcm_fix_failed: ffmpeg could not build a preview-safe copy of this file. This usually means the container/streams are unusual or the file is partially corrupted.".to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(resolved_path)
+}
+
 pub fn json_response(status: u16, body: String) -> Response<Body> {
     let mut res = Response::new(Body::from(body));
     *res.status_mut() = StatusCode::from_u16(status).unwrap();
@@ -439,36 +570,20 @@ pub async fn handle_http(
             }
         }
 
-        let mut resolved_path = PathBuf::from(&decoded);
-        if force_pcm_fix {
-            let p = Path::new(&decoded);
-            if p.is_file() && needs_pcm_preview_fix(p) {
-                // Check if the smooth HQ proxy already exists (from a prior background encode).
-                let hq = hq_proxy_path(p);
-                let hq_ready = hq.is_file()
-                    && std::fs::metadata(&hq).map(|m| m.len()).unwrap_or(0) > 1024;
+        // ffprobe and ffmpeg below block for seconds. The video element opens several
+        // range requests at once, so doing this inline would tie up one tokio worker per
+        // request and stall every other endpoint until they finished.
+        let decoded_for_fix = decoded.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            resolve_local_preview_path(&decoded_for_fix, force_pcm_fix)
+        })
+        .await
+        .unwrap_or_else(|_| Err("preview_resolution_panicked".to_string()));
 
-                if hq_ready {
-                    // Best path: serve the fully re-encoded, scrub-friendly proxy directly.
-                    resolved_path = hq;
-                } else {
-                    // Phase 1: stream-copy video + AAC audio → immediate playback (may lag on
-                    // large ProRes/DNxHD files).
-                    if let Some(converted) = make_pcm_fixed_preview(p) {
-                        resolved_path = converted;
-                    } else {
-                        return Ok(text_response(
-                            500,
-                            "pcm_fix_failed: ffmpeg could not create a preview-safe file (attempted -c:v copy -c:a aac). This usually means the container/streams are unusual or the file is partially corrupted.",
-                        ));
-                    }
-                    // Phase 2 (async): kick off a background 720p H.264 re-encode so future
-                    // seeks are smooth. The frontend polls /local-proxy-status and swaps the src
-                    // once ready, without requiring a manual reload.
-                    start_hq_proxy_bg(p);
-                }
-            }
-        }
+        let resolved_path = match resolved {
+            Ok(p) => p,
+            Err(msg) => return Ok(text_response(500, &msg)),
+        };
 
         let file_path = resolved_path.as_path();
         if !file_path.is_file() {
