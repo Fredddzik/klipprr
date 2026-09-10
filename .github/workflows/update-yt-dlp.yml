@@ -64,19 +64,21 @@ jobs:
           fi
           echo "skip=false" >> $GITHUB_OUTPUT
 
-      - name: Download and replace yt-dlp
+      # Bump the pinned version only. The binary itself is fetched at build time and is
+      # not committed — committing it weekly is what grew .git to 388 MB.
+      - name: Bump pinned yt-dlp version
         if: steps.skip.outputs.skip != 'true'
         run: |
-          URL="${{ steps.ytdlp.outputs.download_url }}"
-          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            echo "Could not get yt-dlp_macos download URL"
-            exit 1
-          fi
-          mkdir -p clipagent/src-tauri/bin
-          curl -sL -o clipagent/src-tauri/bin/yt-dlp "$URL"
-          chmod +x clipagent/src-tauri/bin/yt-dlp
-          echo "${{ steps.ytdlp.outputs.tag_name }}" > clipagent/src-tauri/bin/yt-dlp.version
-          ./clipagent/src-tauri/bin/yt-dlp --version || true
+          LOCK="clipagent/src-tauri/tools.lock"
+          NEW="${{ steps.ytdlp.outputs.tag_name }}"
+          sed -i '' "s/^YT_DLP_VERSION=.*/YT_DLP_VERSION=$NEW/" "$LOCK"
+          grep -E '^YT_DLP_VERSION=' "$LOCK"
+
+      # Prove the pinned release actually exists and its checksum verifies before we
+      # commit a version that would break every subsequent build.
+      - name: Verify the pinned version downloads and checksums
+        if: steps.skip.outputs.skip != 'true'
+        run: ./scripts/fetch-yt-dlp.sh macos
 
       - name: Bump app version (patch)
         if: steps.skip.outputs.skip != 'true'
@@ -100,7 +102,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add clipagent/src-tauri/bin/yt-dlp clipagent/src-tauri/bin/yt-dlp.version \
+          git add clipagent/src-tauri/tools.lock \
             clipagent/src-tauri/tauri.conf.json clipagent/src-tauri/Cargo.toml
           git diff --staged --quiet && exit 0 || true
           git commit -m "chore: update yt-dlp to ${{ steps.ytdlp.outputs.tag_name }} [skip ci]"

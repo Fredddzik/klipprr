@@ -1,0 +1,18 @@
+# Pinned versions of the binaries bundled into the app.
+#
+# yt-dlp is NOT committed to the repository. It changes every week (extraction breaks
+# constantly upstream), and committing a 37 MB binary weekly grew .git by ~350 MB before
+# this file existed. It is fetched at build time by scripts/fetch-yt-dlp.sh and verified
+# against the checksums yt-dlp publishes for that exact release.
+#
+# To bump: change the version here. .github/workflows/update-yt-dlp.yml does this
+# automatically once a week and opens the change as a normal commit — a one-line diff
+# instead of a binary blob.
+YT_DLP_VERSION=2026.08.19
+
+# ffmpeg and ffprobe ARE still committed in bin/. They are static, were added once, and
+# have never been updated, so they cost ~150 MB of history that does not grow. Moving them
+# out needs somewhere to host them; see docs/AUDIT-2026-09.md (A1, A5).
+#
+# Known issue: the committed macOS binaries are x86_64 while the app ships arm64-only, so
+# they run under Rosetta 2 and cannot run at all on a Mac without it. Also tracked in A5.

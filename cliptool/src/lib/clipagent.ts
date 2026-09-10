@@ -109,6 +109,10 @@ export interface ResolveResponse {
     /** Set when the source has no muxed format (YouTube is DASH-only as of 2026) and
      *  the preview must be merged locally via /yt-preview-cache instead of streamed. */
     requires_local_preview?: boolean;
+    /** Height of a locally merged preview worth fetching in the background, or 0 when
+     *  `url` already is the best preview the source offers. Non-zero on YouTube, whose
+     *  only muxed rendition is 360p while separate H.264 streams reach 720p+. */
+    local_upgrade_height?: number;
   };
   best?: { url: string };
   /** Local-only diagnostic: detected audio codec from ffprobe (e.g. pcm_s16le, lpcm). */
@@ -131,6 +135,9 @@ export interface ResolvedVideo {
   /** True when previewUrl is empty because no directly playable format exists and the
    *  preview has to be built locally. */
   requiresLocalPreview: boolean;
+  /** Height to fetch a better preview at in the background, or 0 when previewUrl is
+   *  already the best available. */
+  localUpgradeHeight: number;
   capabilities: {
     fastMaxHeight: number;
     trueMaxHeight: number;
@@ -146,6 +153,7 @@ function normalizeResolve(raw: ResolveResponse): ResolvedVideo | null {
     null;
 
   const requiresLocalPreview = Boolean(raw.preview?.requires_local_preview);
+  const localUpgradeHeight = Number(raw.preview?.local_upgrade_height ?? 0) || 0;
 
   // An empty preview URL is expected when the source is DASH-only: the app builds a
   // merged preview locally instead. Only bail out when there is no fallback either.
@@ -167,6 +175,7 @@ function normalizeResolve(raw: ResolveResponse): ResolvedVideo | null {
     thumbnail: raw.thumbnail ? String(raw.thumbnail) : null,
     previewUrl: previewUrl ? String(previewUrl) : "",
     requiresLocalPreview,
+    localUpgradeHeight,
     capabilities: caps,
     raw,
   };
@@ -178,7 +187,10 @@ export async function resolveVideo(url: string): Promise<AgentResult<ResolvedVid
     const base = CLIPAGENT_HTTP;
     const res = await fetchWithTimeout(
       `${base}/resolve?url=${encodeURIComponent(url)}`,
-      { method: "GET", timeoutMs: 20000 }
+      // A cookie-less YouTube resolve enumerates every client's formats and regularly
+      // takes 15-20s on its own. At the old 20s budget those aborted and were reported as
+      // "ClipAgent is offline", which sent people looking in entirely the wrong place.
+      { method: "GET", timeoutMs: 45000 }
     );
 
     const status = res.status;

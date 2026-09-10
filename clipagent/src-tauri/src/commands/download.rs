@@ -36,21 +36,59 @@ fn watermark_path_for_export(export_stamp: u128) -> Result<PathBuf, String> {
     Ok(temp)
 }
 
+/// Which optional `h264_videotoolbox` tuning options the bundled ffmpeg understands.
+///
+/// These options were added in different ffmpeg releases (`-prio_speed` in 6.0,
+/// `-power_efficient` in 6.1). Passing one the binary does not know is not a warning — it
+/// aborts the whole command with "Error splitting the argument list: Option not found",
+/// so a hard-coded list turns every macOS export into a failure the moment the bundled
+/// ffmpeg is swapped for an older build. Ask the binary instead of assuming.
+#[cfg(target_os = "macos")]
+fn videotoolbox_supported_options() -> &'static (bool, bool) {
+    static SUPPORTED: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    SUPPORTED.get_or_init(|| {
+        let help = std::process::Command::new(ffmpeg_path())
+            .args(["-hide_banner", "-h", "encoder=h264_videotoolbox"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let prio = help.contains("-prio_speed");
+        let power = help.contains("-power_efficient");
+        log_to_file(&format!(
+            "[FFMPEG] videotoolbox options: prio_speed={} power_efficient={}",
+            prio, power
+        ));
+        (prio, power)
+    })
+}
+
+/// The subset of `-prio_speed` / `-power_efficient` this ffmpeg actually accepts, ready to
+/// splice into a videotoolbox command line. Shared with the preview proxy encoder in http.rs.
+#[cfg(target_os = "macos")]
+pub fn videotoolbox_speed_args() -> Vec<&'static str> {
+    let (prio, power) = *videotoolbox_supported_options();
+    let mut args: Vec<&'static str> = Vec::new();
+    if prio {
+        args.extend(["-prio_speed", "1"]);
+    }
+    if power {
+        args.extend(["-power_efficient", "0"]);
+    }
+    args
+}
+
 /// Full H.264 encoder args tuned for speed on the target platform.
 /// macOS: h264_videotoolbox with power/speed hints that default to "auto" on battery
 /// and can cap throughput at real-time; forcing prio_speed=1 and power_efficient=0 lifts
-/// the cap to 5–15x realtime on Apple Silicon.
+/// the cap to 5–15x realtime on Apple Silicon. Both hints are optional — see above.
 /// Windows/Linux: libx264 with veryfast preset.
 fn h264_encoder_args() -> Vec<&'static str> {
     #[cfg(target_os = "macos")]
     {
-        vec![
-            "-c:v", "h264_videotoolbox",
-            "-prio_speed", "1",
-            "-power_efficient", "0",
-            "-pix_fmt", "yuv420p",
-            "-b:v", "6M",
-        ]
+        let mut args = vec!["-c:v", "h264_videotoolbox"];
+        args.extend(videotoolbox_speed_args());
+        args.extend(["-pix_fmt", "yuv420p", "-b:v", "6M"]);
+        args
     }
     #[cfg(not(target_os = "macos"))]
     {

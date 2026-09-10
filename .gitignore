@@ -20,3 +20,13 @@ src-tauri/target
 .vercel
 .claude/
 .cursor/
+
+# Fetched at build time, pinned in clipagent/src-tauri/tools.lock (scripts/fetch-yt-dlp.sh).
+# Committing this weekly is what grew .git to 388 MB.
+clipagent/src-tauri/bin/yt-dlp
+clipagent/src-tauri/bin/yt-dlp.exe
+clipagent/src-tauri/bin/yt-dlp.version
+
+# Build output of cliptool, produced by `npm run build`. Committing it made every UI
+# change a 20-file diff of minified JS and hashed fonts.
+clipagent/ui/out/

@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 use urlencoding::decode;
 
-use crate::paths::{running_from_sandboxed_app, skip_browser_cookies_for_yt_dlp, yt_dlp_path, yt_dlp_cookies_browser};
+use crate::paths::{ffprobe_path, running_from_sandboxed_app, skip_browser_cookies_for_yt_dlp, yt_dlp_path, yt_dlp_cookies_browser};
 
 fn log_to_file(msg: &str) {
     if let Some(mut dir) = dirs::home_dir() {
@@ -21,6 +21,50 @@ fn log_to_file(msg: &str) {
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&fallback) {
             let _ = writeln!(file, "{}", msg);
         }
+    }
+}
+
+/// True when the format carries an H.264 video stream. WKWebView can only decode H.264,
+/// so VP9 and AV1 renditions are useless both for preview and for a stream-copy export.
+fn is_h264(f: &Value) -> bool {
+    f["vcodec"]
+        .as_str()
+        // avc1 (YouTube/Twitch clips), h264 (TikTok, some HLS streams)
+        .map(|v| v.starts_with("avc1") || v == "h264")
+        .unwrap_or(false)
+}
+
+/// Cheap validity check for a directly streamable preview URL.
+///
+/// YouTube's one remaining muxed rendition (itag 18) is served inconsistently: it
+/// sometimes answers with an empty body, and sometimes with a header that advertises the
+/// full duration but carries no decodable frames — the "black screen with correct
+/// duration" symptom. Both look identical to resolve, and identical to a healthy URL,
+/// until something actually decodes them.
+///
+/// ffprobe reads only as much of the stream as the first two frames need (~200 ms) and
+/// prints one line per frame, so non-empty stdout means the URL really plays.
+fn preview_url_is_playable(url: &str) -> bool {
+    let out = Command::new(ffprobe_path())
+        .args([
+            "-v", "error",
+            // Give up rather than hang if the CDN stops responding mid-probe.
+            "-rw_timeout", "8000000",
+            "-user_agent", "Mozilla/5.0",
+            "-read_intervals", "%+#2",
+            "-select_streams", "v:0",
+            "-show_entries", "frame=pict_type",
+            "-of", "csv=p=0",
+            url,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    match out {
+        // A truncated or frameless stream still exits 0, so the frame lines are the signal.
+        Ok(o) => o.stdout.iter().any(|b| !b.is_ascii_whitespace()),
+        Err(_) => false,
     }
 }
 
@@ -99,6 +143,13 @@ pub fn handle_resolve(url: String) -> String {
             || stderr_lower.contains("this video is not available")
         {
             r#"{"error":"login_or_private"}"#.to_string()
+        } else if stderr_lower.contains("video unavailable")
+            || stderr_lower.contains("removed by the uploader")
+            || stderr_lower.contains("account associated with this video has been terminated")
+        {
+            // yt-dlp's wording for removed, terminated and region-blocked videos. Without
+            // this arm they surfaced as a raw "yt_dlp_failed" dump in the UI.
+            r#"{"error":"video_unavailable"}"#.to_string()
         } else {
             let details = stderr_raw.chars().take(500).collect::<String>();
             let escaped = details.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
@@ -130,10 +181,23 @@ let parsed: Value = match serde_json::from_str(json_str) {
     let empty_formats: Vec<Value> = Vec::new();
     let formats = parsed["formats"].as_array().unwrap_or(&empty_formats);
 
+    // Tallest H.264 rendition in the source. This is the ceiling for anything that has to
+    // avoid a re-encode — a stream copy, and an in-app preview — because it is the only
+    // codec both a plain MP4 remux and WKWebView handle.
+    let max_h264_height = formats
+        .iter()
+        .filter(|f| is_h264(f))
+        .filter_map(|f| f["height"].as_i64())
+        .max()
+        .unwrap_or(0);
+
+    // "Fast" export stream-copies the source into MP4, so only H.264 renditions qualify.
+    // The container alone is not enough: YouTube publishes its VP9 and AV1 renditions in
+    // .mp4 too, and copying one of those produces a file most players and editors refuse.
     let mut fast_export_heights: Vec<i64> = formats
         .iter()
         .filter(|f| {
-            f["vcodec"] != "none"
+            is_h264(f)
                 && matches!(f["ext"].as_str(), Some("mp4") | Some("ts"))
                 && f["height"].as_i64().unwrap_or(0) >= 360
         })
@@ -153,11 +217,10 @@ let parsed: Value = match serde_json::from_str(json_str) {
 
     let true_max_height = any_video.last().map(|(_, h)| *h).unwrap_or(0);
 
-    let true_max_requires_reencode = any_video
-        .last()
-        .and_then(|(f, _)| f["ext"].as_str())
-        .map(|ext| ext != "mp4")
-        .unwrap_or(false);
+    // Reaching the true maximum needs a re-encode whenever no H.264 rendition goes that
+    // high. Testing the container of whichever format happens to sort last was both wrong
+    // (AV1 and VP9 ship in .mp4) and unstable, since several formats share the top height.
+    let true_max_requires_reencode = true_max_height > 0 && true_max_height > max_h264_height;
 
     let mut progressive: Vec<&Value> = formats
         .iter()
@@ -165,11 +228,7 @@ let parsed: Value = match serde_json::from_str(json_str) {
             f["acodec"] != "none"
                 && f["vcodec"] != "none"
                 && matches!(f["ext"].as_str(), Some("mp4") | Some("ts"))
-                && f["vcodec"]
-                    .as_str()
-                    // avc1 (YouTube/Twitch clips), h264 (TikTok, some HLS streams)
-                    .map(|v| v.starts_with("avc1") || v == "h264")
-                    .unwrap_or(false)
+                && is_h264(f)
                 && f["height"].as_i64().unwrap_or(0) > 0
         })
         .collect();
@@ -194,6 +253,12 @@ let parsed: Value = match serde_json::from_str(json_str) {
         .and_then(|f| f["url"].as_str())
         .unwrap_or("")
         .to_string();
+    // Height of whichever format actually supplied `preview_url`, tracked through the
+    // fallback below so the upgrade decision judges the URL being served, not the
+    // progressive candidate that was passed over.
+    let mut preview_height = best_preview
+        .and_then(|f| f["height"].as_i64())
+        .unwrap_or(0);
 
     // Fallback: some platforms may not have progressive MP4; use format with both audio and video so preview has sound (Instagram, X, etc.)
     if preview_url.is_empty() {
@@ -219,13 +284,43 @@ let parsed: Value = match serde_json::from_str(json_str) {
             });
         if let Some(f) = fallback {
             preview_url = f["url"].as_str().unwrap_or("").to_string();
+            preview_height = f["height"].as_i64().unwrap_or(0);
         }
     }
 
-    // YouTube no longer publishes muxed (audio+video) formats at all, so for many
-    // sources there is no single URL a <video> element can play. That is not a failure:
-    // the frontend falls back to a locally merged preview built by /yt-preview-cache.
-    // Only a source with no video streams whatsoever is genuinely unpreviewable.
+    // How tall a locally merged preview would be, when that is worth building at all.
+    //
+    // YouTube is the case this exists for. Where it still publishes a muxed format it is
+    // only ever itag 18 — 360p — while the same video offers 720p or better as separate
+    // H.264 streams. Streaming itag 18 is what made previews look poor, and it is also
+    // the rendition that intermittently serves no frames. So whenever the one directly
+    // playable format is well below what merging locally could produce, the frontend is
+    // told to fetch the better copy in the background and swap to it.
+    //
+    // Sources whose muxed format already is the best H.264 rendition (TikTok, X,
+    // Instagram, Twitch) compare equal here and keep streaming directly, as before.
+    let local_upgrade_height = if max_h264_height >= 720 && preview_height < 720 {
+        std::cmp::min(max_h264_height, 720)
+    } else {
+        0
+    };
+
+    // A muxed URL is only worth handing to the <video> element if it actually decodes.
+    // Probe the ones there is reason to distrust — those we already know are a downgrade,
+    // which is exactly the flaky itag 18 case — and drop the URL when it yields no frames,
+    // so the local path takes over instead of the player showing a black screen.
+    if local_upgrade_height > 0 && !preview_url.is_empty() && !preview_url_is_playable(&preview_url) {
+        log_to_file(&format!(
+            "[RESOLVE] muxed preview at {}p decoded no frames — falling back to a local preview",
+            preview_height
+        ));
+        preview_url.clear();
+    }
+
+    // YouTube no longer publishes muxed (audio+video) formats for many videos, so there is
+    // often no single URL a <video> element can play. That is not a failure: the frontend
+    // falls back to a locally merged preview built by /yt-preview-cache. Only a source with
+    // no video streams whatsoever is genuinely unpreviewable.
     let requires_local_preview = preview_url.is_empty();
     if requires_local_preview {
         if any_video.is_empty() {
@@ -237,7 +332,12 @@ let parsed: Value = match serde_json::from_str(json_str) {
             progressive.len()
         ));
     } else {
-        log_to_file(&format!("[RESOLVE] selected preview url_len={}", preview_url.len()));
+        log_to_file(&format!(
+            "[RESOLVE] selected preview {}p url_len={} local_upgrade={}",
+            preview_height,
+            preview_url.len(),
+            local_upgrade_height
+        ));
     }
 
     let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -256,7 +356,9 @@ let parsed: Value = match serde_json::from_str(json_str) {
         "thumbnail": thumbnail,
         "preview": {
             "url": preview_url,
-            "requires_local_preview": requires_local_preview
+            "requires_local_preview": requires_local_preview,
+            // 0 when the direct URL is already the best preview available.
+            "local_upgrade_height": local_upgrade_height
         },
         "capabilities": {
             "fast_max_height": fast_max_height,

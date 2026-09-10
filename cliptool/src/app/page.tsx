@@ -666,6 +666,9 @@ function readPendingReservation(): number {
         } else if (code === "login_or_private") {
           message =
             "This video is private or requires login. We can't access it directly. Use \"Load local file\" or screen recording instead.";
+        } else if (code === "video_unavailable") {
+          message =
+            "This video is unavailable — it may have been removed, or it isn't available in your region.";
         } else if (code === "no_progressive_preview") {
           message =
             "This video doesn't provide a format we can preview (e.g. some live or protected streams). Try \"Load local file\" or screen recording.";
@@ -738,8 +741,9 @@ function readPendingReservation(): number {
         duration: Number(duration) || 0,
         thumbnail: null,
         previewUrl: previewUrlForVideo,
-        // Local files are served straight from disk; nothing to merge.
+        // Local files are served straight from disk; nothing to merge or upgrade.
         requiresLocalPreview: false,
+        localUpgradeHeight: 0,
         capabilities: {
           fastMaxHeight: 1080,
           trueMaxHeight: 1080,
@@ -789,16 +793,29 @@ function readPendingReservation(): number {
     // locally. Fetch 360p first so playback starts quickly, and kick off a 720p download
     // in the background that gets swapped in when ready.
     const needsLocalPreview = Boolean(videoData.requiresLocalPreview);
-    if (!isTikTok && !needsLocalPreview) return;
+    // A directly playable URL exists, but it is a much lower rendition than the source
+    // offers (YouTube's 360p itag 18). Play it immediately and fetch the better copy in
+    // the background — nothing has to be downloaded before the first frame appears.
+    const upgradeHeight = videoData.localUpgradeHeight || 0;
+    if (!isTikTok && !needsLocalPreview && upgradeHeight <= 0) return;
 
-    const params = isTikTok
-      ? `url=${encodeURIComponent(resolvedUrl)}`
-      : `url=${encodeURIComponent(resolvedUrl)}&q=360&full=1&hq=720`;
+    let params: string;
+    if (isTikTok) {
+      params = `url=${encodeURIComponent(resolvedUrl)}`;
+    } else if (needsLocalPreview) {
+      params = `url=${encodeURIComponent(resolvedUrl)}&q=360&full=1&hq=${upgradeHeight || 720}`;
+    } else {
+      params = `url=${encodeURIComponent(resolvedUrl)}&hq=${upgradeHeight}&bg=1`;
+    }
 
-    setYtPreviewLoading(true);
+    // Only block the viewport on a download the preview actually depends on. An upgrade
+    // fetch happens behind a video that is already playing.
+    if (isTikTok || needsLocalPreview) setYtPreviewLoading(true);
     fetch(`${CLIPAGENT_HTTP}/yt-preview-cache?${params}`)
       .then((r) => r.json())
       .then((data: any) => {
+        // bg=1 only queues the background job; the swap arrives via /yt-proxy-status.
+        if (data?.ok && data?.background) return;
         if (data?.ok && data?.path) {
           setYtPreviewPath(data.path as string);
         } else {
@@ -814,13 +831,14 @@ function readPendingReservation(): number {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedUrl, videoData?.id]);
 
-  // Background 720p preview polling for DASH-only sources (YouTube). The 360p copy is
-  // already playing; when the higher-quality download finishes, swap the source up.
-  // VideoViewport preserves currentTime across a src change, so scrubbing is unaffected.
+  // Background 720p preview polling for YouTube. Whatever is on screen — the 360p local
+  // copy, or the 360p muxed stream when one is still published — gets swapped up once the
+  // higher-quality download finishes. VideoViewport preserves currentTime across a src
+  // change, so scrubbing is unaffected.
   useEffect(() => {
     setYtHqPreviewPath(null);
     if (!resolvedUrl || !isTauri) return;
-    if (!videoData?.requiresLocalPreview) return;
+    if (!videoData?.requiresLocalPreview && !(videoData?.localUpgradeHeight ?? 0)) return;
 
     let active = true;
     let intervalId: number | null = null;
@@ -849,7 +867,7 @@ function readPendingReservation(): number {
       if (intervalId !== null) clearInterval(intervalId);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedUrl, videoData?.id, videoData?.requiresLocalPreview]);
+  }, [resolvedUrl, videoData?.id, videoData?.requiresLocalPreview, videoData?.localUpgradeHeight]);
 
   // Background HQ proxy polling: after a PCM local file loads (stream-copy phase 1 may lag
   // on large ProRes/DNxHD files), the backend encodes a smooth 720p H.264 proxy in a
@@ -1877,7 +1895,8 @@ useEffect(() => {
               {videoData.title}
             </h2>
             <div className="relative flex-1 min-h-0 w-full">
-              {/* TikTok preview: show spinner while yt-dlp downloads the cached preview */}
+              {/* Spinner only while the preview has nothing to play yet — a TikTok or
+                  DASH-only source whose first frame depends on the download finishing. */}
               {ytPreviewLoading && (
                 <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-900 rounded gap-2">
                   <svg className="w-5 h-5 animate-spin text-violet-400" fill="none" viewBox="0 0 24 24">
@@ -1891,18 +1910,20 @@ useEffect(() => {
                 src={(() => {
                   if (!isTauri) return videoData.previewUrl;
 
-                  // TikTok, and DASH-only sources like YouTube, play from a locally
-                  // merged copy. This has to be checked before the empty-URL guard
-                  // below: for DASH-only sources resolve intentionally returns no
-                  // preview URL, which is expected rather than a failure.
+                  // A locally merged copy always wins when one is available: it is the
+                  // 720p upgrade, or the only playable source at all. This is checked
+                  // before the empty-URL guard below, because for DASH-only sources
+                  // resolve intentionally returns no preview URL — the expected state
+                  // rather than a failure.
                   const isTikTok =
                     resolvedUrl?.includes("tiktok.com") || resolvedUrl?.includes("tiktokcdn.com");
-                  if (isTikTok || videoData.requiresLocalPreview) {
-                    // The 720p background download replaces the initial 360p one once ready.
-                    const path = ytHqPreviewPath ?? ytPreviewPath;
-                    if (!path) return null; // still downloading or failed → placeholder
-                    return `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(path)}`;
+                  const localPath = ytHqPreviewPath ?? ytPreviewPath;
+                  if (localPath) {
+                    return `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(localPath)}`;
                   }
+                  // No local copy yet, and no direct URL to fall back on → placeholder
+                  // while the download runs.
+                  if (isTikTok || videoData.requiresLocalPreview) return null;
 
                   if (!videoData.previewUrl) return videoData.previewUrl;
                   const isRemote =

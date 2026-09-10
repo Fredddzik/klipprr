@@ -162,6 +162,29 @@ fn hq_proxy_lock_path(hq: &Path) -> PathBuf {
     hq.with_extension("lock")
 }
 
+/// A lock only means "in flight" for as long as this process lives. Quitting the app
+/// mid-download leaves the sentinel behind, and nothing ever removes it: the background
+/// job then refuses to start ("already running") while the status endpoint reports it as
+/// still running, so the quality upgrade never arrives again for that file or URL.
+/// Treat a lock older than an hour — far longer than any real encode or download — as
+/// abandoned, and delete it so the next request restarts the work.
+fn lock_is_active(lock: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(lock) else {
+        return false;
+    };
+    let stale = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .map(|age| age.as_secs() > 3600)
+        .unwrap_or(false);
+    if stale {
+        let _ = std::fs::remove_file(lock);
+        return false;
+    }
+    true
+}
+
 /// Kick off a background thread that re-encodes `file_path` to a smooth 720p H.264
 /// proxy. Returns immediately; the caller polls `/local-proxy-status` for readiness.
 /// The proxy is cached keyed on file identity so it is only generated once.
@@ -170,7 +193,7 @@ fn start_hq_proxy_bg(file_path: &Path) {
     // Already done or already in progress — no-op.
     if hq.is_file() { return; }
     let lock = hq_proxy_lock_path(&hq);
-    if lock.is_file() { return; }
+    if lock_is_active(&lock) { return; }
 
     // Mark in-flight
     let _ = std::fs::write(&lock, b"");
@@ -184,13 +207,15 @@ fn start_hq_proxy_bg(file_path: &Path) {
         // Hardware-accelerated H.264 on macOS; libx264 ultrafast elsewhere.
         // Scale down to at most 1280 px wide (720-ish), keep aspect ratio.
         // This turns a 10 GB ProRes 4K file into a ~300 MB scrub-friendly proxy.
+        // Built from a capability probe rather than hard-coded: -power_efficient only
+        // exists from ffmpeg 6.1, and an unknown option aborts the entire command.
         #[cfg(target_os = "macos")]
-        let vcodec_args: &[&str] = &[
-            "-c:v", "h264_videotoolbox",
-            "-prio_speed", "1",
-            "-power_efficient", "0",
-            "-b:v", "4M",
-        ];
+        let vcodec_args: Vec<&str> = {
+            let mut a = vec!["-c:v", "h264_videotoolbox"];
+            a.extend(download::videotoolbox_speed_args());
+            a.extend(["-b:v", "4M"]);
+            a
+        };
         #[cfg(not(target_os = "macos"))]
         let vcodec_args: &[&str] = &[
             "-c:v", "libx264",
@@ -209,7 +234,9 @@ fn start_hq_proxy_bg(file_path: &Path) {
             // `scale=-2:720` is unambiguous and sufficient for a preview proxy.
             "-vf", "scale=-2:720",
         ];
-        args.extend_from_slice(vcodec_args);
+        // iter().copied() rather than extend_from_slice: the macOS branch is a Vec built
+        // from a capability probe, the others are a static slice.
+        args.extend(vcodec_args.iter().copied());
         args.extend_from_slice(&[
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
@@ -318,7 +345,7 @@ fn start_yt_hq_bg(url: &str, max_h: u32) {
         return;
     }
     let lock = yt_preview_lock_path(&out);
-    if lock.is_file() {
+    if lock_is_active(&lock) {
         return;
     }
     if let Some(dir) = out.parent() {
@@ -696,7 +723,7 @@ pub async fn handle_http(
         // Check lock FIRST: while FFmpeg is writing, the output file may already exist
         // with >1024 bytes but not yet be a valid MP4. Reporting "ready" at that point
         // would send the frontend a broken file and trigger onError in the video element.
-        let status_json = if lock.is_file() {
+        let status_json = if lock_is_active(&lock) {
             r#"{"status":"encoding"}"#.to_string()
         } else if hq.is_file()
             && std::fs::metadata(&hq).map(|m| m.len()).unwrap_or(0) > 65536
@@ -726,6 +753,9 @@ pub async fn handle_http(
     //         entire timeline is scrubbable
     //   hq    if set, also starts a background download at that height, collected
     //         later via /yt-proxy-status and swapped in transparently
+    //   bg    "1" returns as soon as the hq job is queued, without downloading anything
+    //         inline. Used when the source already has a directly playable URL and only
+    //         the quality upgrade has to be fetched.
     if method == Method::GET && path == "/yt-preview-cache" {
         if !origin_is_allowed(&req) {
             return Ok(text_response(403, "forbidden_origin"));
@@ -735,6 +765,7 @@ pub async fn handle_http(
         let mut q_param: Option<u32> = None;
         let mut hq_param: Option<u32> = None;
         let mut full = false;
+        let mut background_only = false;
         for part in query.split('&') {
             let mut it = part.splitn(2, '=');
             match it.next() {
@@ -742,6 +773,7 @@ pub async fn handle_http(
                 Some("q") => q_param = it.next().and_then(|v| v.parse::<u32>().ok()),
                 Some("hq") => hq_param = it.next().and_then(|v| v.parse::<u32>().ok()),
                 Some("full") => full = it.next() == Some("1"),
+                Some("bg") => background_only = it.next() == Some("1"),
                 _ => {}
             }
         }
@@ -767,6 +799,12 @@ pub async fn handle_http(
         // than starting only after the low-res copy finishes.
         if let Some(hq_h) = hq_param {
             start_yt_hq_bg(&original_url, hq_h);
+        }
+
+        // Nothing to download inline: the caller already has something to play and is
+        // only asking for the upgrade to be queued.
+        if background_only {
+            return Ok(json_response(200, r#"{"ok":true,"background":true}"#.to_string()));
         }
 
         // Serve from cache when a previous run already produced a usable file.
@@ -834,7 +872,7 @@ pub async fn handle_http(
         let hq = yt_preview_path(&original_url, "hq");
         let lock = yt_preview_lock_path(&hq);
 
-        let status_json = if lock.is_file() {
+        let status_json = if lock_is_active(&lock) {
             r#"{"status":"downloading"}"#.to_string()
         } else if hq.is_file() && std::fs::metadata(&hq).map(|m| m.len()).unwrap_or(0) > 65536 {
             let path_str = hq.to_string_lossy().to_string();
@@ -873,7 +911,13 @@ pub async fn handle_http(
             }
         };
 
-        let json = crate::commands::resolve::handle_resolve(url);
+        // handle_resolve shells out to yt-dlp and ffprobe and blocks for seconds. Running
+        // it directly on the executor stalled every other request on the same worker —
+        // including the /local-preview range reads the player issues while a second tab
+        // resolves.
+        let json = tokio::task::spawn_blocking(move || crate::commands::resolve::handle_resolve(url))
+            .await
+            .unwrap_or_else(|_| r#"{"error":"resolve_panicked"}"#.to_string());
         return Ok(json_response(200, json));
     }
 
@@ -884,7 +928,16 @@ pub async fn handle_http(
         let body_bytes = to_bytes(req.into_body()).await?;
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
-        let json = download::handle_download_all(app.clone(), &body_str);
+        // An export runs yt-dlp and ffmpeg to completion — minutes, for a batch. Holding a
+        // tokio worker for that starves everything sharing it, including the /ping the UI
+        // uses to decide the agent is alive and the /local-preview range reads the player
+        // issues while the user keeps scrubbing.
+        let app_for_export = app.clone();
+        let json = tokio::task::spawn_blocking(move || {
+            download::handle_download_all(app_for_export, &body_str)
+        })
+        .await
+        .unwrap_or_else(|_| r#"{"error":"export_panicked"}"#.to_string());
         return Ok(json_response(200, json));
     }
 

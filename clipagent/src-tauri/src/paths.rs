@@ -1,6 +1,10 @@
 use std::path::PathBuf;
 use std::env;
+// Only the Windows resource-dir cache uses these; importing them unconditionally warned on
+// every macOS build, which trains everyone to ignore build warnings.
+#[cfg(windows)]
 use std::sync::Mutex;
+#[cfg(windows)]
 use once_cell::sync::Lazy;
 
 /// On Windows, Tauri places bundle resources in $RESOURCE. We set this from app setup so path

@@ -13,7 +13,7 @@
 #   APPLE_ID                   - Apple ID email
 #   APPLE_PASSWORD             - app-specific password (not main Apple password)
 #   APPLE_TEAM_ID              - Team ID from Apple Developer
-# Optional (to have public downloads while repo is private):
+# Optional (mirror releases to a separate downloads-only repo):
 #   RELEASES_PUBLIC_REPO       - Variable: public repo for releases only (e.g. Fredddzik/klipprr-releases)
 #   RELEASES_PUBLIC_REPO_TOKEN - Secret: PAT with repo scope, to create releases in that public repo
 # See doc/WINDOWS_RELEASE_PLAN.md for Windows (unsigned build; signing is optional).
@@ -72,6 +72,9 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
         run: |
           cd cliptool && npm ci && npm run build
+
+      - name: Fetch pinned yt-dlp
+        run: ./scripts/fetch-yt-dlp.sh macos
 
       - name: Check for Apple signing
         id: apple
@@ -259,11 +262,9 @@ jobs:
           Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffprobe.exe | Copy-Item -Destination $binDir -Force
           Remove-Item -Recurse -Force ffmpeg.zip, ffmpeg_extract
 
-      - name: Download Windows yt-dlp
+      - name: Fetch pinned yt-dlp
         shell: bash
-        run: |
-          BIN_DIR="clipagent/src-tauri/bin"
-          curl -sL -o "$BIN_DIR/yt-dlp.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+        run: ./scripts/fetch-yt-dlp.sh windows
 
       - name: Tauri build (Windows MSI)
         env:
@@ -341,11 +342,9 @@ jobs:
           Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffprobe.exe | Copy-Item -Destination $binDir -Force
           Remove-Item -Recurse -Force ffmpeg.zip, ffmpeg_extract
 
-      - name: Download Windows yt-dlp
+      - name: Fetch pinned yt-dlp
         shell: bash
-        run: |
-          BIN_DIR="clipagent/src-tauri/bin"
-          curl -sL -o "$BIN_DIR/yt-dlp.exe" "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+        run: ./scripts/fetch-yt-dlp.sh windows
 
       - name: Tauri build (Windows MSI)
         env:
