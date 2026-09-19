@@ -48,11 +48,16 @@ jobs:
         id: skip
         run: |
           LATEST="${{ steps.ytdlp.outputs.tag_name }}"
-          VERSION_FILE="clipagent/src-tauri/bin/yt-dlp.version"
+          # The pinned version lives in tools.lock. It used to be read from
+          # bin/yt-dlp.version, but that file left the repo when yt-dlp stopped being
+          # committed — so this check saw no current version, never skipped, and bumped
+          # the app version every week whether or not yt-dlp had actually changed.
+          LOCK="clipagent/src-tauri/tools.lock"
           CURRENT=""
-          if [ -f "$VERSION_FILE" ]; then
-            CURRENT=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+          if [ -f "$LOCK" ]; then
+            CURRENT=$(grep -E '^YT_DLP_VERSION=' "$LOCK" | cut -d= -f2 | tr -d '[:space:]')
           fi
+          echo "pinned=$CURRENT latest=$LATEST"
           # Skip when we already have this version or something newer (version sort: YYYY.MM.DD)
           if [ -n "$CURRENT" ]; then
             NEWER=$(printf '%s\n' "$CURRENT" "$LATEST" | sort -V | tail -n1)
@@ -108,8 +113,23 @@ jobs:
           git commit -m "chore: update yt-dlp to ${{ steps.ytdlp.outputs.tag_name }} [skip ci]"
           git push origin main
 
+      # The tag MUST be pushed with a personal access token, not the default GITHUB_TOKEN.
+      # GitHub refuses to trigger workflows from events created by its own token, so a tag
+      # pushed with GITHUB_TOKEN builds nothing at all — no run, no failure, no signal.
+      # That is exactly how releases silently stopped after v0.1.24: every tag from
+      # v0.1.25 onward was created by this job and never produced a build, and nobody
+      # noticed for four months. Fail loudly rather than tag into the void.
       - name: Create and push tag
         if: steps.skip.outputs.skip != 'true'
+        env:
+          TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN || secrets.RELEASES_PUBLIC_REPO_TOKEN }}
         run: |
+          if [ -z "$TAG_TOKEN" ]; then
+            echo "::error::No RELEASE_TAG_TOKEN (or RELEASES_PUBLIC_REPO_TOKEN) secret set."
+            echo "::error::A tag pushed with the default GITHUB_TOKEN does not trigger the"
+            echo "::error::Release workflow, so it would produce no build. Refusing to tag."
+            exit 1
+          fi
           git tag "v${{ env.NEW_VERSION }}"
-          git push origin "v${{ env.NEW_VERSION }}"
+          git push "https://x-access-token:${TAG_TOKEN}@github.com/${{ github.repository }}" "v${{ env.NEW_VERSION }}"
+          echo "Tagged v${{ env.NEW_VERSION }} — the Release workflow should now be running."
