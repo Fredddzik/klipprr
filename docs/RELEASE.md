@@ -36,6 +36,42 @@ updater manifest points at the wrong version.
 uses it. Intel Macs are unsupported. That may be the right call — but the workflow implies
 otherwise and should say so explicitly.
 
+## Two ways this pipeline dies silently (both hit us, Apr–Sep 2026)
+
+Releases stopped after v0.1.24 (2026-04-30) and nobody noticed for four and a half months.
+There were **two independent causes**, and neither produced an alert.
+
+### 1. A tag pushed by CI triggers nothing
+
+`update-yt-dlp.yml` creates the version tag. It used to push it with the default
+`GITHUB_TOKEN`, and **GitHub deliberately refuses to trigger workflows from events created
+by that token** (loop protection). So v0.1.25, v0.1.26 and v0.1.27 were tagged and built
+nothing — no run, no failure, no signal. v0.1.24 was the last tag pushed by a human, which
+is exactly why it was the last one that shipped.
+
+Fixed: the tag is pushed with a PAT (`RELEASE_TAG_TOKEN`, falling back to
+`RELEASES_PUBLIC_REPO_TOKEN`), and the job fails loudly if neither secret exists.
+
+### 2. Apple's agreement lapsed → notarization 403
+
+```
+failed to notarize app: HTTP status code: 403. A required agreement is missing or has
+expired. This request requires an in-effect agreement that has not been signed or has
+expired.
+```
+
+Nothing in the repo can fix this. It means either the Apple Developer Program membership
+has lapsed, or Apple published an updated Program License Agreement that the **Account
+Holder** has not yet accepted. Apple does this every year or so, and it silently breaks
+notarization for everyone until someone signs in and clicks Agree.
+
+**Fix:** the Account Holder signs in at `developer.apple.com/account`, accepts any pending
+agreement on the landing page or under Membership, and confirms the membership is active.
+Then re-run the Release workflow — no code change and no new tag needed.
+
+**Worth knowing:** everything before notarization succeeds, so the failure comes ~6 minutes
+in, after a full compile and code-sign. Check agreements *before* cutting a release.
+
 ## Auto-update
 
 Tauri's updater polls
