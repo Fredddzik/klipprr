@@ -220,7 +220,11 @@ jobs:
   # Windows build (unsigned). Runs after Mac job; uploads .msi to same release.
   # continue-on-error: true so a Windows failure does not mark the workflow failed (Mac release is already done).
   release-windows:
-    if: github.event.inputs.windows_only != 'true'
+    # !cancelled() rather than success(): this job only needs the macOS job to be *finished*,
+    # not to have succeeded. It was gated on success, so a macOS-only problem — notarization
+    # rejected because an Apple agreement lapsed, say — skipped the Windows build entirely
+    # and shipped nothing to anyone. The two platforms fail independently.
+    if: ${{ !cancelled() && github.event.inputs.windows_only != 'true' }}
     permissions:
       contents: write
     runs-on: windows-latest
@@ -276,6 +280,19 @@ jobs:
         run: |
           cd clipagent/src-tauri
           cargo tauri build --bundles msi
+
+      # Normally the macOS job has already created this release. When that job failed, it
+      # has not — so create it rather than failing with "release not found".
+      - name: Ensure the release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            echo "No release for $tag yet (macOS job did not create one) - creating it."
+            gh release create $tag --title "Klipprr $tag" --notes "Windows build. The macOS build for this version did not complete."
+          }
 
       - name: Upload Windows asset to release
         env:
