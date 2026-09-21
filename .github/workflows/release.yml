@@ -76,6 +76,28 @@ jobs:
       - name: Fetch pinned yt-dlp
         run: ./scripts/fetch-yt-dlp.sh macos
 
+      # Check the mirror credential up front. This token expired silently, and because it
+      # is only used in the very last step the workflow compiled, signed and notarized for
+      # seven minutes before failing on it — twice, once per platform. Ten seconds here
+      # turns that into an immediate, obvious failure.
+      - name: Verify the mirror token before building
+        if: vars.RELEASES_PUBLIC_REPO != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PUBLIC_REPO_TOKEN }}
+          PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASES_PUBLIC_REPO_TOKEN is not set, but RELEASES_PUBLIC_REPO is."
+            echo "::error::The build would succeed and then fail to publish. Set the secret first."
+            exit 1
+          fi
+          if ! gh repo view "$PUBLIC_REPO" >/dev/null 2>&1; then
+            echo "::error::RELEASES_PUBLIC_REPO_TOKEN cannot read $PUBLIC_REPO (expired, revoked, or wrong scope)."
+            echo "::error::It needs Contents: read and write on $PUBLIC_REPO. Refusing to build."
+            exit 1
+          fi
+          echo "Mirror token OK for $PUBLIC_REPO"
+
       - name: Check for Apple signing
         id: apple
         env:
