@@ -26,6 +26,11 @@ src-tauri/target
 clipagent/src-tauri/bin/yt-dlp
 clipagent/src-tauri/bin/yt-dlp.exe
 clipagent/src-tauri/bin/yt-dlp.version
+# Fetched at build time, pinned in tools.lock (scripts/fetch-ffmpeg.sh).
+clipagent/src-tauri/bin/ffmpeg
+clipagent/src-tauri/bin/ffprobe
+clipagent/src-tauri/bin/ffmpeg-LICENSE.txt
+clipagent/src-tauri/bin/ffmpeg.build
 
 # Build output of cliptool, produced by `npm run build`. Committing it made every UI
 # change a 20-file diff of minified JS and hashed fonts.

@@ -1,6 +1,10 @@
 # Build ClipAgent (signed + notarized on macOS), create GitHub Release, upload updater artifacts.
 # Trigger: push a version tag, e.g.  git tag v0.1.0 && git push origin v0.1.0
 #
+# Before tagging: the "Release check" workflow must be green on the commit you tag. It runs
+# automatically on every push to main. The release runs it again first (the preflight job)
+# and stops within minutes, before signing or notarizing, if anything is wrong.
+#
 # Required repo variables (Settings → Secrets and variables → Actions → Variables):
 #   NEXT_PUBLIC_SUPABASE_URL      - Supabase project URL (for frontend build)
 #   NEXT_PUBLIC_SUPABASE_ANON_KEY - Supabase anon key (for frontend build)
@@ -48,7 +52,17 @@ on:
         type: boolean
 
 jobs:
+  # Every credential, pinned binary and compile the release depends on, checked in a few
+  # minutes before anything is signed, notarized or published. If this fails the release
+  # stops here and users see nothing. The same check runs on every push to main, so a
+  # green check on the commit you tag means this passes too. See release-check.yml.
+  preflight:
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_only != 'true'
+    uses: ./.github/workflows/release-check.yml
+    secrets: inherit
+
   release:
+    needs: preflight
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.windows_only != 'true'
     permissions:
       contents: write
@@ -76,27 +90,8 @@ jobs:
       - name: Fetch pinned yt-dlp
         run: ./scripts/fetch-yt-dlp.sh macos
 
-      # Check the mirror credential up front. This token expired silently, and because it
-      # is only used in the very last step the workflow compiled, signed and notarized for
-      # seven minutes before failing on it — twice, once per platform. Ten seconds here
-      # turns that into an immediate, obvious failure.
-      - name: Verify the mirror token before building
-        if: vars.RELEASES_PUBLIC_REPO != ''
-        env:
-          GH_TOKEN: ${{ secrets.RELEASES_PUBLIC_REPO_TOKEN }}
-          PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::RELEASES_PUBLIC_REPO_TOKEN is not set, but RELEASES_PUBLIC_REPO is."
-            echo "::error::The build would succeed and then fail to publish. Set the secret first."
-            exit 1
-          fi
-          if ! gh repo view "$PUBLIC_REPO" >/dev/null 2>&1; then
-            echo "::error::RELEASES_PUBLIC_REPO_TOKEN cannot read $PUBLIC_REPO (expired, revoked, or wrong scope)."
-            echo "::error::It needs Contents: read and write on $PUBLIC_REPO. Refusing to build."
-            exit 1
-          fi
-          echo "Mirror token OK for $PUBLIC_REPO"
+      - name: Fetch pinned ffmpeg
+        run: ./scripts/fetch-ffmpeg.sh
 
       - name: Check for Apple signing
         id: apple
@@ -246,11 +241,13 @@ jobs:
     # not to have succeeded. It was gated on success, so a macOS-only problem — notarization
     # rejected because an Apple agreement lapsed, say — skipped the Windows build entirely
     # and shipped nothing to anyone. The two platforms fail independently.
-    if: ${{ !cancelled() && github.event.inputs.windows_only != 'true' }}
+    # A failed preflight still stops it: that means the release itself is wrong (version,
+    # tag, updater key), not just the macOS half.
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && github.event.inputs.windows_only != 'true' }}
     permissions:
       contents: write
     runs-on: windows-latest
-    needs: release
+    needs: [preflight, release]
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

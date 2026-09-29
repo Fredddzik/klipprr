@@ -1,0 +1,170 @@
+# Release check: everything a release needs, minus the slow signing and notarizing.
+#
+# Runs on every push to main, on demand (Actions → Release check → Run workflow), and as
+# the first job of every release. A green run on a commit means that commit is safe to
+# tag. When it fails inside a release, the release stops here: nothing has been signed,
+# notarized or published, and nothing reaches users.
+#
+# Every step here exists because a release once failed late on it, or would have.
+
+name: Release check
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions agree
+        run: |
+          CONF=$(jq -r '.version' clipagent/src-tauri/tauri.conf.json)
+          CARGO=$(sed -n 's/^version = "\(.*\)"$/\1/p' clipagent/src-tauri/Cargo.toml | head -1)
+          echo "tauri.conf.json $CONF, Cargo.toml $CARGO"
+          [ "$CONF" = "$CARGO" ] || { echo "::error::tauri.conf.json ($CONF) and Cargo.toml ($CARGO) disagree."; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "v$CONF" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match the app version v$CONF. The release would publish under the wrong number."
+            exit 1
+          fi
+          echo "VERSION=$CONF" >> "$GITHUB_ENV"
+
+      # Informational on main: tells you to bump the version before tagging.
+      - name: Version not already released
+        if: github.ref_type != 'tag' && vars.RELEASES_PUBLIC_REPO != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PUBLIC_REPO_TOKEN }}
+        run: |
+          if gh release view "v$VERSION" --repo "${{ vars.RELEASES_PUBLIC_REPO }}" >/dev/null 2>&1; then
+            echo "::warning::v$VERSION is already released. Bump the version in tauri.conf.json and Cargo.toml before tagging."
+          else
+            echo "v$VERSION is not released yet; ready to tag once this check is green."
+          fi
+
+      - name: Required secrets are set
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          KLIPPRR_LICENSE_ED25519_PUB_B64: ${{ secrets.KLIPPRR_LICENSE_ED25519_PUB_B64 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: |
+          missing=0
+          for v in TAURI_SIGNING_PRIVATE_KEY KLIPPRR_LICENSE_ED25519_PUB_B64 APPLE_CERTIFICATE \
+                   APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+                   SUPABASE_URL SUPABASE_ANON_KEY; do
+            if [ -z "${!v}" ]; then echo "::error::$v is not set"; missing=1; else echo "ok  $v"; fi
+          done
+          exit $missing
+
+      # This token expired silently once and the release failed on it after compiling,
+      # signing and notarizing, twice.
+      - name: Mirror token works
+        if: vars.RELEASES_PUBLIC_REPO != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PUBLIC_REPO_TOKEN }}
+          PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "::error::RELEASES_PUBLIC_REPO_TOKEN is not set, but RELEASES_PUBLIC_REPO is."; exit 1; }
+          gh repo view "$PUBLIC_REPO" >/dev/null 2>&1 || {
+            echo "::error::RELEASES_PUBLIC_REPO_TOKEN cannot read $PUBLIC_REPO (expired, revoked, or wrong scope). It needs Contents: read and write."
+            exit 1; }
+          echo "Mirror token OK for $PUBLIC_REPO"
+
+      - name: Updater signing key works
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          echo probe > probe.txt
+          npx --yes @tauri-apps/cli@2 signer sign probe.txt >/dev/null 2>signer.err || {
+            echo "::error::The updater signing key cannot sign. Auto-update artifacts would fail at the end of the build."
+            cat signer.err; exit 1; }
+          echo "Updater key signs"
+
+      - name: Apple certificate imports and is valid
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" check.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" check.keychain
+          security import certificate.p12 -k check.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign >/dev/null \
+            || { echo "::error::APPLE_CERTIFICATE did not import. Wrong file or wrong APPLE_CERTIFICATE_PASSWORD."; exit 1; }
+          rm certificate.p12
+          # -v lists only identities that are currently valid, so an expired or revoked
+          # certificate disappears from this list.
+          if ! security find-identity -v -p codesigning check.keychain | grep -q "Developer ID Application"; then
+            echo "::error::No valid Developer ID Application identity. The certificate may have expired."
+            security find-identity -p codesigning check.keychain
+            exit 1
+          fi
+          security find-certificate -c "Developer ID Application" -p check.keychain \
+            | openssl x509 -noout -enddate | sed 's/^/Certificate /'
+          security delete-keychain check.keychain
+
+      # Notarization is the step that takes longest and fails last. This proves the Apple
+      # ID credentials work before any of that time is spent.
+      - name: Apple notarization credentials work
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" --output-format json >history.json 2>notary.err || {
+            echo "::error::Apple rejected the notarization credentials. Check APPLE_ID, APPLE_PASSWORD (an app-specific password) and APPLE_TEAM_ID, and that no new Apple agreement is waiting at developer.apple.com."
+            cat notary.err; exit 1; }
+          echo "Notarization credentials accepted"
+
+      - name: Fetch pinned yt-dlp
+        run: |
+          ./scripts/fetch-yt-dlp.sh macos
+          clipagent/src-tauri/bin/yt-dlp --version
+
+      - name: Fetch pinned ffmpeg
+        run: ./scripts/fetch-ffmpeg.sh
+
+      - name: ffmpeg does everything the app asks of it
+        run: ./scripts/smoke-test-ffmpeg.sh
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+        run: cd cliptool && npm ci && npm run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clipagent/src-tauri
+
+      - name: App compiles for release
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          KLIPPRR_LICENSE_ED25519_PUB_B64: ${{ secrets.KLIPPRR_LICENSE_ED25519_PUB_B64 }}
+        run: cd clipagent/src-tauri && cargo build --release --target aarch64-apple-darwin

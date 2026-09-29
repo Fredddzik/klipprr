@@ -1,0 +1,75 @@
+# Build the arm64 macOS ffmpeg + ffprobe that ship inside Klipprr, and pin them.
+#
+# Run by hand only when ffmpeg is being upgraded (Actions → Build ffmpeg → Run workflow).
+# Releases never build ffmpeg; they download the build this workflow publishes, so a
+# release does not pay the build time.
+#
+# Steps: build from pinned sources (scripts/build-ffmpeg.sh) → run the app's real command
+# lines against the result (scripts/smoke-test-ffmpeg.sh) → publish it as a pre-release
+# asset of this repo → commit its name and hash to clipagent/src-tauri/tools.lock.
+# Nothing is published unless the smoke test passes, and the pin only moves after the
+# published file has been downloaded back and verified.
+
+name: Build ffmpeg
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Build tools
+        run: brew install meson ninja pkg-config
+
+      - name: Build
+        run: ./scripts/build-ffmpeg.sh "$RUNNER_TEMP/dist"
+
+      - name: Smoke test the build
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/dist/$(cat "$RUNNER_TEMP/dist/NAME").tar.gz" -C "$RUNNER_TEMP/bin"
+          ./scripts/smoke-test-ffmpeg.sh "$RUNNER_TEMP/bin"
+
+      - name: Publish as a pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          D="$RUNNER_TEMP/dist"
+          NAME="$(cat "$D/NAME")"
+          if gh release view "$NAME" >/dev/null 2>&1; then
+            echo "::error::$NAME is already published. Bump REVISION in scripts/build-ffmpeg.sh to publish a new build."
+            exit 1
+          fi
+          tar -xzf "$D/$NAME.tar.gz" -C "$D" BUILDINFO.txt
+          # A pre-release is never GitHub's "latest", which the website and the updater read.
+          gh release create "$NAME" --prerelease --latest=false \
+            --title "$NAME (build input, not an app release)" \
+            --notes-file "$D/BUILDINFO.txt" \
+            "$D/$NAME.tar.gz" "$D/$NAME.tar.gz.sha256"
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+          echo "SHA=$(cat "$D/$NAME.tar.gz.sha256")" >> "$GITHUB_ENV"
+
+      - name: Pin it
+        run: |
+          LOCK=clipagent/src-tauri/tools.lock
+          sed -i '' "s/^FFMPEG_MACOS_BUILD=.*/FFMPEG_MACOS_BUILD=$NAME/; s/^FFMPEG_MACOS_SHA256=.*/FFMPEG_MACOS_SHA256=$SHA/" "$LOCK"
+          grep -E '^FFMPEG_MACOS_' "$LOCK"
+          # Download back what was published and verify it, exactly as a release will.
+          rm -f clipagent/src-tauri/bin/ffmpeg clipagent/src-tauri/bin/ffprobe clipagent/src-tauri/bin/ffmpeg.build
+          ./scripts/fetch-ffmpeg.sh
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$LOCK"
+          git commit -m "chore: pin ffmpeg build $NAME"
+          git push origin main
+          echo "Pinned $NAME. Run 'Release check' on main to confirm before tagging."

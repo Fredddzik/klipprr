@@ -3,8 +3,11 @@
 ## How a release happens today
 
 ```
-git tag v0.1.27 && git push origin v0.1.27
+1. Bump the version in both places (below) and push to main.
+2. Wait for "Release check" to go green on that commit (Actions tab, ~10 min).
+3. git tag v0.1.29 && git push origin v0.1.29
    → .github/workflows/release.yml
+       job "preflight"        (macos-latest)  the same Release check, run again
        job "release"          (macos-latest)  → .app + .dmg + .app.tar.gz + .sig
        job "release-windows"  (windows-latest, continue-on-error) → .msi
 ```
@@ -14,12 +17,32 @@ The version must be bumped **by hand in two places** before tagging:
 - `clipagent/src-tauri/tauri.conf.json` → `version`
 - `clipagent/src-tauri/Cargo.toml` → `version`
 
-They must match the tag. Nothing validates this; a mismatch produces a release whose
-updater manifest points at the wrong version.
+They must match each other and the tag. The Release check enforces this.
+
+### The Release check (`release-check.yml`)
+
+Runs on every push to main, on demand, and as the first job of every release. It checks,
+in about ten minutes, everything that has ever made a release fail late:
+
+- versions agree, and the tag matches them; warns if the version is already released
+- every required secret is set; the mirror token still works
+- the updater key can actually sign; the Apple certificate imports and has not expired
+- Apple accepts the notarization credentials
+- the pinned yt-dlp and ffmpeg download and verify; ffmpeg passes
+  `scripts/smoke-test-ffmpeg.sh` (the app's real export commands)
+- the frontend builds and the app compiles for release
+
+What it cannot check: notarization itself (Apple's verdict on the finished app) and the
+upload steps. Those can still fail, but no longer because of a credential or a binary.
+
+**Rule: never tag a commit whose Release check is not green.** If the preflight job fails
+inside a release, nothing was signed or published. Fix the problem, then delete and
+re-push the tag (`git push --delete origin vX && git tag -f vX && git push origin vX`).
 
 ## What the macOS job does, in order
 
-1. Build the UI: `cd cliptool && npm ci && npm run build` (writes `clipagent/ui/out/`).
+1. Build the UI: `cd cliptool && npm ci && npm run build` (writes `clipagent/ui/out/`),
+   then fetch the pinned yt-dlp and ffmpeg (`scripts/fetch-*.sh`, versions in `tools.lock`).
 2. Import the Developer ID certificate into a temporary keychain.
 3. **Sign the bundled binaries individually.** `ffmpeg` and `ffprobe` get
    `--options runtime --timestamp`. `yt-dlp` additionally gets
@@ -107,9 +130,21 @@ differing only in trigger and how the tag is derived — roughly 80 duplicated l
 
 ## Dependency bumps
 
-`.github/workflows/update-yt-dlp.yml` runs weekly: downloads the latest yt-dlp, commits the
-**37 MB binary** into the repo, and bumps the patch version in `tauri.conf.json` and
-`Cargo.toml`. See `AUDIT-2026-09.md` — this is the main reason `.git` is 388 MB.
+**yt-dlp:** `.github/workflows/update-yt-dlp.yml` runs weekly. When yt-dlp has a new
+release it bumps `YT_DLP_VERSION` in `tools.lock` and the app's patch version, then tags.
+The release's preflight job checks that release like any other.
+
+**ffmpeg:** arm64 macOS builds are compiled from source by `scripts/build-ffmpeg.sh`
+(ffmpeg + x264 + dav1d + LAME, pinned by checksum). To upgrade:
+
+1. Bump the versions and `REVISION` in `scripts/build-ffmpeg.sh`, push to main.
+2. Actions → **Build ffmpeg** → Run workflow (~5 min). It builds, runs the smoke test,
+   publishes the result as a pre-release of this repo, and commits the new
+   `FFMPEG_MACOS_BUILD` / `FFMPEG_MACOS_SHA256` to `tools.lock`.
+3. Run **Release check** on main, then release as normal.
+
+Releases only download the pinned build; they never compile ffmpeg. Windows still fetches
+an unpinned BtbN build (see Windows above).
 
 ## Required CI configuration
 
