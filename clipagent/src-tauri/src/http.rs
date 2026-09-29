@@ -431,11 +431,28 @@ fn run_yt_preview_download(
     args.push(out_template);
     args.push(url.to_string());
 
-    std::process::Command::new(yt_dlp_path())
-        .args(&args)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    // YouTube intermittently rejects one of two concurrent downloads (seen with the 360p
+    // copy failing while the 720p one succeeded), and a second attempt seconds later
+    // usually works. Without the retry the preview dead-ends on a DRM message.
+    for attempt in 1..=2 {
+        match std::process::Command::new(yt_dlp_path()).args(&args).output() {
+            Ok(o) if o.status.success() => return true,
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
+                download::log_to_file(&format!(
+                    "[YT-PREVIEW] attempt {attempt} failed ({}) for {}: {}",
+                    o.status,
+                    out_path.display(),
+                    tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+                ));
+            }
+            Err(e) => {
+                download::log_to_file(&format!("[YT-PREVIEW] attempt {attempt} could not start yt-dlp: {e}"));
+            }
+        }
+    }
+    false
 }
 
 /// Kick off a background high-quality download for `url`. Returns immediately; the
@@ -1152,15 +1169,12 @@ pub async fn handle_http(
             let _ = std::fs::create_dir_all(dir);
         }
 
-        // Start the background HQ fetch first so it overlaps this download rather
-        // than starting only after the low-res copy finishes.
-        if let Some(hq_h) = hq_param {
-            start_yt_hq_bg(&original_url, hq_h);
-        }
-
         // Nothing to download inline: the caller already has something to play and is
         // only asking for the upgrade to be queued.
         if background_only {
+            if let Some(hq_h) = hq_param {
+                start_yt_hq_bg(&original_url, hq_h);
+            }
             return Ok(json_response(200, r#"{"ok":true,"background":true}"#.to_string()));
         }
 
@@ -1168,6 +1182,9 @@ pub async fn handle_http(
         if out_mp4.is_file() {
             let sz = std::fs::metadata(&out_mp4).map(|m| m.len()).unwrap_or(0);
             if sz > 1024 {
+                if let Some(hq_h) = hq_param {
+                    start_yt_hq_bg(&original_url, hq_h);
+                }
                 let path_str = out_mp4.to_string_lossy().to_string();
                 let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
                 return Ok(json_response(200, format!(r#"{{"ok":true,"path":"{}"}}"#, escaped)));
@@ -1183,10 +1200,21 @@ pub async fn handle_http(
         let url_for_dl = original_url.clone();
         let out_for_dl = out_mp4.clone();
 
+        let lq_lock = yt_preview_lock_path(&out_mp4);
+        let _ = std::fs::write(&lq_lock, b"");
         let result = tokio::task::spawn_blocking(move || {
             run_yt_preview_download(&url_for_dl, &out_for_dl, &selector, max_secs)
         })
         .await;
+        let _ = std::fs::remove_file(&lq_lock);
+
+        // The HQ copy starts only now. Running both at once split YouTube's bandwidth and
+        // delayed the first frame by ~50% (14.5 s alone vs 22 s concurrent, 44-min source),
+        // and was the likely cause of the low-res download failing outright. It starts even
+        // when this download failed, so the upgrade can still rescue the preview.
+        if let Some(hq_h) = hq_param {
+            start_yt_hq_bg(&original_url, hq_h);
+        }
 
         let dl_ok = result.unwrap_or(false);
         if !dl_ok {
@@ -1210,11 +1238,13 @@ pub async fn handle_http(
         }
         let query = req.uri().query().unwrap_or("");
         let mut raw_url: Option<String> = None;
+        let mut q_param: Option<u32> = None;
         for part in query.split('&') {
             let mut it = part.splitn(2, '=');
-            if it.next() == Some("url") {
-                raw_url = it.next().map(|s| s.to_string());
-                break;
+            match it.next() {
+                Some("url") => raw_url = it.next().map(|s| s.to_string()),
+                Some("q") => q_param = it.next().and_then(|v| v.parse::<u32>().ok()),
+                _ => {}
             }
         }
         let encoded = match raw_url {
@@ -1225,6 +1255,11 @@ pub async fn handle_http(
             Ok(u) => u.into_owned(),
             Err(_) => return Ok(text_response(400, "bad_url_encoding")),
         };
+        // The HQ job only starts once the low-res download ends, so "not_started" alone
+        // does not mean nothing is coming. With `q`, report that download as well.
+        let lq_running = q_param.map_or(false, |h| {
+            lock_is_active(&yt_preview_lock_path(&yt_preview_path(&original_url, &h.to_string())))
+        });
 
         let hq = yt_preview_path(&original_url, "hq");
         let lock = yt_preview_lock_path(&hq);
@@ -1235,6 +1270,8 @@ pub async fn handle_http(
             let path_str = hq.to_string_lossy().to_string();
             let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
             format!(r#"{{"status":"ready","path":"{}"}}"#, escaped)
+        } else if lq_running {
+            r#"{"status":"waiting_for_low_res"}"#.to_string()
         } else {
             r#"{"status":"not_started"}"#.to_string()
         };

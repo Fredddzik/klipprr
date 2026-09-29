@@ -368,6 +368,9 @@ useEffect(() => {
   /** Path to the background 720p preview for DASH-only sources (YouTube). Null until
    *  /yt-proxy-status reports "ready"; then the player swaps up from the 360p copy. */
   const [ytHqPreviewPath, setYtHqPreviewPath] = useState<string | null>(null);
+  /** The low-res local download failed, so the viewport is waiting on the HQ copy alone.
+   *  Read by the HQ poller to decide when to stop showing "Preparing preview…". */
+  const ytLqFailedRef = useRef(false);
   // Remove resolveRequestId state, use ref instead for request tracking
   const resolveReqRef = useRef(0);
   const pendingSeekRef = useRef<number | null>(null);
@@ -783,6 +786,7 @@ function readPendingReservation(): number {
     setYtPreviewPath(null);
     setYtPreviewLoading(false);
     setYtHqPreviewPath(null);
+    ytLqFailedRef.current = false;
 
     if (!resolvedUrl || !videoData || !isTauri) return;
 
@@ -818,16 +822,28 @@ function readPendingReservation(): number {
         if (data?.ok && data?.background) return;
         if (data?.ok && data?.path) {
           setYtPreviewPath(data.path as string);
+          setYtPreviewLoading(false);
         } else {
           console.warn("[local preview] yt-preview-cache failed:", data);
-          setYtPreviewPath(null);
+          lowResFailed();
         }
       })
       .catch((e) => {
         console.warn("[local preview] fetch error:", e);
-        setYtPreviewPath(null);
-      })
-      .finally(() => setYtPreviewLoading(false));
+        lowResFailed();
+      });
+
+    // The HQ download starts when this one ends, success or not, and usually rescues the
+    // preview. Keep "Preparing preview…" up and let the HQ poller end it, instead of
+    // flashing "Unable to load preview" at a video that is about to appear.
+    function lowResFailed() {
+      setYtPreviewPath(null);
+      if (needsLocalPreview) {
+        ytLqFailedRef.current = true;
+      } else {
+        setYtPreviewLoading(false);
+      }
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedUrl, videoData?.id]);
 
@@ -846,13 +862,20 @@ function readPendingReservation(): number {
     const check = async () => {
       if (!active) return;
       try {
+        // q=360 matches the low-res tier requested above, so the status also says when
+        // that download is still running and the HQ job simply has not started yet.
         const res = await fetch(
-          `${CLIPAGENT_HTTP}/yt-proxy-status?url=${encodeURIComponent(resolvedUrl)}`
+          `${CLIPAGENT_HTTP}/yt-proxy-status?url=${encodeURIComponent(resolvedUrl)}&q=360`
         );
         const data = (await res.json()) as { status: string; path?: string };
         if (!active) return;
         if (data.status === "ready" && data.path) {
           setYtHqPreviewPath(data.path);
+          setYtPreviewLoading(false);
+          if (intervalId !== null) clearInterval(intervalId);
+        } else if (data.status === "not_started" && ytLqFailedRef.current) {
+          // Both downloads have failed: nothing else is coming, so show the error.
+          setYtPreviewLoading(false);
           if (intervalId !== null) clearInterval(intervalId);
         }
       } catch {

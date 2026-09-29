@@ -255,7 +255,7 @@ pub fn open_export_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
-fn log_to_file(msg: &str) {
+pub(crate) fn log_to_file(msg: &str) {
     if let Some(mut dir) = dirs::home_dir() {
         dir.push("Library/Logs/ClipAgent/clipagent.log");
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(dir) {

@@ -29,6 +29,26 @@ instant. But that rendition's availability varies per request, so on any given v
 still fall into the download-and-wait path.
 
 **Recommendation:** see FR-3 — this and FR-2 are the same architectural problem.
+
+**Measured and partly fixed (2026-09-29)**, on a 44-minute video (160 MB at 360p):
+
+| Approach | Time to first frame |
+|---|---|
+| 360p and 720p downloading at once (before) | 22.0 s, and the 360p download sometimes failed |
+| 360p alone, 720p started after it (now) | 14.5 s |
+| Reusing resolve's JSON (`--load-info-json`) | saves ~2 s only |
+| 240p instead of 360p; 48 kbps audio | no faster: YouTube throttles per request, not by size |
+| First 2 minutes only (`--download-sections`) | **74 s**: yt-dlp hands sections to ffmpeg, which YouTube throttles to near real time. Phase 2's head-first plan via yt-dlp is dead |
+
+Shipped: the HQ download starts after the low-res one; each download retries once and
+logs yt-dlp's error; the viewport keeps "Preparing preview…" until something is actually
+playable or both downloads have failed (it used to flash the DRM message mid-download).
+
+What is left scales with video length: any full download of a long video takes seconds.
+The only route to a ~1–2 s first frame on YouTube is not downloading at all: play the DASH
+video and audio streams directly through Media Source Extensions, fetched via
+`/preview-stream` (whose FR-2 disk cache then makes every revisited region instant). That
+is FR-3 phase 3, sized M–L.
 **Interim (S):** fetch a short head section first (~90 s) so work can start in a few
 seconds, continue the full-length download behind it, and show which part of the timeline
 is ready.
