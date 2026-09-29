@@ -2,6 +2,7 @@ mod paths;
 mod output;
 mod commands;
 mod http;
+mod preview_cache;
 mod storage;
 mod license;
 

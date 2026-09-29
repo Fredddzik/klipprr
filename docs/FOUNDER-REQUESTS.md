@@ -58,7 +58,27 @@ normal scrubbing and seeking becomes instant.
 This is a contained, low-risk change and does **not** require the FR-3 redesign. It is the
 highest value-per-hour item in the queue.
 
-**Status:** `ready`
+**Fixed (2026-09-29):** `src/preview_cache.rs`. Every byte relayed through `/preview-stream`
+is written at its offset in a sparse file under `$TMPDIR/clipagent_preview_cache/stream/`,
+and the covered ranges are tracked in memory. Once a URL's size is known, requests are
+answered locally: cached runs from disk, gaps fetched from the origin and cached on the way
+through. Bytes are stored verbatim, so preview time is unchanged. 2 GB budget, least recently
+used entries evicted first; the directory is wiped on first use each launch. macOS only;
+Windows keeps the old pass-through (writing far past EOF zero-fills on NTFS).
+
+Measured against a 30 MB public MP4, every response byte-compared with the origin:
+
+| | Cold (network) | Cached |
+|---|---|---|
+| 2 MB range at the start | 228 ms | **2.5 ms** |
+| 2 MB range at 20 MB | 206 ms | **2.3 ms** |
+| 23 MB span over three cached runs and two gaps | 411 ms | **12 ms** |
+
+Also verified: a request the player abandons halfway keeps what it received; `HEAD`,
+past-the-end (`416`) and full `GET` without `Range`; a real `<video>` element seeking
+8 → 2 → 5 → 9.5 s lands on each exact time.
+
+**Status:** `done`, pending founder verification on a real Twitch clip.
 
 ---
 

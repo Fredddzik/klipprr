@@ -8,6 +8,8 @@ use tauri::AppHandle;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use crate::commands::download;
+use crate::preview_cache;
+use once_cell::sync::Lazy;
 use crate::paths::{ffmpeg_path, ffprobe_path, yt_dlp_path, running_from_sandboxed_app, skip_browser_cookies_for_yt_dlp, yt_dlp_cookies_browser};
 use urlencoding::decode as url_decode;
 use std::net::IpAddr;
@@ -509,6 +511,214 @@ fn resolve_local_preview_path(decoded: &str, force_pcm_fix: bool) -> Result<Path
     Ok(resolved_path)
 }
 
+/// Shared so gap fetches reuse pooled connections instead of a fresh TLS handshake
+/// on every seek.
+static PREVIEW_CLIENT: Lazy<Option<reqwest::Client>> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .build()
+        .ok()
+});
+
+/// Largest slice read from the cache file per body chunk.
+const CACHE_READ_CHUNK: u64 = 256 * 1024;
+
+fn with_preview_referer(rb: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+    if url.contains("youtube.com") || url.contains("youtu.be") {
+        rb.header("Referer", "https://www.youtube.com/")
+    } else if url.contains("tiktok.com") {
+        rb.header("Referer", "https://www.tiktok.com/")
+    } else if url.contains("twimg.com") || url.contains("twitter.com") || url.contains("t.co") {
+        rb.header("Referer", "https://x.com/")
+    } else {
+        rb
+    }
+}
+
+/// The byte range a `/preview-stream` request asks for. Suffix and multi-range
+/// requests are not modelled; they fall through to the uncached relay.
+#[derive(Clone, Copy)]
+enum PreviewRange {
+    Whole,
+    From(u64, Option<u64>),
+}
+
+fn parse_preview_range(req: &Request<Body>) -> Option<PreviewRange> {
+    let Some(v) = req.headers().get(hyper::header::RANGE) else {
+        return Some(PreviewRange::Whole);
+    };
+    let spec = v.to_str().ok()?.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (s, e) = spec.split_once('-')?;
+    let start = s.trim().parse::<u64>().ok()?;
+    let end = match e.trim() {
+        "" => None,
+        e => Some(e.parse::<u64>().ok()?),
+    };
+    if end.map_or(false, |e| e < start) {
+        return None;
+    }
+    Some(PreviewRange::From(start, end))
+}
+
+fn range_starts_at_zero(range: &Option<PreviewRange>) -> bool {
+    matches!(range, Some(PreviewRange::Whole) | Some(PreviewRange::From(0, _)))
+}
+
+/// `bytes a-b/total` → (a, b, total). `*` totals are rejected: without a size there
+/// is nothing to cache against.
+fn parse_content_range(v: &str) -> Option<(u64, u64, u64)> {
+    let rest = v.trim().strip_prefix("bytes ")?;
+    let (span, total) = rest.split_once('/')?;
+    let (a, b) = span.split_once('-')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?, total.trim().parse().ok()?))
+}
+
+/// Answers a preview request for a URL whose size is known, without waiting on the
+/// origin for any byte already on disk.
+fn serve_cached_preview(
+    method: &Method,
+    url: String,
+    total: u64,
+    content_type: String,
+    range: PreviewRange,
+) -> Response<Body> {
+    let (start, end, partial) = match range {
+        PreviewRange::Whole => (0, total - 1, false),
+        PreviewRange::From(s, e) => (s, e.unwrap_or(total - 1).min(total - 1), true),
+    };
+    if start >= total {
+        let mut res = text_response(416, "range_not_satisfiable");
+        res.headers_mut()
+            .insert("Content-Range", format!("bytes */{}", total).parse().unwrap());
+        res.headers_mut()
+            .insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+        return res;
+    }
+    let len = end - start + 1;
+    let body = if *method == Method::HEAD {
+        Body::empty()
+    } else {
+        let (tx, body) = Body::channel();
+        tokio::spawn(fill_from_cache(tx, url, start, end + 1));
+        body
+    };
+    let mut res = Response::new(body);
+    *res.status_mut() = if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK };
+    let h = res.headers_mut();
+    if let Ok(hv) = content_type.parse() {
+        h.insert("Content-Type", hv);
+    }
+    h.insert("Accept-Ranges", "bytes".parse().unwrap());
+    h.insert("Content-Length", len.to_string().parse().unwrap());
+    if partial {
+        h.insert(
+            "Content-Range",
+            format!("bytes {}-{}/{}", start, end, total).parse().unwrap(),
+        );
+    }
+    h.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    res
+}
+
+/// Streams `[pos, end)`: cached runs from disk, gaps from the origin (caching them
+/// as they pass). Stops quietly when the player hangs up, which it does on every seek.
+async fn fill_from_cache(mut tx: hyper::body::Sender, url: String, mut pos: u64, end: u64) {
+    let Some(path) = preview_cache::path_for(&url) else {
+        tx.abort();
+        return;
+    };
+    while pos < end {
+        if let Some(run_end) = preview_cache::cached_run_end(&url, pos) {
+            let stop = run_end.min(end);
+            while pos < stop {
+                let n = (stop - pos).min(CACHE_READ_CHUNK) as usize;
+                let Ok(buf) = preview_cache::read_at(&path, pos, n) else {
+                    tx.abort();
+                    return;
+                };
+                if tx.send_data(buf.into()).await.is_err() {
+                    return;
+                }
+                pos += n as u64;
+            }
+            continue;
+        }
+
+        let gap_end = preview_cache::next_cached_start(&url, pos, end);
+        let Some(client) = PREVIEW_CLIENT.as_ref() else {
+            tx.abort();
+            return;
+        };
+        let req = with_preview_referer(client.get(&url), &url)
+            .header(hyper::header::RANGE, format!("bytes={}-{}", pos, gap_end - 1));
+        let mut resp = match req.send().await {
+            Ok(r) if r.status().as_u16() == 206 => r,
+            _ => {
+                tx.abort();
+                return;
+            }
+        };
+        // Bytes from anywhere but `pos` would be written at the wrong offset and
+        // corrupt the cache for the rest of the session.
+        let starts_right = resp
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_content_range)
+            .map_or(false, |(a, _, _)| a == pos);
+        if !starts_right {
+            tx.abort();
+            return;
+        }
+        while pos < gap_end {
+            let chunk = match resp.chunk().await {
+                Ok(Some(c)) => c,
+                _ => {
+                    tx.abort();
+                    return;
+                }
+            };
+            let take = chunk.len().min((gap_end - pos) as usize);
+            let chunk = chunk.slice(..take);
+            if preview_cache::write_at(&path, pos, &chunk).is_ok() {
+                preview_cache::record(&url, pos, take as u64);
+            }
+            if tx.send_data(chunk).await.is_err() {
+                return;
+            }
+            pos += take as u64;
+        }
+    }
+}
+
+/// Relays an origin response to the player while writing each chunk into the cache
+/// at its offset in the file.
+async fn tee_into_cache(mut upstream: reqwest::Response, mut tx: hyper::body::Sender, url: String, mut pos: u64) {
+    let path = preview_cache::path_for(&url);
+    loop {
+        let chunk = match upstream.chunk().await {
+            Ok(Some(c)) => c,
+            Ok(None) => return,
+            Err(_) => {
+                tx.abort();
+                return;
+            }
+        };
+        if let Some(ref p) = path {
+            if preview_cache::write_at(p, pos, &chunk).is_ok() {
+                preview_cache::record(&url, pos, chunk.len() as u64);
+            }
+        }
+        pos += chunk.len() as u64;
+        if tx.send_data(chunk).await.is_err() {
+            return;
+        }
+    }
+}
+
 pub fn json_response(status: u16, body: String) -> Response<Body> {
     let mut res = Response::new(Body::from(body));
     *res.status_mut() = StatusCode::from_u16(status).unwrap();
@@ -700,13 +910,16 @@ pub async fn handle_http(
         if is_blocked_preview_target(&decoded) {
             return Ok(text_response(400, "blocked_target_host"));
         }
-        let client = reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .build();
-        let client = match client {
-            Ok(c) => c,
-            Err(_) => return Ok(text_response(500, "client_build")),
+        let Some(client) = PREVIEW_CLIENT.as_ref() else {
+            return Ok(text_response(500, "client_build"));
         };
+        let range = parse_preview_range(&req);
+
+        // Size already known: answer locally, reading cached runs from disk and
+        // fetching (and caching) only the gaps.
+        if let (Some((total, content_type)), Some(range)) = (preview_cache::lookup(&decoded), range) {
+            return Ok(serve_cached_preview(&method, decoded, total, content_type, range));
+        }
 
         let upstream_method = if method == Method::HEAD {
             reqwest::Method::HEAD
@@ -714,20 +927,13 @@ pub async fn handle_http(
             reqwest::Method::GET
         };
 
-        let mut proxy_req = client.request(upstream_method, &decoded);
+        let mut proxy_req = with_preview_referer(client.request(upstream_method, &decoded), &decoded);
         if method == Method::GET {
             if let Some(range_val) = req.headers().get(hyper::header::RANGE) {
                 if let Ok(s) = range_val.to_str() {
                     proxy_req = proxy_req.header(hyper::header::RANGE, s);
                 }
             }
-        }
-        if decoded.contains("youtube.com") || decoded.contains("youtu.be") {
-            proxy_req = proxy_req.header("Referer", "https://www.youtube.com/");
-        } else if decoded.contains("tiktok.com") {
-            proxy_req = proxy_req.header("Referer", "https://www.tiktok.com/");
-        } else if decoded.contains("twimg.com") || decoded.contains("twitter.com") || decoded.contains("t.co") {
-            proxy_req = proxy_req.header("Referer", "https://x.com/");
         }
 
         let upstream = match proxy_req.send().await {
@@ -762,6 +968,23 @@ pub async fn handle_http(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
+        // Where this response's bytes sit in the file, and the file's size. Caching
+        // needs both, and later gap fetches need the origin to honour Range, so a 200
+        // only qualifies when it starts at 0 and advertises byte ranges.
+        let origin_takes_ranges = accept_ranges.as_deref().map_or(false, |v| v.eq_ignore_ascii_case("bytes"));
+        let placement = if status == StatusCode::PARTIAL_CONTENT {
+            content_range
+                .as_deref()
+                .and_then(parse_content_range)
+                .map(|(start, _, total)| (start, total))
+        } else if status == StatusCode::OK && origin_takes_ranges && range_starts_at_zero(&range) {
+            content_length.as_deref().and_then(|s| s.parse::<u64>().ok()).map(|len| (0, len))
+        } else {
+            None
+        };
+        let cacheable = placement
+            .map_or(false, |(_, total)| preview_cache::ensure_entry(&decoded, total, &content_type));
+
         if method == Method::HEAD {
             let mut res = Response::new(Body::empty());
             *res.status_mut() = status;
@@ -791,7 +1014,14 @@ pub async fn handle_http(
         }
 
         // GET: stream body; preserve 200 vs 206 and range headers from upstream.
-        let body = Body::wrap_stream(upstream.bytes_stream());
+        let body = match placement {
+            Some((start, _)) if cacheable => {
+                let (tx, body) = Body::channel();
+                tokio::spawn(tee_into_cache(upstream, tx, decoded, start));
+                body
+            }
+            _ => Body::wrap_stream(upstream.bytes_stream()),
+        };
         let mut res = Response::new(body);
         *res.status_mut() = status;
         res.headers_mut()

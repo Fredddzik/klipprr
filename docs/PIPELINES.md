@@ -113,8 +113,9 @@ all future upgrades for that URL.
 
 - **`/yt-preview-cache` downloads the entire file before responding.** For a long source
   that is tens of seconds of spinner. Nothing streams while it downloads.
-- **`/preview-stream` does not cache.** Every seek re-requests bytes from the origin CDN.
-  This is why scrubbing a Twitch clip feels laggy even though the clip is short.
+- **`/preview-stream` caches per session only.** Byte ranges are kept on disk
+  (`preview_cache.rs`) so re-seeking is local, but the first visit to any region still
+  waits on the origin CDN, and nothing survives an app restart.
 - **No frame-level seek affordance.** The timeline seeks by time only.
 
 Any redesign must preserve the invariants below.
