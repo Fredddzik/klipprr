@@ -81,3 +81,4 @@ docs/                  You are here
 - `docs/RELEASE.md` — build, sign, notarize, ship, auto-update
 - `docs/AUDIT-2026-09.md` — known weaknesses and the reform backlog
 - `docs/FOUNDER-REQUESTS.md` — the live request queue with engineering translation
+- `docs/STRATEGY-BACKLOG.md` — parked business decisions (pricing, tiers, audience) and what would unlock each
