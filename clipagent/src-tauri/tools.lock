@@ -17,5 +17,5 @@ YT_DLP_VERSION=2026.08.19
 # To upgrade: bump the versions (and REVISION) in scripts/build-ffmpeg.sh, then run the
 # "Build ffmpeg" workflow. It builds, smoke-tests and publishes, then rewrites both lines
 # below in a commit of its own. Never edit them by hand.
-FFMPEG_MACOS_BUILD=
-FFMPEG_MACOS_SHA256=
+FFMPEG_MACOS_BUILD=ffmpeg-9.0.2-macos-arm64-r1
+FFMPEG_MACOS_SHA256=8699590dde6918214ae43db34c49e611f70615543341a4686f338dcaa1178ddc
