@@ -417,9 +417,25 @@ It stays silent when everything passes. On a failure it sends a macOS notificati
 a report; as a Claude Code scheduled task it can also read the error, check yt-dlp's issue
 tracker and release notes, and propose the fix.
 
-**Test URLs should be our own uploads** (a short Klipprr demo on the @klipprr YouTube,
-Twitch, Instagram and X accounts). Other people's videos get deleted or made private, which
-looks like a breakage; our own stay put, and there is no rights question.
+**Telling "the video is gone" apart from "Klipprr is broken".** A deleted or private test
+video must not raise a breakage alarm. Two safeguards:
+
+- **Two test URLs per platform;** an alarm only when both fail.
+- **An independent availability check on any failure.** YouTube and X publish oEmbed
+  endpoints that return "not found" for removed or private videos, with no yt-dlp involved.
+  Instagram's oEmbed needs a Meta API token, so there the script classifies yt-dlp's own
+  error text ("unavailable", "removed", "private"). A missing video becomes a low-priority
+  note ("replace the X test link"), not an alarm.
+
+**Test URLs.** Start with stable public videos; move to our own uploads when they exist,
+since we control those. YouTube uploads can be **unlisted**: they play for anyone with the
+link and need no login, and stay off the channel and search. Private videos cannot be used.
+Twitch deletes past broadcasts after a few weeks, so the Twitch VOD test must be a highlight
+or an upload, which are permanent. Instagram and X have no unlisted mode.
+
+**Nothing leaves the machine.** The script drives the bundled binaries directly, not an
+account's export, so no clip is uploaded, stored or counted against any plan limit. Clips
+go to a temporary folder and are deleted at the end of each run; only the report is kept.
 
 **Effort:** S (a script, `scripts/health-check.sh`, plus the schedule).
-**Status:** `ready`. Needs the test uploads first.
+**Status:** `ready`. Can start with public test URLs; own uploads are an upgrade, not a prerequisite.
