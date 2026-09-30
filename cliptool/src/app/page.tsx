@@ -867,13 +867,20 @@ function readPendingReservation(): number {
         const res = await fetch(
           `${CLIPAGENT_HTTP}/yt-proxy-status?url=${encodeURIComponent(resolvedUrl)}&q=360`
         );
-        const data = (await res.json()) as { status: string; path?: string };
+        const data = (await res.json()) as { status: string; path?: string; lq_path?: string };
         if (!active) return;
+        // The low-res copy finished, but its own request may have been abandoned (the
+        // webview gives up on long downloads). Play it now; keep polling for the HQ copy.
+        if (data.lq_path) {
+          const lqPath = data.lq_path;
+          setYtPreviewPath((prev) => prev ?? lqPath);
+          setYtPreviewLoading(false);
+        }
         if (data.status === "ready" && data.path) {
           setYtHqPreviewPath(data.path);
           setYtPreviewLoading(false);
           if (intervalId !== null) clearInterval(intervalId);
-        } else if (data.status === "not_started" && ytLqFailedRef.current) {
+        } else if (data.status === "not_started" && !data.lq_path && ytLqFailedRef.current) {
           // Both downloads have failed: nothing else is coming, so show the error.
           setYtPreviewLoading(false);
           if (intervalId !== null) clearInterval(intervalId);

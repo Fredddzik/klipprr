@@ -1201,20 +1201,32 @@ pub async fn handle_http(
         let out_for_dl = out_mp4.clone();
 
         let lq_lock = yt_preview_lock_path(&out_mp4);
+        // A second request for a download already running (the viewport retrying, or the
+        // same video opened again) must not start another yt-dlp into the same file.
+        if lock_is_active(&lq_lock) {
+            return Ok(json_response(202, r#"{"ok":false,"reason":"in_progress"}"#.to_string()));
+        }
         let _ = std::fs::write(&lq_lock, b"");
+        let lock_for_dl = lq_lock.clone();
+        let url_for_hq = original_url.clone();
         let result = tokio::task::spawn_blocking(move || {
-            run_yt_preview_download(&url_for_dl, &out_for_dl, &selector, max_secs)
+            let ok = run_yt_preview_download(&url_for_dl, &out_for_dl, &selector, max_secs);
+            // Everything that must follow the download happens here, not after the await.
+            // When the webview abandons this request (it does on long sources), hyper drops
+            // the handler at the await and nothing after it runs. 0.1.30 did this work after
+            // the await: a 2-hour video's 360p copy finished in 36 s, but its lock was never
+            // removed and the HQ copy never started, so the viewport waited forever.
+            let _ = std::fs::remove_file(&lock_for_dl);
+            // The HQ copy starts only now. Running both at once split YouTube's bandwidth
+            // and delayed the first frame by ~50% (14.5 s alone vs 22 s concurrent,
+            // 44-min source). It starts even when this download failed, so the upgrade can
+            // still rescue the preview.
+            if let Some(hq_h) = hq_param {
+                start_yt_hq_bg(&url_for_hq, hq_h);
+            }
+            ok
         })
         .await;
-        let _ = std::fs::remove_file(&lq_lock);
-
-        // The HQ copy starts only now. Running both at once split YouTube's bandwidth and
-        // delayed the first frame by ~50% (14.5 s alone vs 22 s concurrent, 44-min source),
-        // and was the likely cause of the low-res download failing outright. It starts even
-        // when this download failed, so the upgrade can still rescue the preview.
-        if let Some(hq_h) = hq_param {
-            start_yt_hq_bg(&original_url, hq_h);
-        }
 
         let dl_ok = result.unwrap_or(false);
         if !dl_ok {
@@ -1257,8 +1269,12 @@ pub async fn handle_http(
         };
         // The HQ job only starts once the low-res download ends, so "not_started" alone
         // does not mean nothing is coming. With `q`, report that download as well.
-        let lq_running = q_param.map_or(false, |h| {
-            lock_is_active(&yt_preview_lock_path(&yt_preview_path(&original_url, &h.to_string())))
+        let lq = q_param.map(|h| yt_preview_path(&original_url, &h.to_string()));
+        let lq_running = lq.as_ref().map_or(false, |p| lock_is_active(&yt_preview_lock_path(p)));
+        // A finished low-res copy, reported so the viewport can play it even when its own
+        // /yt-preview-cache request was abandoned before the download completed.
+        let lq_ready = lq.filter(|p| {
+            !lq_running && p.is_file() && std::fs::metadata(p).map(|m| m.len()).unwrap_or(0) > 65536
         });
 
         let hq = yt_preview_path(&original_url, "hq");
@@ -1274,6 +1290,14 @@ pub async fn handle_http(
             r#"{"status":"waiting_for_low_res"}"#.to_string()
         } else {
             r#"{"status":"not_started"}"#.to_string()
+        };
+
+        let status_json = match lq_ready {
+            Some(p) => {
+                let escaped = p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+                format!(r#"{},"lq_path":"{}"}}"#, &status_json[..status_json.len() - 1], escaped)
+            }
+            None => status_json,
         };
 
         return Ok(json_response(200, status_json));
