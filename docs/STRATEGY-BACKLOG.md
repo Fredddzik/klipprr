@@ -32,10 +32,14 @@ connected at the time, so the top of the funnel is missing.
 | Paid | 0 | Stripe |
 
 PostHog only sees visitors who accept analytics cookies, so its top two rows are floors, not
-totals. Its app-side events are unreliable: `app_opened` and `clip_exported` show 4 and 2
-people against Supabase's 9 exporters, and stopped arriving after 2026-09-10. Download clicks
-are relayed through `/api/track` on the server, so PostHog attributes each one to the server
-(US, "Automation") and cannot tie it to the visitor's source.
+totals. The app sends PostHog nothing: release builds never had a key, and app analytics are
+now switched off by design (no consent prompt in the app). The `app_opened` / `clip_exported`
+events in PostHog are the founder's local dev builds; ignore them. **Measure the app from
+Supabase**: accounts (`auth.users`) and exporters (`clip_usage_monthly`).
+
+Download clicks before 2026-09-30 are attributed to the web server (US, "Automation") and
+have no source. From that date they join the visitor's own session, so "where do
+downloaders come from" becomes answerable once a few weeks of data exist.
 
 Reading it: about 4 in 10 accounts export a clip, which is healthy for a free tool. The binding
 constraint is volume at the top: two new accounts a month cannot tell any pricing model apart.

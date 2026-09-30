@@ -4,6 +4,7 @@ import posthog from "posthog-js";
 import { PostHogProvider as PHProvider, usePostHog } from "posthog-js/react";
 import { useEffect } from "react";
 import { supabase } from "@/lib/supabase";
+import { APP_ANALYTICS_ENABLED } from "@/lib/analytics";
 
 const POSTHOG_KEY = process.env.NEXT_PUBLIC_POSTHOG_KEY!;
 const POSTHOG_HOST = process.env.NEXT_PUBLIC_POSTHOG_HOST!;
@@ -46,7 +47,7 @@ function PostHogInit() {
 }
 
 export function PostHogProvider({ children }: { children: React.ReactNode }) {
-  if (!POSTHOG_KEY) return <>{children}</>;
+  if (!APP_ANALYTICS_ENABLED || !POSTHOG_KEY) return <>{children}</>;
   return (
     <PHProvider client={posthog}>
       <PostHogInit />

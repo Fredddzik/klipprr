@@ -1,3 +1,5 @@
+import { APP_ANALYTICS_ENABLED } from "@/lib/analytics";
+
 const POSTHOG_API_KEY = process.env.NEXT_PUBLIC_POSTHOG_KEY ?? "";
 const DECIDE_URL = "https://app.posthog.com/decide/?v=3";
 
@@ -26,7 +28,8 @@ export function clearAppFeatureFlagsCache(): void {
 
 export async function fetchAppFeatureFlags(distinctId: string): Promise<AppFeatureFlags> {
   if (sessionCache) return sessionCache;
-  if (!POSTHOG_API_KEY || !distinctId) return FALLBACK;
+  // Sends the account id to PostHog, so it is analytics too. Every user sees "control".
+  if (!APP_ANALYTICS_ENABLED || !POSTHOG_API_KEY || !distinctId) return FALLBACK;
 
   try {
     const res = await fetch(DECIDE_URL, {
