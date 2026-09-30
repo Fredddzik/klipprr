@@ -19,10 +19,11 @@ connected at the time, so the top of the funnel is missing.
 | Clips exported, all time | 42 |
 | Accounts that ever hit the 10-clip free limit | 1 |
 | Licences on Pro/Max | 7: 4 via Stripe, 2 via activation code, 1 founder/test |
+| Paying customers | **0**. The 4 Stripe subscriptions are the founder's test accounts (confirmed 2026-09-30) |
 
 Reading it: the 10-clip limit is almost never reached, so it is not what drives upgrades today.
-Whether the 4 Stripe subscriptions are real paying customers has to be checked in Stripe; the
-`status` column in `licenses` is empty for all of them.
+Nobody has paid yet, so no pricing change can hurt an existing customer: the question is only
+which model gets the first ones.
 
 ---
 
@@ -46,8 +47,8 @@ only one account has ever hit it.
 
 ### Remove the Max (8K) tier
 **Why:** almost no source offers 8K, so the tier mostly sells a number.
-**Blocker:** one active Max licence exists (issued 2026-03-25, expires 2027-03-25). Honour it
-until it expires, or move that user to Pro with a partial refund. Do not remove it silently.
+**No blocker:** the one active Max licence is a founder test account, so the tier can be
+removed whenever the pricing decision is made.
 
 ### Longer free trial of full quality
 **Idea:** 14 days or 25 clips without the watermark, so people reach the "this is good"
