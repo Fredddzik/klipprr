@@ -357,4 +357,29 @@ stop working entirely. Decide before that happens: bundle Deno (~100 MB, would r
 the app download) or accept the degradation. Needs measuring: how often downloads fail with
 and without it.
 
-**Status:** regression `fixed` (0.1.31); streaming preview `ready` to design.
+**Built (2026-09-30).** `dash.rs` + `/yt-dash.mpd` + Shaka Player (DASH-only build,
+521 KB, Apache-2.0) in `VideoViewport`. Resolve remembers the H.264 (≤1080p) and AAC
+renditions; the manifest endpoint reads each file's first 64 KB for its `moov` and `sidx`
+ranges (seeding the FR-2 cache with them) and serves an on-demand DASH manifest. Any Shaka
+error falls back to the old download path. Measured on the 2 h 13 min video:
+
+| | Downloaded preview (0.1.31) | Streamed |
+|---|---|---|
+| Manifest ready | n/a | 0.35 s |
+| First frame | minutes | 0.2 s |
+| Quality | 360p, 720p later | 1080p from the start (Shaka's ABR picks) |
+| Seek to 1 h / 2 h 10 m | after the full download | 1.3 s / 0.7 s |
+| Seek back to a watched region | instant | 0.05 s (disk cache) |
+
+Verified in Chromium (every seek landed on the exact requested time) and in the real app
+(WKWebView): the video opened at 1080p at a saved mid-video position.
+
+**Deno decision (same day):** not bundled. 8 videos × 2 rounds with and without it: 32/32
+downloads succeeded either way, formats and timings equal. +40 MB for no measured gain.
+Revisit if `[YT-PREVIEW]` failures appear in logs.
+
+**Known limits:** YouTube's signed media URLs expire after some hours, so a preview left open
+that long will fail on its next fetch and fall back to the download path (re-loading the URL
+also fixes it). Windows is untested (WebView2 has MSE, so it should work).
+
+**Status:** `done`. Founder-tested in the app 2026-09-30: seeks anywhere in the 2-hour video under half a second. Ships as 0.1.32.

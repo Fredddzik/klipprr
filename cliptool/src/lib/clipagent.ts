@@ -113,6 +113,8 @@ export interface ResolveResponse {
      *  `url` already is the best preview the source offers. Non-zero on YouTube, whose
      *  only muxed rendition is 360p while separate H.264 streams reach 720p+. */
     local_upgrade_height?: number;
+    /** The agent can stream this preview from /yt-dash.mpd instead of downloading it. */
+    dash?: boolean;
   };
   best?: { url: string };
   /** Local-only diagnostic: detected audio codec from ffprobe (e.g. pcm_s16le, lpcm). */
@@ -138,6 +140,8 @@ export interface ResolvedVideo {
   /** Height to fetch a better preview at in the background, or 0 when previewUrl is
    *  already the best available. */
   localUpgradeHeight: number;
+  /** A streamed preview is available at /yt-dash.mpd (FR-7). */
+  dashAvailable: boolean;
   capabilities: {
     fastMaxHeight: number;
     trueMaxHeight: number;
@@ -176,6 +180,7 @@ function normalizeResolve(raw: ResolveResponse): ResolvedVideo | null {
     previewUrl: previewUrl ? String(previewUrl) : "",
     requiresLocalPreview,
     localUpgradeHeight,
+    dashAvailable: Boolean(raw.preview?.dash),
     capabilities: caps,
     raw,
   };

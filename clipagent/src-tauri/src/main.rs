@@ -3,6 +3,7 @@ mod output;
 mod commands;
 mod http;
 mod preview_cache;
+mod dash;
 mod storage;
 mod license;
 

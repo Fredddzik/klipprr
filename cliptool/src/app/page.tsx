@@ -371,6 +371,17 @@ useEffect(() => {
   /** The low-res local download failed, so the viewport is waiting on the HQ copy alone.
    *  Read by the HQ poller to decide when to stop showing "Preparing preview…". */
   const ytLqFailedRef = useRef(false);
+  /** The streamed preview failed for this video; use the downloaded one instead. */
+  const [dashFailed, setDashFailed] = useState(false);
+  useEffect(() => {
+    setDashFailed(false);
+  }, [resolvedUrl, videoData?.id]);
+  /** Stream the preview (FR-7): the first frame arrives in a second or two whatever the
+   *  video's length, and only what is watched is fetched. The download-then-play path
+   *  below stays as the fallback. */
+  const streamPreview =
+    typeof window !== "undefined" && !!(window as any).__TAURI__ &&
+    Boolean(videoData?.dashAvailable) && !dashFailed;
   // Remove resolveRequestId state, use ref instead for request tracking
   const resolveReqRef = useRef(0);
   const pendingSeekRef = useRef<number | null>(null);
@@ -747,6 +758,7 @@ function readPendingReservation(): number {
         // Local files are served straight from disk; nothing to merge or upgrade.
         requiresLocalPreview: false,
         localUpgradeHeight: 0,
+        dashAvailable: false,
         capabilities: {
           fastMaxHeight: 1080,
           trueMaxHeight: 1080,
@@ -789,6 +801,7 @@ function readPendingReservation(): number {
     ytLqFailedRef.current = false;
 
     if (!resolvedUrl || !videoData || !isTauri) return;
+    if (streamPreview) return;
 
     // TikTok: CDN URLs can't be fetched by WKWebView, so a throwaway low-res copy is enough.
     const isTikTok =
@@ -845,7 +858,7 @@ function readPendingReservation(): number {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedUrl, videoData?.id]);
+  }, [resolvedUrl, videoData?.id, streamPreview]);
 
   // Background 720p preview polling for YouTube. Whatever is on screen — the 360p local
   // copy, or the 360p muxed stream when one is still published — gets swapped up once the
@@ -853,7 +866,7 @@ function readPendingReservation(): number {
   // change, so scrubbing is unaffected.
   useEffect(() => {
     setYtHqPreviewPath(null);
-    if (!resolvedUrl || !isTauri) return;
+    if (!resolvedUrl || !isTauri || streamPreview) return;
     if (!videoData?.requiresLocalPreview && !(videoData?.localUpgradeHeight ?? 0)) return;
 
     let active = true;
@@ -897,7 +910,7 @@ function readPendingReservation(): number {
       if (intervalId !== null) clearInterval(intervalId);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedUrl, videoData?.id, videoData?.requiresLocalPreview, videoData?.localUpgradeHeight]);
+  }, [resolvedUrl, videoData?.id, videoData?.requiresLocalPreview, videoData?.localUpgradeHeight, streamPreview]);
 
   // Background HQ proxy polling: after a PCM local file loads (stream-copy phase 1 may lag
   // on large ProRes/DNxHD files), the backend encodes a smooth 720p H.264 proxy in a
@@ -1939,6 +1952,9 @@ useEffect(() => {
               <VideoViewport
                 src={(() => {
                   if (!isTauri) return videoData.previewUrl;
+                  if (streamPreview && resolvedUrl) {
+                    return `${CLIPAGENT_HTTP}/yt-dash.mpd?url=${encodeURIComponent(resolvedUrl)}`;
+                  }
 
                   // A locally merged copy always wins when one is available: it is the
                   // 720p upgrade, or the only playable source at all. This is checked
@@ -1980,6 +1996,10 @@ useEffect(() => {
                   return `${CLIPAGENT_HTTP}/preview-stream?url=${encodeURIComponent(videoData.previewUrl)}`;
                 })()}
                 videoKey={videoData.id}
+                onStreamError={(reason) => {
+                  console.warn("[stream preview] falling back to download:", reason);
+                  setDashFailed(true);
+                }}
                 currentTime={currentTime}
                 debugInfo={{
                   isLocal: Boolean(localFilePath),

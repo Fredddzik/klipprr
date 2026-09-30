@@ -74,6 +74,7 @@ There are **four** preview paths. Knowing which one is active is the first debug
 
 | Path | When | Source |
 |---|---|---|
+| **Streamed DASH** (FR-7) | `preview.dash` (YouTube with separate H.264/AAC streams) | `/yt-dash.mpd?url=<page url>` played by Shaka over MSE; media via `/preview-stream` |
 | **Direct stream** | `preview.url` set, not TikTok | `/preview-stream?url=…` proxy |
 | **Native HLS** | preview URL contains `m3u8` | passed straight to `<video>` (WKWebView decodes it; proxying breaks segment resolution) |
 | **Local merged** | `requires_local_preview`, or TikTok | `/yt-preview-cache` downloads + merges, served via `/local-preview` |

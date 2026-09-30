@@ -11,9 +11,17 @@ interface VideoViewportProps {
     audioCodec?: string | null;
     isLocal?: boolean;
   };
+  /** A streamed (DASH) preview failed to start or broke mid-playback. The parent falls
+   *  back to a downloaded preview. */
+  onStreamError?: (reason: string) => void;
 }
 
-export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate, debugInfo }: VideoViewportProps) {
+/** A DASH manifest from the agent (FR-7) rather than a file the element plays directly. */
+function isDashSource(src: string | null): boolean {
+  return !!src && src.includes("/yt-dash.mpd");
+}
+
+export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate, debugInfo, onStreamError }: VideoViewportProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const bindVideoRef = (el: HTMLVideoElement | null) => {
     videoRef.current = el;
@@ -112,6 +120,47 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
     setPreviewError(null);
   }, [src, videoKey]);
 
+  // Streamed previews play through Shaka over Media Source Extensions. The element gets no
+  // `src` of its own; Shaka attaches a MediaSource to it and feeds only what is watched.
+  const onStreamErrorRef = useRef(onStreamError);
+  onStreamErrorRef.current = onStreamError;
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !isDashSource(src)) return;
+    let player: any = null;
+    let cancelled = false;
+    const fail = (reason: string) => {
+      if (!cancelled) onStreamErrorRef.current?.(reason);
+    };
+    (async () => {
+      try {
+        const shaka: any = (await import("shaka-player/dist/shaka-player.dash")).default;
+        if (cancelled) return;
+        shaka.polyfill.installAll();
+        if (!shaka.Player.isBrowserSupported()) return fail("mse_unsupported");
+        player = new shaka.Player();
+        await player.attach(v);
+        player.configure({
+          streaming: {
+            // A preview pane, not a TV: buffer enough to scrub smoothly, no more.
+            bufferingGoal: 30,
+            rebufferingGoal: 1,
+            bufferBehind: 30,
+            retryParameters: { maxAttempts: 3 },
+          },
+        });
+        player.addEventListener("error", (e: any) => fail(`shaka_${e?.detail?.code ?? "error"}`));
+        await player.load(src);
+      } catch (e: any) {
+        fail(`shaka_load_${e?.code ?? "error"}`);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      player?.destroy();
+    };
+  }, [src, videoKey]);
+
   // A new video was loaded — forget the previous one's playback position.
   useEffect(() => {
     lastTimeRef.current = 0;
@@ -179,7 +228,7 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
         <video
           ref={bindVideoRef}
           key={videoKey}
-          src={src}
+          src={isDashSource(src) ? undefined : src}
           controls={false}
           onClick={(e) => {
             e.preventDefault();
@@ -203,6 +252,8 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
             }
           }}
           onError={async () => {
+            // Shaka reports its own failures; the parent falls back to a download.
+            if (isDashSource(src)) return;
             const audioCodec = debugInfo?.audioCodec ? String(debugInfo.audioCodec) : null;
             const ac = audioCodec ? audioCodec.toLowerCase() : "";
             const isPcm = ac.startsWith("pcm") || ac === "lpcm" || ac === "alac" || ac === "flac";

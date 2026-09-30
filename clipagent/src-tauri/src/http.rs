@@ -9,6 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use crate::commands::download;
 use crate::preview_cache;
+use crate::dash;
 use once_cell::sync::Lazy;
 use crate::paths::{ffmpeg_path, ffprobe_path, yt_dlp_path, running_from_sandboxed_app, skip_browser_cookies_for_yt_dlp, yt_dlp_cookies_browser};
 use urlencoding::decode as url_decode;
@@ -736,6 +737,41 @@ async fn tee_into_cache(mut upstream: reqwest::Response, mut tx: hyper::body::Se
     }
 }
 
+/// Reads the first 64 KB of a DASH media file for its init and index ranges, caching the
+/// bytes so the player's first requests for them are served from disk.
+async fn probe_dash_layout(url: String) -> Option<dash::Layout> {
+    let client = PREVIEW_CLIENT.as_ref()?;
+    let resp = with_preview_referer(client.get(&url), &url)
+        .header(hyper::header::RANGE, "bytes=0-65535")
+        .send()
+        .await
+        .ok()?;
+    if resp.status().as_u16() != 206 {
+        return None;
+    }
+    let total = resp
+        .headers()
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_content_range)
+        .map(|(_, _, t)| t)?;
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("video/mp4")
+        .to_string();
+    let buf = resp.bytes().await.ok()?;
+    if preview_cache::ensure_entry(&url, total, &content_type) {
+        if let Some(path) = preview_cache::path_for(&url) {
+            if preview_cache::write_at(&path, 0, &buf).is_ok() {
+                preview_cache::record(&url, 0, buf.len() as u64);
+            }
+        }
+    }
+    dash::layout(&buf)
+}
+
 pub fn json_response(status: u16, body: String) -> Response<Body> {
     let mut res = Response::new(Body::from(body));
     *res.status_mut() = StatusCode::from_u16(status).unwrap();
@@ -1239,6 +1275,70 @@ pub async fn handle_http(
         let path_str = out_mp4.to_string_lossy().to_string();
         let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
         return Ok(json_response(200, format!(r#"{{"ok":true,"path":"{}"}}"#, escaped)));
+    }
+
+    // Streamed YouTube preview (FR-7): a DASH manifest over the renditions resolve found,
+    // with media fetched through the caching /preview-stream proxy.
+    if method == Method::GET && path == "/yt-dash.mpd" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
+        let query = req.uri().query().unwrap_or("");
+        let encoded = query
+            .split('&')
+            .find_map(|p| p.strip_prefix("url="))
+            .unwrap_or("");
+        let page_url = match url_decode(encoded) {
+            Ok(u) if !u.is_empty() => u.into_owned(),
+            _ => return Ok(json_response(400, r#"{"error":"missing_url"}"#.to_string())),
+        };
+        let Some(src) = dash::source(&page_url) else {
+            return Ok(json_response(404, r#"{"error":"not_resolved"}"#.to_string()));
+        };
+
+        // All renditions are probed at once: each is one ~60 ms request.
+        let audio_task = tokio::spawn(probe_dash_layout(src.audio.url.clone()));
+        let video_tasks: Vec<_> = src
+            .video
+            .iter()
+            .map(|r| (r.clone(), tokio::spawn(probe_dash_layout(r.url.clone()))))
+            .collect();
+        let Some(audio_layout) = audio_task.await.ok().flatten() else {
+            download::log_to_file("[DASH] audio index unreadable; falling back to a downloaded preview");
+            return Ok(json_response(502, r#"{"error":"audio_unindexed"}"#.to_string()));
+        };
+        let mut video = Vec::new();
+        for (r, t) in video_tasks {
+            if let Some(l) = t.await.ok().flatten() {
+                video.push((r, l));
+            }
+        }
+        if video.is_empty() {
+            download::log_to_file("[DASH] no video index readable; falling back to a downloaded preview");
+            return Ok(json_response(502, r#"{"error":"video_unindexed"}"#.to_string()));
+        }
+
+        // The index's own total is exact; resolve's duration is rounded to the second.
+        let duration = video
+            .iter()
+            .map(|(_, l)| l.duration)
+            .fold(0.0_f64, f64::max);
+        let duration = if duration > 0.0 { duration } else { src.duration };
+        let body = dash::manifest(duration, &video, &(src.audio.clone(), audio_layout), |u| {
+            format!("preview-stream?url={}", urlencoding::encode(u))
+        });
+        download::log_to_file(&format!(
+            "[DASH] manifest: {} video renditions ({}), {:.1}s",
+            video.len(),
+            video.iter().map(|(r, _)| format!("{}p", r.height)).collect::<Vec<_>>().join(", "),
+            duration
+        ));
+        let mut res = Response::new(Body::from(body));
+        res.headers_mut()
+            .insert("Content-Type", "application/dash+xml".parse().unwrap());
+        res.headers_mut()
+            .insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+        return Ok(res);
     }
 
     // Poll for the background high-quality preview started by start_yt_hq_bg.

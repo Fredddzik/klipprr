@@ -349,6 +349,15 @@ let parsed: Value = match serde_json::from_str(json_str) {
         return r#"{"error":"invalid_core_fields"}"#.to_string();
     }
 
+    // When the only good preview is a set of separate DASH streams (YouTube), remember
+    // them so the UI can stream the preview instead of downloading the whole video first.
+    // The download path stays as the fallback, so this never makes a preview worse.
+    let dash = (requires_local_preview || local_upgrade_height > 0)
+        && crate::dash::remember(&decoded_url, formats, duration);
+    if dash {
+        log_to_file("[RESOLVE] streamable DASH preview available");
+    }
+
     let result = serde_json::json!({
         "id": id,
         "title": title,
@@ -358,7 +367,9 @@ let parsed: Value = match serde_json::from_str(json_str) {
             "url": preview_url,
             "requires_local_preview": requires_local_preview,
             // 0 when the direct URL is already the best preview available.
-            "local_upgrade_height": local_upgrade_height
+            "local_upgrade_height": local_upgrade_height,
+            // The UI can stream this preview from /yt-dash.mpd (FR-7).
+            "dash": dash
         },
         "capabilities": {
             "fast_max_height": fast_max_height,
