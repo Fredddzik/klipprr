@@ -21,6 +21,25 @@ connected at the time, so the top of the funnel is missing.
 | Licences on Pro/Max | 7: 4 via Stripe, 2 via activation code, 1 founder/test |
 | Paying customers | **0**. The 4 Stripe subscriptions are the founder's test accounts (confirmed 2026-09-30) |
 
+### Funnel, April to September 2026 (PostHog project 398123, US, plus Supabase)
+
+| Step | Count | Source |
+|---|---|---|
+| Visitors who accepted analytics and viewed a page | 113 (14 in the last 30 days) | PostHog |
+| Download button clicks | 56 (4 in the last 30 days) | PostHog |
+| Accounts | 24 (2 in the last 30 days) | Supabase |
+| Exported at least one clip | 9 | Supabase |
+| Paid | 0 | Stripe |
+
+PostHog only sees visitors who accept analytics cookies, so its top two rows are floors, not
+totals. Its app-side events are unreliable: `app_opened` and `clip_exported` show 4 and 2
+people against Supabase's 9 exporters, and stopped arriving after 2026-09-10. Download clicks
+are relayed through `/api/track` on the server, so PostHog attributes each one to the server
+(US, "Automation") and cannot tie it to the visitor's source.
+
+Reading it: about 4 in 10 accounts export a clip, which is healthy for a free tool. The binding
+constraint is volume at the top: two new accounts a month cannot tell any pricing model apart.
+
 Reading it: the 10-clip limit is almost never reached, so it is not what drives upgrades today.
 Nobody has paid yet, so no pricing change can hurt an existing customer: the question is only
 which model gets the first ones.
