@@ -107,6 +107,43 @@ an infringement tool than a clipper does, and a headless API removes the "person
 Get legal advice before building any part of it.
 **Revisit when:** we can name 10 users who clip every day.
 
+### Browser extension: mark clips while watching (founder idea, 2026-09-30)
+**Idea:** the user watches a video, VOD or reel in their browser, marks in/out points in an
+extension, and the extension hands the URL and timestamps to the app, which downloads just
+those segments.
+
+**Technically realistic, and small to prototype (S–M).** A content script reads the page's
+`<video>.currentTime`; a popup offers Mark in / Mark out; the list goes to the app over the
+localhost API it already runs (`:4000`, which would need to accept the extension's origin) or
+over native messaging. The app already knows how to fetch a URL and cut ranges. The browser
+*becomes* the preview, which sidesteps FR-7 entirely for people who watch there anyway.
+
+**Why not now, in order of weight:**
+1. **Distribution risk where it matters most.** Chrome is most users' browser, and the Chrome
+   Web Store has a history of removing extensions that help download YouTube videos. An
+   extension that only marks timestamps may still be judged as one. A rejection or takedown
+   could also hurt the developer account. Firefox is more permissive; Safari extensions can
+   ship inside the Mac app itself with no store review, but few target users clip in Safari.
+2. **It contradicts the current pitch.** `AGENTS.md` and the site both sell "no browser
+   extension". Extensions carry the shady-downloader stereotype, and the Google Ads Unwanted
+   Software review is exactly where that stereotype bites.
+3. **It is a second product to maintain.** YouTube and Twitch change their page structure
+   often; content scripts break with them.
+4. **FR-7 removes most of the benefit.** Once the in-app preview streams instantly, "watch in
+   the browser instead" matters much less.
+
+**Where it would be genuinely strong:** clip-ops people watching a live stream or a 6-hour
+VOD, marking moments as they happen. That is the recurring-volume customer this backlog is
+betting on.
+
+**Cheaper ways to test the same demand first:**
+- Mark while watching inside the app: hotkeys for in/out during playback (the editor exists).
+- Accept timestamped links (`youtube.com/watch?v=…&t=1234`, Twitch `?t=`) and jump there.
+- Ask the first ten heavy clippers whether they would install an extension at all.
+
+**Revisit when:** FR-7 has shipped and heavy users still ask to mark in the browser. Start
+Twitch/Kick-only, where store policy is not the problem.
+
 ---
 
 ## Done from the same review (2026-09-29)

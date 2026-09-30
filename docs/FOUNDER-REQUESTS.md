@@ -303,3 +303,58 @@ Their 2.6 GB file should see the same first-frame time (the head is bounded by d
 not file size) and roughly 11 s to fully scrubbable.
 
 **Status:** `done`, pending founder verification on the real client file.
+
+---
+
+## FR-7 — Rebuild the YouTube preview: long videos never become watchable
+
+**Asked (2026-09-30):** *"a 2 hour video is more than 9 minutes into loading into preview
+and still hasn't loaded."* Revise the preview system for YouTube.
+
+**What actually happened, from the log and the cache directory.** The 360p preview of the
+2 h 13 min video (345 MB) downloaded in **36 s**. The viewport never showed it. 0.1.30
+ran the post-download work (remove the "in progress" lock, start the 720p copy) *after*
+awaiting the download inside the HTTP handler. The webview had abandoned that request, hyper
+dropped the handler, and none of it ran: lock left behind, HQ never started, viewport stuck on
+"Preparing preview…". A regression from 0.1.30's reordering.
+
+**Fixed in the working tree (ships as 0.1.31):** the post-download work runs inside the
+download task itself; `/yt-proxy-status?q=` reports a finished low-res copy (`lq_path`) so the
+viewport plays it even when its own request was lost; a second request no longer starts a
+duplicate download into the same file.
+
+**What is still wrong after that fix, and why this is its own item.** A full download before
+the first frame is the wrong design for long sources:
+
+| Source length | Low-res preview, measured | Scales with |
+|---|---|---|
+| 44 min | 14.5 s (160 MB) | length |
+| 2 h 13 min | 36 s (345 MB), on a fast connection | length |
+
+On an average home connection the 2-hour case is several minutes, and a 4-hour VOD is worse.
+FR-1's cheap fixes are exhausted (see its table): smaller renditions and
+`--download-sections` do not help, because YouTube throttles per request rather than by size.
+
+**Proposal: stream instead of download (this is FR-3 phase 3, now the top engineering item).**
+YouTube serves video and audio as separate DASH streams. The webview can play those directly
+with Media Source Extensions (WKWebView supports MSE on macOS), fetching byte ranges on demand
+through `/preview-stream`, whose FR-2 disk cache then makes every revisited region instant.
+First frame becomes ~1–2 s regardless of length, and nothing is downloaded that the user does
+not watch. The timing invariants in `PIPELINES.md` hold: the streams *are* the source, so
+preview time is source time.
+
+Open questions before building: whether resolve's format URLs carry the `indexRange` /
+`initRange` MSE needs (if not, parse the `sidx` box ourselves); how long the signed URLs stay
+valid for a long editing session (re-resolve on 403); Windows (WebView2 also has MSE).
+**Effort:** M–L. **Risk:** medium, touches the preview path every YouTube user hits.
+
+**Related risk found at the same time: yt-dlp now wants a JavaScript runtime for YouTube.**
+The log shows `No supported JavaScript runtime could be found … YouTube extraction without a
+JS runtime has been deprecated, and some formats may be missing`, followed by
+`HTTP Error 403: Forbidden` on the first attempt (the retry succeeded). yt-dlp's EJS support
+expects Deno. Today YouTube works without it, degraded; when YouTube tightens further it may
+stop working entirely. Decide before that happens: bundle Deno (~100 MB, would roughly double
+the app download) or accept the degradation. Needs measuring: how often downloads fail with
+and without it.
+
+**Status:** regression `fixed` (0.1.31); streaming preview `ready` to design.
