@@ -468,4 +468,4 @@ resolves. And the viewport now shows the error only when the page says every pre
 has failed (`unavailable`: both YouTube downloads failed, or TikTok's only download failed);
 any other moment without a source shows "Preparing preview…".
 
-**Status:** `fixed` (type-checked and built); on-screen test of a second load pending; ships in 0.1.33.
+**Status:** `done`. Founder-tested 2026-09-30: a second load shows the loading placeholder, no error. Ships in 0.1.33.
