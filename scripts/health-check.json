@@ -1,0 +1,36 @@
+{
+  "_comment": "Test links for scripts/health-check.py (FR-8). Two per platform: a platform is only reported broken when both fail and at least one failure is not 'video gone'. Replace a link when the report says it is gone. Prefer our own uploads (unlisted on YouTube) once they exist.",
+  "platforms": {
+    "YouTube": {
+      "dash": true,
+      "urls": [
+        "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+        "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+      ]
+    },
+    "Twitch clip": {
+      "urls": [
+        "https://clips.twitch.tv/FaintLightGullWholeWheat",
+        "https://www.twitch.tv/sergeynixon/clip/StormyThankfulSproutFutureMan"
+      ]
+    },
+    "Twitch VOD": {
+      "urls": [
+        "https://www.twitch.tv/videos/6528877",
+        "https://www.twitch.tv/videos/635475444"
+      ]
+    },
+    "Instagram": {
+      "urls": [
+        "https://www.instagram.com/reel/Chunk8-jurw/",
+        "https://www.instagram.com/reel/CDUMkliABpa/"
+      ]
+    },
+    "X": {
+      "urls": [
+        "https://twitter.com/LisPower1/status/1001551623938805763",
+        "https://twitter.com/captainamerica/status/719944021058060289"
+      ]
+    }
+  }
+}
