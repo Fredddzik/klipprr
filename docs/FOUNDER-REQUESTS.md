@@ -469,3 +469,66 @@ has failed (`unavailable`: both YouTube downloads failed, or TikTok's only downl
 any other moment without a source shows "Preparing preview…".
 
 **Status:** `done`. Founder-tested 2026-09-30: a second load shows the loading placeholder, no error. Ships in 0.1.33.
+
+---
+
+## FR-10 — Rebuild sign-in to the desktop app on the industry standard
+
+**Asked (2026-09-30):** revise how users sign in to the app, based on the industry standard.
+
+**How it works today.** The app opens `klipprr.com/login?redirect=clipagent://auth-callback`
+in the browser. After login, the website redirects to
+`clipagent://auth-callback#access_token=…&refresh_token=…`; macOS hands that URL to the app,
+which stores both tokens in `supabase_session.json` in its data folder, as plain text.
+
+**What the standard is.** OAuth 2.0 for native apps (RFC 8252), as used by Slack, Figma,
+Spotify, VS Code and GitHub Desktop:
+
+1. Sign in happens in the user's own browser, where their password manager and existing
+   Google session live. *Klipprr already does this; keep it.*
+2. The browser sends back a **one-time code, never the tokens themselves** (Authorization
+   Code flow with PKCE). The app exchanges the code, plus a secret it generated at the start,
+   for tokens directly with the server. Anything that intercepts the redirect gets a code it
+   cannot use. Supabase supports this (`flowType: "pkce"`, `exchangeCodeForSession`).
+3. The redirect goes somewhere only Klipprr can receive: a loopback address
+   (`http://127.0.0.1:<port>/auth/callback`; the agent already runs a local server) or a
+   macOS Universal Link on `klipprr.com`. A custom scheme like `clipagent://` can be
+   registered by any app on the Mac.
+4. A random `state` value round-trips through the browser, so the app only accepts the
+   sign-in it actually started.
+5. Tokens are stored in the **macOS Keychain** (Windows Credential Manager on Windows),
+   not a readable file. The `keyring` crate for this is already a dependency, unused.
+6. Signing out revokes the refresh token on the server, not just locally.
+
+**Where Klipprr differs, and why it matters.**
+
+| | Today | Standard | Risk today |
+|---|---|---|---|
+| What comes back from the browser | access + refresh tokens in the URL | one-time code (PKCE) | tokens can leak via the URL: browser history, logs, a hijacked scheme |
+| Redirect target | `clipagent://` custom scheme | loopback or Universal Link | another app can register the same scheme and receive a user's tokens |
+| Stored where | plain JSON file | OS Keychain | any process running as the user can read and reuse the refresh token |
+| Login mix-up protection | none | `state` parameter | a crafted link could sign a user into someone else's account |
+| Sign out | local only | server-side revocation | a copied refresh token keeps working |
+
+None of these is an active incident. Together they are the difference between an indie
+project and the kind of login a professional buyer's IT team would accept.
+
+**UX parts of the same standard** (these also cost conversions, since exporting requires an
+account):
+- The browser page after login says "You're signed in, return to Klipprr" with a button that
+  reopens the app, and the app comes to the front on its own.
+- If the browser never returns (user closed the tab), the app offers "Didn't work? Sign in
+  again" instead of waiting forever.
+- Measure it: how many people who click Sign in in the app finish signing in. Today that
+  number is unknown.
+
+**Scope.** Two repos: `klipprr-web` (the `/auth/clipagent` and `/upgrade` pages that build
+the deep link, switch to PKCE and the new redirect) and the app (start the flow with a PKCE
+verifier and `state`, receive the callback on the loopback server, exchange the code, move
+storage to the Keychain, migrate existing sessions once so nobody is signed out by the
+update). Keep `clipagent://` working for one or two releases so older app versions can still
+sign in.
+
+**Effort:** M. **Risk:** medium: sign-in is on the path to every export, so it needs an
+end-to-end test on a clean Mac before shipping.
+**Status:** `ready`.
