@@ -14,6 +14,9 @@ interface VideoViewportProps {
   /** A streamed (DASH) preview failed to start or broke mid-playback. The parent falls
    *  back to a downloaded preview. */
   onStreamError?: (reason: string) => void;
+  /** Every preview source has failed. Without this, a missing `src` means the preview
+   *  is still being prepared, and the viewport says so instead of showing an error. */
+  unavailable?: boolean;
 }
 
 /** A DASH manifest from the agent (FR-7) rather than a file the element plays directly. */
@@ -21,7 +24,7 @@ function isDashSource(src: string | null): boolean {
   return !!src && src.includes("/yt-dash.mpd");
 }
 
-export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate, debugInfo, onStreamError }: VideoViewportProps) {
+export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate, debugInfo, onStreamError, unavailable }: VideoViewportProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const bindVideoRef = (el: HTMLVideoElement | null) => {
     videoRef.current = el;
@@ -191,6 +194,18 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
       v.currentTime = currentTime;
     }
   }, [currentTime]);
+
+  if (!src && !unavailable) {
+    return (
+      <div className="w-full h-full min-h-48 flex flex-col items-center justify-center gap-2 bg-zinc-900 rounded">
+        <svg className="w-5 h-5 animate-spin text-violet-400" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z" />
+        </svg>
+        <span className="text-xs text-zinc-400">Preparing preview…</span>
+      </div>
+    );
+  }
 
   if (!src) {
     return (

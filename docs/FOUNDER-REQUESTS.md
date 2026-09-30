@@ -438,4 +438,34 @@ account's export, so no clip is uploaded, stored or counted against any plan lim
 go to a temporary folder and are deleted at the end of each run; only the report is kept.
 
 **Effort:** S (a script, `scripts/health-check.sh`, plus the schedule).
-**Status:** `ready`. Can start with public test URLs; own uploads are an upgrade, not a prerequisite.
+**Built (2026-09-30):** `scripts/health-check.py` + `scripts/health-check.json`, run daily at
+~10:10 by the Claude Code scheduled task `klipprr-daily-health-check`, which also investigates
+any breakage (tries the newest yt-dlp, searches upstream issues) and reports a fix. Runs when
+the Claude app is open; a missed run happens at next launch. First full run: all five
+platforms OK in 3 minutes. Verified that a deleted video is reported as a gone link, and a
+simulated extractor failure as BROKEN.
+
+Noticed while building it: YouTube's "Original" export picks AV1 when YouTube offers it,
+because the selector only asks for an MP4 container (see AUDIT B12).
+
+**Status:** `done`.
+
+---
+
+## FR-9 — "Unable to load preview / DRM" flashes while a new video loads
+
+**Asked (2026-09-30):** after clipping one video, pasting a new URL and clicking Load
+sometimes shows the DRM error before the video resolves. A new user would think it failed.
+Must be fixed in the next release.
+
+**Cause.** Loading a new URL cleared `resolvedUrl` but kept the previous video's
+`videoData` on screen for the ~8 s resolve. The viewport then computed "old video, no URL",
+found no source, and rendered its only no-source state, which was the DRM message. The
+deeper flaw: one message meant both "still loading" and "every source failed".
+
+**Fix.** A new load clears `videoData` too, so the loading skeleton shows until the new video
+resolves. And the viewport now shows the error only when the page says every preview source
+has failed (`unavailable`: both YouTube downloads failed, or TikTok's only download failed);
+any other moment without a source shows "Preparing preview…".
+
+**Status:** `fixed` (type-checked and built); on-screen test of a second load pending; ships in 0.1.33.

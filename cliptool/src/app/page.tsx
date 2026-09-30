@@ -371,6 +371,9 @@ useEffect(() => {
   /** The low-res local download failed, so the viewport is waiting on the HQ copy alone.
    *  Read by the HQ poller to decide when to stop showing "Preparing preview…". */
   const ytLqFailedRef = useRef(false);
+  /** Every way of getting a preview for this video has failed. Only then does the viewport
+   *  show its error; any other moment without a source is still loading. */
+  const [previewUnavailable, setPreviewUnavailable] = useState(false);
   /** The streamed preview failed for this video; use the downloaded one instead. */
   const [dashFailed, setDashFailed] = useState(false);
   useEffect(() => {
@@ -653,6 +656,10 @@ function readPendingReservation(): number {
     setLocalFilePath(null);
     // We're starting a new resolve for this normalized URL; clear previous resolvedUrl until we succeed.
     setResolvedUrl(null);
+    // And the previous video. Keeping it on screen with no URL made the viewport find no
+    // source for ~8 s and flash the "Unable to load preview / DRM" message mid-load; with
+    // it cleared, the loading skeleton shows until the new video resolves.
+    setVideoData(null);
     setClips([]);
     setMarkIn(null);
     setMarkOut(null);
@@ -799,6 +806,7 @@ function readPendingReservation(): number {
     setYtPreviewLoading(false);
     setYtHqPreviewPath(null);
     ytLqFailedRef.current = false;
+    setPreviewUnavailable(false);
 
     if (!resolvedUrl || !videoData || !isTauri) return;
     if (streamPreview) return;
@@ -853,7 +861,12 @@ function readPendingReservation(): number {
       setYtPreviewPath(null);
       if (needsLocalPreview) {
         ytLqFailedRef.current = true;
+      } else if (isTikTok) {
+        // TikTok's download is its only preview source.
+        setYtPreviewLoading(false);
+        setPreviewUnavailable(true);
       } else {
+        // An upgrade failed; the direct stream is still playing.
         setYtPreviewLoading(false);
       }
     }
@@ -896,6 +909,7 @@ function readPendingReservation(): number {
         } else if (data.status === "not_started" && !data.lq_path && ytLqFailedRef.current) {
           // Both downloads have failed: nothing else is coming, so show the error.
           setYtPreviewLoading(false);
+          setPreviewUnavailable(true);
           if (intervalId !== null) clearInterval(intervalId);
         }
       } catch {
@@ -1996,6 +2010,7 @@ useEffect(() => {
                   return `${CLIPAGENT_HTTP}/preview-stream?url=${encodeURIComponent(videoData.previewUrl)}`;
                 })()}
                 videoKey={videoData.id}
+                unavailable={previewUnavailable}
                 onStreamError={(reason) => {
                   console.warn("[stream preview] falling back to download:", reason);
                   setDashFailed(true);
