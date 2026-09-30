@@ -383,3 +383,43 @@ that long will fail on its next fetch and fall back to the download path (re-loa
 also fixes it). Windows is untested (WebView2 has MSE, so it should work).
 
 **Status:** `done`. Founder-tested in the app 2026-09-30: seeks anywhere in the 2-hour video under half a second. Ships as 0.1.32.
+
+---
+
+## FR-8 — Daily health check: does every platform still resolve, preview and export?
+
+**Asked (2026-09-30):** an automated job, every day or few days, that checks the app still
+works (resolving and exporting a clip) on each supported platform, since YouTube and yt-dlp
+change often.
+
+**Agreed, and daily is the right cadence.** Breakage is sudden (YouTube changes something,
+or a yt-dlp release regresses) while yt-dlp itself releases every 2–4 weeks. Daily means a
+break is found within a day, usually before a user hits it. A run takes a few minutes.
+
+**The one design constraint: it cannot run on GitHub's servers.** YouTube, Instagram and X
+treat datacenter IP addresses as bots ("Sign in to confirm you're not a bot"). A check run
+from GitHub Actions would fail for reasons users never see, and false alarms train everyone
+to ignore it. It has to run from a normal home connection, like users have: the founder's
+Mac, on a schedule (launchd, or a Claude Code scheduled task). A day the Mac is off or asleep
+is simply skipped.
+
+**What each run does**, using the *installed* Klipprr's own bundled yt-dlp and ffmpeg, so it
+tests exactly what users have:
+
+1. For each platform, one fixed public test URL: YouTube (a long video and a Short), Twitch
+   VOD, Twitch clip, Instagram Reel, X video.
+2. **Resolve:** yt-dlp returns formats, with an H.264 rendition where the app expects one.
+3. **Preview:** for YouTube, the DASH index probe behind `/yt-dash.mpd` (FR-7) succeeds.
+4. **Export:** download a 10-second section, cut it, and check duration and codecs with ffprobe.
+5. **Freshness:** report whether yt-dlp has a newer release than `tools.lock` pins.
+
+It stays silent when everything passes. On a failure it sends a macOS notification and writes
+a report; as a Claude Code scheduled task it can also read the error, check yt-dlp's issue
+tracker and release notes, and propose the fix.
+
+**Test URLs should be our own uploads** (a short Klipprr demo on the @klipprr YouTube,
+Twitch, Instagram and X accounts). Other people's videos get deleted or made private, which
+looks like a breakage; our own stay put, and there is no rights question.
+
+**Effort:** S (a script, `scripts/health-check.sh`, plus the schedule).
+**Status:** `ready`. Needs the test uploads first.
