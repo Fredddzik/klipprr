@@ -532,3 +532,42 @@ sign in.
 **Effort:** M. **Risk:** medium: sign-in is on the path to every export, so it needs an
 end-to-end test on a clean Mac before shipping.
 **Status:** `ready`.
+
+---
+
+## FR-11 — Export progress panel: real progress, real per-clip cancel, no false alarms
+
+**Asked (2026-09-30):** the export panel is ugly. The bar races to the middle, stops, then
+jumps to the end when no re-encode is needed; cancel only works on all clips at once; it
+says "Connection lost" on exports that succeed; two headers both say "Exporting clips".
+
+**Causes, found in `ExportPanel.tsx` and `download.rs`:**
+
+- **The first half of the bar is simulated.** Section downloads (`--download-sections`) run
+  through ffmpeg, which prints `time=00:00:04.12` progress, not the `[download] 42%` lines
+  the agent parses. With no real signal, the UI animates 0→47% on a timer set to half the
+  clip's length, then waits near 50% for the download to finish. On the stream-copy path
+  the remaining work takes milliseconds, so the bar jumps from ~50% to 100%.
+- **Cancel stops nothing.** The ✕ aborts the HTTP request and hides the panel; yt-dlp and
+  ffmpeg keep running and the clips still appear. There is no cancel in the agent at all,
+  so per-clip cancel was impossible.
+- **"Connection lost" is self-inflicted.** `/download-all` keeps one HTTP request open for
+  the whole export; the webview abandons it on long exports while the agent carries on and
+  keeps sending progress events.
+- **Duplicate header.** A leftover "Exporting clips" subheading under the main title.
+
+**Fix:**
+1. Real download progress: parse ffmpeg's `time=` from yt-dlp's output (it uses `\r`, not
+   `\n`), divided by the clip length. Stream-copy exports spend their whole time
+   downloading, so that phase fills 0→95%; re-encodes keep 0→50% download, 50→100% encode.
+   The timer simulation is removed.
+2. Real cancel, per clip and for all: the agent tracks each clip's yt-dlp/ffmpeg processes,
+   `POST /export-cancel` stops them (process group, so yt-dlp's ffmpeg child dies too), the
+   clip reports "cancelled" (not "failed"), its temp files are removed and its clip-quota
+   reservation is released. Clips still waiting their turn are skipped.
+3. `/download-all` answers as soon as the export has started; progress, completion and
+   errors come through events only. No request to lose, so no "Connection lost".
+4. One header ("Exporting 2 of 3 clips"), one row per clip with a clear state (Waiting,
+   Downloading 42%, Finishing, Done, Cancelled, Failed) and its own cancel button.
+
+**Status:** `in progress`.
