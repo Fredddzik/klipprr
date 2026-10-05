@@ -275,16 +275,35 @@ export interface DownloadAllResponse {
   export_dir?: string | null;
 }
 
+/** Stops one clip of a running export, or all of it when `clipIndex` is omitted.
+ *  `running` is false when the agent no longer knows the export (it already finished). */
+export async function cancelExport(
+  clientExportId: string,
+  clipIndex?: number
+): Promise<AgentResult<{ ok: boolean; running: boolean }>> {
+  try {
+    const res = await fetchWithTimeout(`${CLIPAGENT_HTTP}/export-cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_export_id: clientExportId, ...(clipIndex !== undefined && { clipIndex }) }),
+      timeoutMs: 10_000,
+    });
+    const json = await res.json();
+    return res.ok ? { ok: true, data: json } : { ok: false, error: json?.error ?? `cancel_http_${res.status}` };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
 export async function downloadAll(
   payload: DownloadAllPayload,
   opts?: { signal?: AbortSignal }
 ): Promise<AgentResult<DownloadAllResponse>> {
   try {
     const base = CLIPAGENT_HTTP;
-    // Quality mode can take a long time (full download + merge + cut). Keep the request alive
-    // to avoid UI flipping to "connection lost" even though the backend continues.
-    const timeoutMs =
-      payload.mode === "quality" ? 45 * 60 * 1000 : 15 * 60 * 1000;
+    // The agent answers as soon as the export has started (progress and completion arrive
+    // as events), so a slow answer means the agent is not responding.
+    const timeoutMs = 30 * 1000;
     const res = await fetchWithTimeout(`${base}/download-all`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

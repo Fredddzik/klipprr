@@ -4,7 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use hyper::{Body, Response, StatusCode};
 use hyper::body::to_bytes;
 use hyper::{Method, Request};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use crate::commands::download;
@@ -1446,17 +1446,62 @@ pub async fn handle_http(
         let body_bytes = to_bytes(req.into_body()).await?;
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
-        // An export runs yt-dlp and ffmpeg to completion — minutes, for a batch. Holding a
-        // tokio worker for that starves everything sharing it, including the /ping the UI
-        // uses to decide the agent is alive and the /local-preview range reads the player
-        // issues while the user keeps scrubbing.
+        // Answer as soon as the export has started. Progress, completion and errors all
+        // arrive as events; the UI used to hold this request open for the whole export,
+        // the webview abandoned it on long ones, and the panel said "Connection lost" while
+        // the export carried on fine.
+        //
+        // The export itself runs on the blocking pool: it drives yt-dlp and ffmpeg for
+        // minutes, and a tokio worker held that long starves /ping and /local-preview.
+        let export_id = serde_json::from_str::<serde_json::Value>(&body_str)
+            .ok()
+            .and_then(|v| v.get("client_export_id").and_then(|x| x.as_str()).map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty());
+        if let Some(id) = &export_id {
+            crate::export_control::begin(id);
+        }
         let app_for_export = app.clone();
-        let json = tokio::task::spawn_blocking(move || {
-            download::handle_download_all(app_for_export, &body_str)
-        })
-        .await
-        .unwrap_or_else(|_| r#"{"error":"export_panicked"}"#.to_string());
-        return Ok(json_response(200, json));
+        tokio::task::spawn_blocking(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                download::handle_download_all(app_for_export.clone(), &body_str)
+            }))
+            .unwrap_or_else(|_| r#"{"error":"export_panicked"}"#.to_string());
+            // Errors that end an export before any clip ran (missing file, no clips, a
+            // failed full download) have no event of their own otherwise.
+            let error = serde_json::from_str::<serde_json::Value>(&result)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from));
+            if let Some(error) = error {
+                download::log_to_file(&format!("[EXPORT] ended with error: {}", error));
+                let _ = app_for_export.emit("export-error", serde_json::json!({
+                    "error": error,
+                    "client_export_id": export_id,
+                }));
+            }
+            if let Some(id) = &export_id {
+                crate::export_control::end(id);
+            }
+        });
+        return Ok(json_response(202, r#"{"ok":true,"started":true}"#.to_string()));
+    }
+
+    // Cancels one clip of a running export, or all of it when `clipIndex` is absent.
+    if method == Method::POST && path == "/export-cancel" {
+        if !origin_is_allowed(&req) {
+            return Ok(text_response(403, "forbidden_origin"));
+        }
+        let body_bytes = to_bytes(req.into_body()).await?;
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
+        let Some(id) = body.get("client_export_id").and_then(|x| x.as_str()) else {
+            return Ok(json_response(400, r#"{"error":"missing_client_export_id"}"#.to_string()));
+        };
+        let clip = body.get("clipIndex").and_then(|x| x.as_u64()).map(|x| x as usize);
+        // Killing processes blocks briefly; keep it off the async workers.
+        let id = id.to_string();
+        let running = tokio::task::spawn_blocking(move || crate::export_control::cancel(&id, clip))
+            .await
+            .unwrap_or(false);
+        return Ok(json_response(200, format!(r#"{{"ok":true,"running":{}}}"#, running)));
     }
 
     Ok(text_response(404, "not_found"))

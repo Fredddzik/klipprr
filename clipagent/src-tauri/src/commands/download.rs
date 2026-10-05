@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::{self, Write, BufRead, BufReader};
+use std::io::{self, Write, Read, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,6 +12,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::os::windows::process::ExitStatusExt;
 
 use crate::output::{unique_output_path, unique_output_path_with_ext};
+use crate::export_control;
 use crate::paths::{running_from_sandboxed_app, skip_browser_cookies_for_yt_dlp, yt_dlp_path, ffmpeg_path, ffprobe_path, yt_dlp_cookies_browser};
 use crate::storage;
 use tauri::Emitter;
@@ -280,34 +281,97 @@ fn parse_ytdlp_progress_pct(line: &str) -> Option<f32> {
     pct_str.parse::<f32>().ok().filter(|&p| p >= 0.0 && p <= 100.0)
 }
 
-/// Spawn yt-dlp with stderr piped, calling `on_progress(pct)` for each parsed download
-/// percentage (0.0..=100.0). Returns (success, stderr_string) after the process exits.
-fn run_ytdlp_with_progress<F>(cmd: &mut Command, mut on_progress: F) -> (bool, String)
+/// `time=00:01:02.50` from ffmpeg's stats line, in seconds. yt-dlp runs ffmpeg for
+/// `--download-sections`, and that is the only progress it reports for them.
+fn parse_ffmpeg_stats_time(line: &str) -> Option<f64> {
+    let t = line.split("time=").nth(1)?.split_whitespace().next()?;
+    let mut parts = t.split(':');
+    let (h, m, s) = (parts.next()?, parts.next()?, parts.next()?);
+    Some(h.parse::<f64>().ok()? * 3600.0 + m.parse::<f64>().ok()? * 60.0 + s.parse::<f64>().ok()?)
+}
+
+/// Spawn yt-dlp with stderr piped, calling `on_progress(pct)` with 0.0..=100.0 as it
+/// works. Returns (success, stderr_string) after the process exits.
+///
+/// `section_secs` is the section length for `--download-sections` downloads: those print
+/// no percentage at all, only ffmpeg's `time=` position, which is turned into one here.
+/// The process is tracked under `job` so a cancel can stop it.
+fn run_ytdlp_with_progress<F>(
+    cmd: &mut Command,
+    job: export_control::Job,
+    section_secs: Option<f64>,
+    mut on_progress: F,
+) -> (bool, String)
 where
     F: FnMut(f32),
 {
-    let mut child = match cmd.stdout(Stdio::null()).stderr(Stdio::piped()).spawn() {
+    if export_control::is_cancelled(job) {
+        return (false, "cancelled".to_string());
+    }
+    let mut child = match export_control::prepare(cmd).stdout(Stdio::null()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => {
             log_to_file(&format!("yt-dlp spawn error: {}", e));
             return (false, String::new());
         }
     };
+    let pid = child.id();
+    export_control::track(job, pid);
     let mut stderr_buf = String::new();
-    if let Some(stderr) = child.stderr.take() {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
-            if stderr_buf.len() < 200_000 {
-                stderr_buf.push_str(&line);
-                stderr_buf.push('\n');
-            }
-            if let Some(pct) = parse_ytdlp_progress_pct(&line) {
-                on_progress(pct);
+    if let Some(mut stderr) = child.stderr.take() {
+        // ffmpeg rewrites its stats line with `\r`, so split on both line endings.
+        let mut pending: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            for &b in &chunk[..n] {
+                if b != b'\n' && b != b'\r' {
+                    pending.push(b);
+                    continue;
+                }
+                if pending.is_empty() {
+                    continue;
+                }
+                let line = String::from_utf8_lossy(&pending).into_owned();
+                pending.clear();
+                if stderr_buf.len() < 200_000 {
+                    stderr_buf.push_str(&line);
+                    stderr_buf.push('\n');
+                }
+                if let Some(pct) = parse_ytdlp_progress_pct(&line) {
+                    on_progress(pct);
+                } else if let (Some(total), Some(t)) = (section_secs, parse_ffmpeg_stats_time(&line)) {
+                    if total > 0.0 {
+                        on_progress(((t / total) * 100.0).clamp(0.0, 100.0) as f32);
+                    }
+                }
             }
         }
     }
     let success = child.wait().map(|s| s.success()).unwrap_or(false);
+    export_control::untrack(job, pid);
     (success, stderr_buf)
+}
+
+/// Deletes a clip's intermediate files, including yt-dlp's `.part` leftovers, after the
+/// clip was cancelled mid-download.
+fn remove_clip_temps(export_stamp: u128, clip: usize) {
+    let prefixes = [
+        format!("klipprr_wm_tmp_{}_{}.", export_stamp, clip),
+        format!("klipprr_export_{}_{}.", export_stamp, clip),
+        format!("klipprr_export_trim_{}_{}.", export_stamp, clip),
+    ];
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if prefixes.iter().any(|p| name.starts_with(p.as_str())) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
 }
 
 fn pick_existing_with_ext(base: &Path, exts: &[&str]) -> Option<PathBuf> {
@@ -505,8 +569,16 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
         let mut results = vec![];
         for (i, c) in clips.iter().enumerate() {
+            let job = export_control::Job { export_id: client_export_id.as_deref(), clip: i };
+            if export_control::is_cancelled(job) {
+                let _ = app.emit("export-clip-cancelled", serde_json::json!({
+                    "clipIndex": i, "client_export_id": client_export_id
+                }));
+                results.push(serde_json::json!({"index": i, "ok": false, "reason": "cancelled"}));
+                continue;
+            }
             let _ = app.emit("export-progress", serde_json::json!({
-                "clipIndex": i, "totalClips": total_clips, "phase": "clip", "clipPercent": 0
+                "clipIndex": i, "totalClips": total_clips, "phase": "clip", "clipPercent": 0, "client_export_id": client_export_id
             }));
             let start = c.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let end = c.get("end").and_then(|x| x.as_f64()).unwrap_or(start);
@@ -540,14 +612,20 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
             if success {
                 results.push(serde_json::json!({"index": i, "name": name, "ok": true, "path": written_path}));
-                let _ = app.emit("export-clip-done", serde_json::json!({"clipIndex": i, "clip_name": name, "export_dir": base_str}));
+                let _ = app.emit("export-clip-done", serde_json::json!({
+                    "clipIndex": i, "clip_name": name, "export_dir": base_str, "client_export_id": client_export_id
+                }));
             } else {
                 results.push(serde_json::json!({"index": i, "name": name, "ok": false}));
+                let _ = app.emit("export-clip-failed", serde_json::json!({
+                    "clipIndex": i, "reason": "cut_failed", "export_dir": base_str, "client_export_id": client_export_id
+                }));
             }
         }
         let _ = app.emit("export-all-done", serde_json::json!({
             "export_dir": base_str,
             "totalClips": total_clips,
+            "client_export_id": client_export_id,
         }));
         return serde_json::json!({ "ok": true, "results": results, "export_dir": base_str }).to_string();
     }
@@ -633,13 +711,21 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         let client_export_id = client_export_id_t.as_deref();
                         let c = &c_t;
 
+                        let job = export_control::Job { export_id: client_export_id, clip: i };
+                        let start = c.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                        let end = c.get("end").and_then(|x| x.as_f64()).unwrap_or(start);
+                        let name = c.get("name").and_then(|x| x.as_str()).unwrap_or("clip");
+                        // Cancelled while waiting for a free slot: never start it.
+                        if export_control::is_cancelled(job) {
+                            let _ = app.emit("export-clip-cancelled", serde_json::json!({
+                                "clipIndex": i, "client_export_id": client_export_id
+                            }));
+                            return serde_json::json!({"index": i, "name": name, "ok": false, "reason": "cancelled"});
+                        }
                         log_to_file(&format!("[EXPORT] fast clip_start i={}", i));
                         let _ = app.emit("export-progress", serde_json::json!({
                             "clipIndex": i, "totalClips": total_clips, "phase": "clip", "clipPercent": 0, "client_export_id": client_export_id
                         }));
-                        let start = c.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                        let end = c.get("end").and_then(|x| x.as_f64()).unwrap_or(start);
-                        let name = c.get("name").and_then(|x| x.as_str()).unwrap_or("clip");
 
                         if end <= start {
                             return serde_json::json!({
@@ -651,7 +737,17 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         let out_path = unique_output_path(base_dir, &safe);
                         let out_str = out_path.to_string_lossy().to_string();
 
+                        // Every failure path reports through here. A clip the user cancelled
+                        // fails too (its processes were killed), but is reported as cancelled.
                         let emit_failed = |reason: &str| {
+                            if export_control::is_cancelled(job) {
+                                remove_clip_temps(export_stamp, i);
+                                let _ = app.emit("export-clip-cancelled", serde_json::json!({
+                                    "clipIndex": i,
+                                    "client_export_id": client_export_id,
+                                }));
+                                return;
+                            }
                             let _ = app.emit("export-clip-failed", serde_json::json!({
                                 "clipIndex": i,
                                 "reason": reason,
@@ -696,6 +792,8 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         Command::new(yt_dlp_path())
                             .current_dir(&base_dir)
                             .args(&dl_args),
+                        job,
+                        Some(desired_dur),
                         |pct| {
                             let p = (pct / 2.0).round() as i64;
                             if p > last_dl_pct {
@@ -767,6 +865,8 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                             Command::new(yt_dlp_path())
                                 .current_dir(base_dir)
                                 .args(&rdl),
+                            job,
+                            None,
                             |pct| {
                                 let p = (pct / 2.0).round() as i64;
                                 if p > last_rdl_pct {
@@ -899,14 +999,19 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     // Stream ffmpeg stderr so we can emit real progress.
                     // We map encoding time (0..clip_dur) into clipPercent 50..99.
                     let clip_dur = (end - start).max(0.001);
-                    let mut child = match Command::new(ffmpeg_path())
-                        .current_dir(&base_dir)
-                        .args(&ffmpeg_args)
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .spawn()
+                    let mut child = match export_control::prepare(
+                        Command::new(ffmpeg_path())
+                            .current_dir(&base_dir)
+                            .args(&ffmpeg_args)
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped()),
+                    )
+                    .spawn()
                     {
-                        Ok(c) => c,
+                        Ok(c) => {
+                            export_control::track(job, c.id());
+                            c
+                        }
                         Err(e) => {
                             log_to_file(&format!("Failed to spawn ffmpeg: {:?}", e));
                             let _ = std::fs::remove_file(&tmp_path);
@@ -945,6 +1050,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     }
 
                     let ffmpeg_status = child.wait();
+                    export_control::untrack(job, child.id());
 
                     let mut success = match ffmpeg_status {
                         Ok(s) => {
@@ -963,7 +1069,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     // Reliability fallback: if stream-copy remux failed (bad stream flags,
                     // timestamp issues, etc.), retry with full H.264 re-encode so the user
                     // still gets a playable file.
-                    if !success && stream_copy_mode {
+                    if !success && stream_copy_mode && !export_control::is_cancelled(job) {
                         log_to_file(&format!(
                             "[FAST] stream-copy failed, falling back to re-encode i={}",
                             i
@@ -1037,8 +1143,13 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         Command::new(yt_dlp_path())
                             .current_dir(&base_dir)
                             .args(&dl_args),
+                        job,
+                        Some(desired_dur),
                         |pct| {
-                            let p = (pct / 2.0).round() as i64;
+                            // A stream copy is all download: the trim after it takes
+                            // milliseconds. Filling only half the bar here is what made
+                            // it stall at 50% and then jump to the end.
+                            let p = (pct * 0.95).round() as i64;
                             if p > last_dl_pct {
                                 last_dl_pct = p;
                                 let _ = app.emit("export-progress", serde_json::json!({
@@ -1060,7 +1171,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     if dl_ok {
                         log_to_file(&format!("[EXPORT] fast yt-dlp done (copy) i={} -> finalize", i));
                         let _ = app.emit("export-progress", serde_json::json!({
-                            "clipIndex": i, "totalClips": total_clips, "phase": "encoding", "clipPercent": 50, "client_export_id": client_export_id
+                            "clipIndex": i, "totalClips": total_clips, "phase": "finishing", "clipPercent": 96, "client_export_id": client_export_id
                         }));
 
                         // If yt-dlp padded the section, trim from the tail so duration matches.
@@ -1194,6 +1305,23 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
     // QUALITY MODE (existing behavior)
     // QUALITY MODE (revamped): download best streams, then merge to a single file
     // that clips can be cut from without section/keyframe padding issues.
+    // The full download and merge serve every clip, so only cancelling all of them stops
+    // those; cancelling one clip skips cutting it.
+    let shared_job = export_control::Job { export_id: client_export_id.as_deref(), clip: export_control::SHARED };
+    let quality_cancelled = |results: &mut Vec<Value>| -> String {
+        for i in 0..total_clips {
+            let _ = app.emit("export-clip-cancelled", serde_json::json!({
+                "clipIndex": i, "client_export_id": client_export_id
+            }));
+            results.push(serde_json::json!({"index": i, "ok": false, "reason": "cancelled"}));
+        }
+        let _ = app.emit("export-all-done", serde_json::json!({
+            "export_dir": base_dir.display().to_string(),
+            "totalClips": total_clips,
+            "client_export_id": client_export_id,
+        }));
+        serde_json::json!({ "ok": true, "cancelled": true }).to_string()
+    };
     let _ = app.emit("export-progress", serde_json::json!({
         "totalClips": total_clips,
         "phase": "quality_download_video",
@@ -1217,6 +1345,8 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         Command::new(yt_dlp_path())
             .current_dir(&base_dir)
             .args(&video_args),
+        shared_job,
+        None,
         |pct| {
             let p = (10.0 + pct * 0.25).round() as i64; // 10..35
             if p > last_video_pct {
@@ -1246,6 +1376,8 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         Command::new(yt_dlp_path())
             .current_dir(&base_dir)
             .args(&audio_args),
+        shared_job,
+        None,
         |pct| {
             let p = (35.0 + pct * 0.20).round() as i64; // 35..55
             if p > last_audio_pct {
@@ -1259,6 +1391,11 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             }
         },
     );
+
+    if export_control::all_cancelled(client_export_id.as_deref()) {
+        let _ = std::fs::remove_dir_all(&quality_tmp);
+        return quality_cancelled(&mut vec![]);
+    }
 
     let video_path = match pick_existing_with_ext(&video_base, &["mp4", "webm", "mkv"]) {
         Some(p) => p,
@@ -1318,14 +1455,19 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             full_str.clone(),
         ]);
 
-        let mut child = match Command::new(ffmpeg_path())
-            .current_dir(&base_dir)
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+        let mut child = match export_control::prepare(
+            Command::new(ffmpeg_path())
+                .current_dir(&base_dir)
+                .args(&args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .spawn()
         {
-            Ok(c) => c,
+            Ok(c) => {
+                export_control::track(shared_job, c.id());
+                c
+            }
             Err(e) => {
                 log_to_file(&format!("[QUALITY] merge spawn failed: {:?}", e));
                 // Fake a failure status by returning Err.
@@ -1354,8 +1496,18 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             }
         }
 
-        child.wait()
+        let status = child.wait();
+        export_control::untrack(shared_job, child.id());
+        status
     };
+
+    if export_control::all_cancelled(client_export_id.as_deref()) {
+        let _ = std::fs::remove_file(&video_path);
+        let _ = std::fs::remove_file(&audio_path);
+        let _ = std::fs::remove_dir_all(&quality_tmp);
+        let _ = std::fs::remove_file(&full_work);
+        return quality_cancelled(&mut vec![]);
+    }
 
     if merge_status.as_ref().map(|s| s.success()).unwrap_or(false) == false {
         // Fallback: if copy merge fails for any reason, re-encode for maximum compatibility.
@@ -1395,6 +1547,14 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
     let base_str = base_dir.display().to_string();
 
     for (i, c) in clips.iter().enumerate() {
+        let job = export_control::Job { export_id: client_export_id.as_deref(), clip: i };
+        if export_control::is_cancelled(job) {
+            let _ = app.emit("export-clip-cancelled", serde_json::json!({
+                "clipIndex": i, "client_export_id": client_export_id
+            }));
+            results.push(serde_json::json!({"index": i, "ok": false, "reason": "cancelled"}));
+            continue;
+        }
         log_to_file(&format!("[EXPORT] quality clip_start i={}", i));
         let _ = app.emit("export-progress", serde_json::json!({
             "clipIndex": i, "totalClips": total_clips, "phase": "clip", "clipPercent": 0, "client_export_id": client_export_id
@@ -1496,6 +1656,14 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             let _ = app.emit("export-clip-done", serde_json::json!({
                 "clipIndex": i,
                 "clip_name": name,
+                "export_dir": base_str,
+                "client_export_id": client_export_id,
+            }));
+        } else {
+            // Without this the UI waited on the clip forever.
+            let _ = app.emit("export-clip-failed", serde_json::json!({
+                "clipIndex": i,
+                "reason": "cut_failed",
                 "export_dir": base_str,
                 "client_export_id": client_export_id,
             }));

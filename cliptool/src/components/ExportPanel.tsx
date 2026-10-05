@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { downloadAll, type AgentResult } from "../lib/clipagent";
+import { downloadAll, cancelExport as cancelExportRequest, type AgentResult } from "../lib/clipagent";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { releaseClipExports } from "@/lib/usage";
@@ -141,302 +141,185 @@ export default function ExportPanel({
   onExportComplete,
 }: ExportPanelProps) {
   const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI__;
-  const exportAbortControllerRef = useRef<AbortController | null>(null);
-  const [exportProgress, setExportProgress] = useState<{
-    clipIndex: number;
-    totalClips: number;
-    clipsCompleted: number;
-  } | null>(null);
+  /** One row per clip being exported. Driven only by the agent's events: no simulated
+   *  progress, and nothing is inferred from the /download-all request, which now returns
+   *  as soon as the export has started (FR-11). */
+  type ClipState = "waiting" | "running" | "encoding" | "finishing" | "done" | "cancelling" | "cancelled" | "failed";
+  type ClipRow = { state: ClipState; percent: number };
+  const [rows, setRows] = useState<ClipRow[]>([]);
+  const rowsRef = useRef<ClipRow[]>([]);
   const [qualityGlobal, setQualityGlobal] = useState<{ phase: string; percent: number } | null>(null);
-  /** Per-clip progress 0–100; key = clip index. */
-  const [clipProgress, setClipProgress] = useState<Record<number, number>>({});
-  /** Per-clip simulated progress config for the yt-dlp phase. */
-  const clipSimRef = useRef<Record<number, { t0: number; durMs: number }>>({});
-  /** When true for an index, we stop simulating and trust backend progress. */
-  const clipHasRealProgressRef = useRef<Record<number, boolean>>({});
-  /** For the current export request: half-duration ms per clip index. */
-  const clipHalfDurMsRef = useRef<Record<number, number>>({});
-  const clipProgressRef = useRef<Record<number, number>>({});
-  const exportTotalRef = useRef<number | null>(null);
-  const [connectionLost, setConnectionLost] = useState(false);
   const exportInProgressRef = useRef(false);
   const exportClientIdRef = useRef<string | null>(null);
-  const clipFailedRef = useRef<Record<number, string>>({});
-  const [clipFailed, setClipFailed] = useState<Record<number, string>>({});
   const exportOkCountRef = useRef(0);
-  const exportFailedCountRef = useRef(0);
   const exportDirRef = useRef<string>("");
   const exportHadWatermarkRef = useRef(false);
   const exportTotalDurationRef = useRef(0);
-  const refundedFailedClipIndicesRef = useRef<Record<number, true>>({});
+  const refundedClipIndicesRef = useRef<Record<number, true>>({});
   const [exportClipNames, setExportClipNames] = useState<string[]>([]);
-  const exportClipNamesRef = useRef<string[]>([]);
 
-  function dbg(_msg: string, _extra?: any) {}
+  const isSettled = (s: ClipState) => s === "done" || s === "cancelled" || s === "failed";
 
-  function clearExportingUI(reason: string, extra?: any) {
-    dbg(`clearExportingUI: ${reason}`, extra);
+  function setRowsNow(next: ClipRow[]) {
+    rowsRef.current = next;
+    setRows(next);
+  }
+
+  function updateRow(idx: number, patch: (r: ClipRow) => Partial<ClipRow> | null) {
+    const cur = rowsRef.current;
+    const r = cur[idx];
+    if (!r) return;
+    const p = patch(r);
+    if (!p) return;
+    const next = cur.slice();
+    next[idx] = { ...r, ...p };
+    setRowsNow(next);
+  }
+
+  /** A failed or cancelled clip gives its reserved export back to the monthly quota. */
+  function refundClip(idx: number) {
+    if (refundedClipIndicesRef.current[idx]) return;
+    refundedClipIndicesRef.current[idx] = true;
+    releaseClipExports({ count: 1 }).then((res) => {
+      if (!res.ok) console.warn("[Export] Failed to refund quota", { idx, error: res.error });
+    });
+  }
+
+  function clearExportingUI() {
     exportInProgressRef.current = false;
-    if (exportAbortControllerRef.current) {
-      exportAbortControllerRef.current.abort();
-      exportAbortControllerRef.current = null;
-    }
-    setConnectionLost(false);
     setIsExporting(false);
-    setExportProgress(null);
-    setClipProgress({});
-    setClipFailed({});
+    setRowsNow([]);
+    setQualityGlobal(null);
     setExportClipNames([]);
-    exportClipNamesRef.current = [];
-    clipSimRef.current = {};
-    clipHasRealProgressRef.current = {};
-    clipHalfDurMsRef.current = {};
-    clipProgressRef.current = {};
-    clipFailedRef.current = {};
-    exportTotalRef.current = null;
     exportClientIdRef.current = null;
     exportOkCountRef.current = 0;
-    exportFailedCountRef.current = 0;
     exportDirRef.current = "";
     exportHadWatermarkRef.current = false;
     exportTotalDurationRef.current = 0;
-    refundedFailedClipIndicesRef.current = {};
+    refundedClipIndicesRef.current = {};
+  }
+
+  function finishExport() {
+    const okCount = exportOkCountRef.current;
+    const exportDir = exportDirRef.current;
+    const allCancelled = rowsRef.current.length > 0 && rowsRef.current.every((r) => r.state === "cancelled");
+    const hadWatermark = exportHadWatermarkRef.current;
+    const totalDuration = exportTotalDurationRef.current;
+    onExportReservationComplete?.();
+    clearExportingUI();
+    if (okCount > 0) {
+      if (onExportComplete && exportDir) onExportComplete(okCount, exportDir, hadWatermark, totalDuration);
+    } else if (!allCancelled) {
+      onExportFailed?.("all_clips_failed");
+      alert("Export failed. No clips were exported.");
+    }
   }
 
   useEffect(() => {
-    clipProgressRef.current = clipProgress;
-  }, [clipProgress]);
-
-  useEffect(() => {
     if (!isTauri) return;
+    const isStale = (id?: string) => !!id && !!exportClientIdRef.current && id !== exportClientIdRef.current;
+
     const unlistenProgress = listen<{
       clipIndex?: number;
-      totalClips?: number;
       phase?: string;
       clipPercent?: number;
       globalPercent?: number;
       client_export_id?: string;
     }>("export-progress", (event) => {
       const p = event.payload;
-      if (p?.client_export_id && exportClientIdRef.current && p.client_export_id !== exportClientIdRef.current) {
-        dbg("IGNORING export-progress (stale id)", { got: p.client_export_id, want: exportClientIdRef.current, p });
-        return;
+      if (isStale(p?.client_export_id) || !exportInProgressRef.current) return;
+      if (typeof p?.phase === "string" && p.phase.startsWith("quality_") && typeof p.globalPercent === "number") {
+        setQualityGlobal({ phase: p.phase, percent: Math.min(100, Math.max(0, p.globalPercent)) });
       }
-      // If we are receiving progress events, backend is alive; clear "connection lost".
-      if (exportInProgressRef.current) setConnectionLost(false);
-      const total = p?.totalClips != null ? Number(p.totalClips) : 0;
-      const idx = typeof p?.clipIndex === "number" ? p.clipIndex : 0;
-      const percent = typeof p?.clipPercent === "number" ? Math.min(100, Math.max(0, p.clipPercent)) : undefined;
-      const global = typeof p?.globalPercent === "number" ? Math.min(100, Math.max(0, p.globalPercent)) : undefined;
-      if (total > 0) {
-        dbg("event export-progress", p);
-        exportTotalRef.current = total;
-        if (global !== undefined && typeof p?.phase === "string" && p.phase.startsWith("quality_")) {
-          setQualityGlobal({ phase: p.phase, percent: global });
-        }
-        setExportProgress((prev) => ({
-          clipIndex: idx,
-          totalClips: total,
-          clipsCompleted: prev?.clipsCompleted ?? 0,
-        }));
-
-        // Start simulated 0→50% ONLY when this clip actually starts exporting.
-        // We gate this on the explicit "clip start" event (phase=clip, percent=0).
-        if (
-          !localFilePath &&
-          percent === 0 &&
-          p?.phase === "clip" &&
-          !clipHasRealProgressRef.current[idx] &&
-          clipSimRef.current[idx] == null
-        ) {
-          dbg(`start sim for clip ${idx}`, { halfDurMs: clipHalfDurMsRef.current[idx] });
-          const durMs = clipHalfDurMsRef.current[idx] ?? 1200;
-          clipSimRef.current[idx] = { t0: Date.now(), durMs: Math.max(500, durMs) };
-          // Ensure the row exists so it doesn't show "pending" once started.
-          setClipProgress((prev) => ({ ...prev, [idx]: 0 }));
-        }
-
-        // Only treat progress as "real" once encoding starts (we emit >=50 at encoding start),
-        // otherwise we'd stop simulating immediately due to the 0% "clip start" event.
-        if (percent !== undefined && (p?.phase === "encoding" || percent >= 50)) {
-          clipHasRealProgressRef.current[idx] = true;
-        }
-        if (percent !== undefined) {
-          // Keep the ref in sync immediately (avoid race where export-all-done arrives before state updates).
-          clipProgressRef.current = { ...clipProgressRef.current, [idx]: percent };
-          setClipProgress((prev) => ({ ...prev, [idx]: percent }));
-        }
-      }
-    });
-    const unlistenDone = listen<{ clipIndex?: number; clip_name?: string; client_export_id?: string }>("export-clip-done", (event) => {
-      if (event.payload?.client_export_id && exportClientIdRef.current && event.payload.client_export_id !== exportClientIdRef.current) {
-        dbg("IGNORING export-clip-done (stale id)", { got: event.payload.client_export_id, want: exportClientIdRef.current });
-        return;
-      }
-      if (exportInProgressRef.current) setConnectionLost(false);
-      dbg("event export-clip-done", event.payload);
-      exportOkCountRef.current += 1;
-      const idx = typeof event.payload?.clipIndex === "number" ? event.payload.clipIndex : undefined;
-      setExportProgress((prev) =>
-        prev && prev.totalClips > 0
-          ? { ...prev, clipsCompleted: Math.min(prev.clipsCompleted + 1, prev.totalClips) }
-          : prev
+      if (typeof p?.clipIndex !== "number") return;
+      const pct = typeof p.clipPercent === "number" ? Math.min(100, Math.max(0, p.clipPercent)) : 0;
+      const state: ClipState =
+        p.phase === "encoding" ? "encoding" : p.phase === "finishing" ? "finishing" : "running";
+      updateRow(p.clipIndex, (r) =>
+        isSettled(r.state) || r.state === "cancelling"
+          ? null
+          : { state, percent: Math.max(r.state === "waiting" ? 0 : r.percent, pct) }
       );
-      if (idx !== undefined) {
-        clipProgressRef.current = { ...clipProgressRef.current, [idx]: 100 };
-        setClipProgress((prev) => ({ ...prev, [idx]: 100 }));
+    });
+
+    const unlistenDone = listen<{ clipIndex?: number; export_dir?: string; client_export_id?: string }>(
+      "export-clip-done",
+      (event) => {
+        const p = event.payload;
+        if (isStale(p?.client_export_id) || typeof p?.clipIndex !== "number") return;
+        if (typeof p.export_dir === "string") exportDirRef.current = p.export_dir;
+        exportOkCountRef.current += 1;
+        updateRow(p.clipIndex, () => ({ state: "done", percent: 100 }));
         onExportClipSettled?.();
       }
+    );
+
+    const unlistenFailed = listen<{ clipIndex?: number; client_export_id?: string }>("export-clip-failed", (event) => {
+      const p = event.payload;
+      if (isStale(p?.client_export_id) || typeof p?.clipIndex !== "number") return;
+      refundClip(p.clipIndex);
+      updateRow(p.clipIndex, () => ({ state: "failed" }));
+      onExportClipSettled?.();
     });
-    const unlistenFailed = listen<{ clipIndex?: number; reason?: string; client_export_id?: string }>(
-      "export-clip-failed",
+
+    const unlistenCancelled = listen<{ clipIndex?: number; client_export_id?: string }>(
+      "export-clip-cancelled",
       (event) => {
-        if (event.payload?.client_export_id && exportClientIdRef.current && event.payload.client_export_id !== exportClientIdRef.current) {
-          dbg("IGNORING export-clip-failed (stale id)", { got: event.payload.client_export_id, want: exportClientIdRef.current });
-          return;
-        }
-        if (exportInProgressRef.current) setConnectionLost(false);
-        dbg("event export-clip-failed", event.payload);
-        exportFailedCountRef.current += 1;
-        const idx = typeof event.payload?.clipIndex === "number" ? event.payload.clipIndex : undefined;
-        const reason = typeof event.payload?.reason === "string" ? event.payload.reason : "failed";
-        if (idx !== undefined) {
-          if (!refundedFailedClipIndicesRef.current[idx]) {
-            refundedFailedClipIndicesRef.current[idx] = true;
-            releaseClipExports({ count: 1 }).then((res) => {
-              if (!res.ok) {
-                console.warn("[Export] Failed to refund quota for failed clip", {
-                  idx,
-                  error: res.error,
-                });
-              }
-            });
-          }
-          onExportClipSettled?.();
-          clipFailedRef.current = { ...clipFailedRef.current, [idx]: reason };
-          setClipFailed((prev) => ({ ...prev, [idx]: reason }));
-          // Mark as "done" so export-all-done can close UI deterministically.
-          clipProgressRef.current = { ...clipProgressRef.current, [idx]: 100 };
-          setClipProgress((prev) => ({ ...prev, [idx]: 100 }));
-        }
+        const p = event.payload;
+        if (isStale(p?.client_export_id) || typeof p?.clipIndex !== "number") return;
+        refundClip(p.clipIndex);
+        updateRow(p.clipIndex, () => ({ state: "cancelled" }));
+        onExportClipSettled?.();
       }
     );
-    const unlistenAllDone = listen<{ export_dir?: string; totalClips?: number; client_export_id?: string }>(
-      "export-all-done",
-      (event) => {
-        if (event.payload?.client_export_id && exportClientIdRef.current && event.payload.client_export_id !== exportClientIdRef.current) {
-          dbg("IGNORING export-all-done (stale id)", { got: event.payload.client_export_id, want: exportClientIdRef.current });
-          return;
-        }
-        if (exportInProgressRef.current) setConnectionLost(false);
-        dbg("event export-all-done", event.payload);
-        if (typeof event.payload?.export_dir === "string") {
-          exportDirRef.current = event.payload.export_dir;
-        }
-        if ((window as any).__exportSafetyTimeout != null) {
-          window.clearTimeout((window as any).__exportSafetyTimeout);
-          (window as any).__exportSafetyTimeout = null;
-        }
-        if (exportInProgressRef.current) {
-          const total =
-            typeof event.payload?.totalClips === "number"
-              ? Number(event.payload.totalClips)
-              : exportTotalRef.current;
-          const completed =
-            total != null
-              ? Object.values(clipProgressRef.current).filter((p) => typeof p === "number" && p >= 100).length
-              : null;
-          const failed =
-            total != null ? Object.keys(clipFailedRef.current).length : null;
 
-          // Defensive guard: export-all-done can arrive essentially at the same time as the last clip-done.
-          // If we're short by a clip, retry once shortly before deciding it's truly early.
-          if (total != null && completed != null && failed != null && completed + failed < total) {
-            dbg("export-all-done arrived before completion; retrying shortly", { total, completed, failed, clipProgress: clipProgressRef.current, clipFailed: clipFailedRef.current });
-            setConnectionLost(true);
-            window.setTimeout(() => {
-              if (!exportInProgressRef.current) return;
-              const completedNow = Object.values(clipProgressRef.current).filter((p) => typeof p === "number" && p >= 100).length;
-              const failedNow = Object.keys(clipFailedRef.current).length;
-              if (completedNow + failedNow >= total) {
-                setConnectionLost(false);
-                const okCount = exportOkCountRef.current;
-                const exportDir = exportDirRef.current;
-                onExportReservationComplete?.();
-                clearExportingUI("export-all-done accepted (after retry)", { total, completedNow, failedNow, okCount, exportDir });
-                if (onExportComplete && exportDir && okCount > 0) {
-                  onExportComplete(okCount, exportDir, exportHadWatermarkRef.current, exportTotalDurationRef.current);
-                } else if (okCount === 0) {
-                  onExportFailed?.("all_clips_failed");
-                  alert("Export failed. No clips were exported.");
-                }
-              }
-            }, 120);
-            return;
-          }
+    const unlistenAllDone = listen<{ export_dir?: string; client_export_id?: string }>("export-all-done", (event) => {
+      const p = event.payload;
+      if (isStale(p?.client_export_id) || !exportInProgressRef.current) return;
+      if (typeof p?.export_dir === "string") exportDirRef.current = p.export_dir;
+      finishExport();
+    });
 
-          const okCount = exportOkCountRef.current;
-          const exportDir = exportDirRef.current;
-          onExportReservationComplete?.();
-          clearExportingUI("export-all-done accepted", { total, completed, failed, okCount, exportDir });
-          if (onExportComplete && exportDir && okCount > 0) {
-            onExportComplete(okCount, exportDir, exportHadWatermarkRef.current, exportTotalDurationRef.current);
-          } else if (okCount === 0) {
-            onExportFailed?.("all_clips_failed");
-            alert("Export failed. No clips were exported.");
-          }
-        }
-      }
-    );
+    // The export stopped before any clip could run: the source file vanished, the full
+    // download failed, and similar.
+    const unlistenError = listen<{ error?: string; client_export_id?: string }>("export-error", (event) => {
+      const p = event.payload;
+      if (isStale(p?.client_export_id) || !exportInProgressRef.current) return;
+      const code = String(p?.error ?? "unknown_error");
+      onExportReservationComplete?.();
+      rowsRef.current.forEach((r, i) => {
+        if (!isSettled(r.state)) refundClip(i);
+      });
+      clearExportingUI();
+      onExportFailed?.(code.toLowerCase().replace(/\s+/g, "_").slice(0, 64));
+      alert(`Export failed (${code}). No clips were exported.`);
+    });
+
     return () => {
-      unlistenProgress.then((fn) => fn());
-      unlistenDone.then((fn) => fn());
-      unlistenFailed.then((fn) => fn());
-      unlistenAllDone.then((fn) => fn());
+      [unlistenProgress, unlistenDone, unlistenFailed, unlistenCancelled, unlistenAllDone, unlistenError].forEach(
+        (u) => u.then((fn) => fn())
+      );
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isTauri]);
 
-  useEffect(() => {
-    if (!isExporting) return;
-    const interval = window.setInterval(() => {
-      const sim = clipSimRef.current;
-      const hasReal = clipHasRealProgressRef.current;
-      const now = Date.now();
-      const updates: Record<number, number> = {};
-      let changed = false;
-
-      for (const k of Object.keys(sim)) {
-        const idx = Number(k);
-        if (Number.isNaN(idx)) continue;
-        if (hasReal[idx]) continue;
-        const cfg = sim[idx];
-        if (!cfg) continue;
-        const elapsed = Math.max(0, now - cfg.t0);
-        const frac = cfg.durMs > 0 ? Math.min(1, elapsed / cfg.durMs) : 1;
-        // Ease-out: fast start, decelerates approaching 50% to avoid the bar freezing visibly
-        const easedFrac = 1 - Math.pow(1 - frac, 1.6);
-        const pct = Math.round(easedFrac * 47); // 0..47, leaving room for real progress to take over
-        updates[idx] = pct;
-        changed = true;
-      }
-
-      if (changed) {
-        setClipProgress((prev) => {
-          const next = { ...prev };
-          for (const [k, v] of Object.entries(updates)) {
-            const idx = Number(k);
-            // Only update if backend hasn't moved it past our simulated range.
-            const cur = typeof next[idx] === "number" ? next[idx] : undefined;
-            if (cur === undefined || cur < 50) {
-              next[idx] = Math.min(50, v);
-            }
-          }
-          return next;
-        });
-      }
-    }, 200);
-    return () => window.clearInterval(interval);
-  }, [isExporting]);
+  /** Stops one clip, or every clip when `idx` is undefined. The agent kills that clip's
+   *  yt-dlp/ffmpeg and reports it cancelled; rows show "Cancelling…" until it does. */
+  async function cancelExport(idx?: number) {
+    const id = exportClientIdRef.current;
+    if (!id) return;
+    if (idx === undefined) {
+      setRowsNow(rowsRef.current.map((r) => (isSettled(r.state) ? r : { ...r, state: "cancelling" })));
+    } else {
+      updateRow(idx, (r) => (isSettled(r.state) ? null : { state: "cancelling" }));
+    }
+    const res = await cancelExportRequest(id, idx);
+    // The agent no longer knows this export (it finished a moment ago, or the app was
+    // restarted): nothing will report back, so close the panel here.
+    if (idx === undefined && (!res.ok || !res.data.running) && exportInProgressRef.current) {
+      finishExport();
+    }
+  }
 
   const displayPath =
     (exportPath && exportPath.trim()) ? exportPath : (defaultExportDir || "~/Downloads");
@@ -486,116 +369,52 @@ export default function ExportPanel({
 
     exportInProgressRef.current = true;
     exportClientIdRef.current = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    exportAbortControllerRef.current = new AbortController();
-    setConnectionLost(false);
-    setIsExporting(true);
-    setExportProgress(null);
-    setClipProgress({});
+    exportOkCountRef.current = 0;
+    exportDirRef.current = "";
+    refundedClipIndicesRef.current = {};
     setQualityGlobal(null);
-    clipHasRealProgressRef.current = {};
-    clipHalfDurMsRef.current = {};
-    clipProgressRef.current = {};
-    exportTotalRef.current = null;
-    refundedFailedClipIndicesRef.current = {};
-    const names = chosen.map((c) => c?.name).filter((n) => typeof n === "string" && n.trim().length > 0) as string[];
-    setExportClipNames(names);
-    exportClipNamesRef.current = names;
+    setRowsNow(chosen.map(() => ({ state: "waiting", percent: 0 })));
+    setExportClipNames(chosen.map((c, i) => (c?.name && c.name.trim()) || `Clip ${i + 1}`));
+    setIsExporting(true);
 
-    try {
-      dbg("doExport start", { selectedOnly, localFilePath, clipCount: chosen.length });
-      // Prepare simulated yt-dlp phase config. We do NOT start bars yet; we only start a clip's
-      // simulated 0→50% when we receive its "clip start" event from the backend.
-      clipSimRef.current = {};
-      if (!localFilePath) {
-        const halfDur: Record<number, number> = {};
-        for (let i = 0; i < chosen.length; i++) {
-          const durSec = Math.max(0, Number(chosen[i]?.end ?? 0) - Number(chosen[i]?.start ?? 0));
-          halfDur[i] = Math.max(500, (durSec * 1000) / 2);
-        }
-        clipHalfDurMsRef.current = halfDur;
-      }
+    exportHadWatermarkRef.current = Boolean(hasWatermark);
+    exportTotalDurationRef.current = chosen.reduce((sum, c) => sum + Math.max(0, c.end - c.start), 0);
 
-      // Capture watermark state and total duration at export start
-      exportHadWatermarkRef.current = Boolean(hasWatermark);
-      exportTotalDurationRef.current = chosen.reduce(
-        (sum, c) => sum + Math.max(0, c.end - c.start),
-        0
-      );
+    const exportUrl = resolvedUrl && resolvedUrl.trim().length > 0 ? resolvedUrl : videoUrl.trim();
 
-      const exportUrl = resolvedUrl && resolvedUrl.trim().length > 0
-        ? resolvedUrl
-        : videoUrl.trim();
+    const result = await downloadAll({
+      client_export_id: exportClientIdRef.current,
+      source_title: (videoData as any)?.title ? String((videoData as any).title) : null,
+      quality_reencode_h264: !localFilePath && exportHQ ? Boolean(qualityReencodeH264) : undefined,
+      // Use the resolved URL that produced the current preview, not whatever is currently typed.
+      url: localFilePath ? "" : exportUrl,
+      local_path: localFilePath ?? undefined,
+      clips: chosen,
+      mode: localFilePath ? "speed" : exportHQ ? "quality" : "speed",
+      // Free exports are capped at 720p max (enforced client + backend).
+      fast_max_height: localFilePath
+        ? null
+        : exportHQ
+        ? null
+        : hasWatermark
+        ? Math.min(720, fastCap ?? 720)
+        : fastCap,
+      keep_full: keepWholeVideo,
+      preview_url: videoData?.preview?.url ?? null,
+      video_id: videoData?.id ?? null,
+      export_path: sanitizeExportPath(exportPath),
+      has_watermark: Boolean(hasWatermark),
+      codec: exportCodec,
+    });
 
-      const result = await downloadAll({
-        client_export_id: exportClientIdRef.current,
-        source_title: (videoData as any)?.title ? String((videoData as any).title) : null,
-        quality_reencode_h264: !localFilePath && exportHQ ? Boolean(qualityReencodeH264) : undefined,
-        // Use the resolved URL that produced the current preview, not whatever is currently typed.
-        url: localFilePath ? "" : exportUrl,
-        local_path: localFilePath ?? undefined,
-        clips: chosen,
-        mode: localFilePath ? "speed" : exportHQ ? "quality" : "speed",
-        // Free exports are capped at 720p max (enforced client + backend).
-        fast_max_height: localFilePath
-          ? null
-          : exportHQ
-          ? null
-          : hasWatermark
-          ? Math.min(720, fastCap ?? 720)
-          : fastCap,
-        keep_full: keepWholeVideo,
-        preview_url: videoData?.preview?.url ?? null,
-        video_id: videoData?.id ?? null,
-        export_path: sanitizeExportPath(exportPath),
-        has_watermark: Boolean(hasWatermark),
-        codec: exportCodec,
-      }, { signal: exportAbortControllerRef.current?.signal });
-
-      if (!result.ok) {
-        dbg("downloadAll returned error", result);
-        // The HTTP request can drop even while the backend continues exporting.
-        // In that case, keep UI open and rely on export-* events to finish.
-        if (result.error === "download_fetch_failed") {
-          setConnectionLost(true);
-          if ((window as any).__exportSafetyTimeout != null) {
-            window.clearTimeout((window as any).__exportSafetyTimeout);
-            (window as any).__exportSafetyTimeout = null;
-          }
-          const safetyTimeout = window.setTimeout(() => {
-            if (exportInProgressRef.current) {
-              clearExportingUI("safety timeout after connection lost");
-              alert("Export may have failed. The connection was lost and no completion was received.");
-            }
-          }, 15 * 60 * 1000); // 15 minutes
-          (window as any).__exportSafetyTimeout = safetyTimeout;
-          dbg("treating download_fetch_failed as connection lost; waiting for events");
-          return;
-        }
-
-        clearExportingUI("downloadAll error", result);
-        onExportFailed?.(String(result.error ?? "unknown_error").toLowerCase().replace(/\s+/g, "_").slice(0, 64));
-        alert("Export failed: " + result.error);
-        return;
-      }
-
-      dbg("downloadAll returned ok (waiting for events)", result.data);
-      // Do NOT toast success here; rely on export-all-done + clip-done/failed events so the UI
-      // doesn't say "Exported 0 clips" or get stuck at 50% on failures.
-    } catch (e) {
-      // User-initiated cancel: AbortError from our own AbortController — do nothing; UI is already cleared.
-      if (e instanceof Error && e.name === "AbortError" && !exportInProgressRef.current) return;
-      // Do NOT clear loading here. The HTTP connection may have timed out or dropped
-      // while the backend is still exporting (long clips). We only clear when we
-      // receive export-all-done.
-      console.error("Export request failed (connection may have timed out):", e);
-      setConnectionLost(true);
-      const safetyTimeout = window.setTimeout(() => {
-        if (exportInProgressRef.current) {
-          clearExportingUI("safety timeout after connection lost");
-          alert("Export may have failed. The connection was lost and no completion was received.");
-        }
-      }, 15 * 60 * 1000); // 15 minutes
-      (window as any).__exportSafetyTimeout = safetyTimeout;
+    // The agent answers as soon as the export has started, so a failure here means it
+    // never started (the agent is unreachable); everything after this comes by event.
+    if (!result.ok && exportInProgressRef.current) {
+      onExportReservationComplete?.();
+      rowsRef.current.forEach((_, i) => refundClip(i));
+      clearExportingUI();
+      onExportFailed?.(String(result.error ?? "unknown_error").toLowerCase().replace(/\s+/g, "_").slice(0, 64));
+      alert("Export could not start: " + result.error);
     }
   }
 
@@ -821,77 +640,120 @@ export default function ExportPanel({
         </label>
       )}
 
-      {isExporting && (
-        <div className="rounded border border-zinc-800 bg-zinc-900/80 p-3 space-y-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="inline-block w-4 h-4 border-2 border-violet-500 border-t-transparent rounded-full animate-spin shrink-0" />
-            <span className="text-sm font-medium text-zinc-900 dark:text-white flex-1 min-w-0 truncate">
-              {exportProgress?.totalClips
-                ? (() => {
-                    const idx = exportProgress.clipIndex ?? 0;
-                    const label = exportClipNames[idx] ?? `Clip ${idx + 1}`;
-                    return `Exporting ${label}…`;
-                  })()
-                : "Preparing export…"}
-            </span>
-            <button
-              type="button"
-              onClick={() => clearExportingUI("user_cancelled")}
-              className="shrink-0 p-1 rounded text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition"
-              aria-label="Cancel export"
-              title="Cancel export"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-          {exportProgress && exportProgress.totalClips > 0 && (
-            <div className="space-y-2">
-              <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">Exporting clips</p>
-              {Array.from({ length: exportProgress.totalClips }, (_, i) => {
-                const percent = clipProgress[i];
-                const isPending = percent === undefined;
+      {isExporting && rows.length > 0 && (() => {
+        const total = rows.length;
+        const doneCount = rows.filter((r) => r.state === "done").length;
+        const active = rows.some((r) => !isSettled(r.state) && r.state !== "cancelling");
+        const anyClipStarted = rows.some((r) => r.state !== "waiting");
+        const title = total === 1 ? `Exporting ${exportClipNames[0] ?? "clip"}` : `Exporting ${total} clips`;
+        const statusText = (r: ClipRow) =>
+          r.state === "waiting" ? "Waiting"
+          : r.state === "running" ? (r.percent > 0 ? `${Math.round(r.percent)}%` : localFilePath ? "Cutting…" : "Starting…")
+          : r.state === "encoding" ? `Encoding ${Math.round(r.percent)}%`
+          : r.state === "finishing" ? "Finishing…"
+          : r.state === "done" ? "Done"
+          : r.state === "cancelling" ? "Cancelling…"
+          : r.state === "cancelled" ? "Cancelled"
+          : "Failed";
+        const barStyle = (r: ClipRow) => {
+          if (r.state === "done") return { width: "100%", background: "#10b981" };
+          if (r.state === "failed") return { width: "100%", background: "#ef4444" };
+          if (r.state === "cancelled" || r.state === "cancelling") return { width: `${r.percent}%`, background: "#52525b" };
+          return {
+            width: `${Math.max(r.percent, r.state === "waiting" ? 0 : 3)}%`,
+            background: "linear-gradient(90deg, #7c3cff 0%, #c935ff 60%, #ff2e92 100%)",
+          };
+        };
+        return (
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/80 p-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="inline-block w-4 h-4 border-2 border-violet-500 border-t-transparent rounded-full animate-spin shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-white truncate" title={title}>{title}</p>
+                {total > 1 && <p className="text-xs text-zinc-500">{doneCount} of {total} done</p>}
+              </div>
+              {active && (
+                <button
+                  type="button"
+                  onClick={() => cancelExport()}
+                  className="shrink-0 px-2 py-1 rounded text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition"
+                >
+                  {total === 1 ? "Cancel" : "Cancel all"}
+                </button>
+              )}
+            </div>
+
+            {/* High Quality mode fetches the whole video once before any clip is cut. */}
+            {exportHQ && qualityGlobal && !anyClipStarted && (
+              <div className="mt-3 space-y-1.5">
+                <div className="flex justify-between text-xs text-zinc-400">
+                  <span>
+                    {qualityGlobal.phase === "quality_download_video"
+                      ? "Downloading full video"
+                      : qualityGlobal.phase === "quality_download_audio"
+                      ? "Downloading audio"
+                      : "Preparing video"}
+                  </span>
+                  <span className="tabular-nums">{Math.round(qualityGlobal.percent)}%</span>
+                </div>
+                <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-[width] duration-300 ease-linear"
+                    style={{ width: `${qualityGlobal.percent}%`, background: "linear-gradient(90deg, #7c3cff 0%, #c935ff 60%, #ff2e92 100%)" }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <ul className="mt-3 space-y-2">
+              {rows.map((r, i) => {
                 const label = exportClipNames[i] ?? `Clip ${i + 1}`;
+                const canCancel = total > 1 && !isSettled(r.state) && r.state !== "cancelling";
                 return (
-                  <div key={i} className="flex items-center gap-2 min-w-0">
-                    <span
-                      className="text-xs text-zinc-700 dark:text-zinc-300 w-24 min-w-0 shrink-0 truncate overflow-hidden"
-                      title={label}
-                    >
+                  <li key={i} className="flex items-center gap-2 min-w-0">
+                    <span className="w-24 min-w-0 shrink-0 truncate text-xs text-zinc-300" title={label}>
                       {label}
                     </span>
-                    {isPending ? (
-                      <span className="text-xs text-zinc-500 dark:text-zinc-400 shrink-0">pending</span>
-                    ) : (
-                      <div className="flex-1 min-w-0 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-                        <div
-                          className="h-full rounded-full transition-all duration-500 ease-out"
-                          style={{
-                            width: `${percent}%`,
-                            background: percent >= 100
-                              ? "linear-gradient(90deg, #059669 0%, #10b981 100%)"
-                              : "linear-gradient(90deg, #7c3cff 0%, #c935ff 60%, #ff2e92 100%)",
-                          }}
-                        />
-                      </div>
+                    <div className="flex-1 min-w-0 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-[width] duration-300 ease-linear ${
+                          r.state === "running" && r.percent === 0 ? "animate-pulse" : ""
+                        }`}
+                        style={barStyle(r)}
+                      />
+                    </div>
+                    <span
+                      className={`w-24 shrink-0 text-right text-xs tabular-nums ${
+                        r.state === "done" ? "text-emerald-400" : r.state === "failed" ? "text-red-400" : "text-zinc-400"
+                      }`}
+                    >
+                      {statusText(r)}
+                    </span>
+                    {total > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => cancelExport(i)}
+                        disabled={!canCancel}
+                        className={`shrink-0 p-0.5 rounded transition ${
+                          canCancel ? "text-zinc-500 hover:text-white hover:bg-zinc-800" : "invisible"
+                        }`}
+                        aria-label={`Cancel ${label}`}
+                        title={`Cancel ${label}`}
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
                     )}
-                  </div>
+                  </li>
                 );
               })}
-            </div>
-          )}
-          {connectionLost && (
-            <p className="text-xs text-amber-400">
-              Connection lost — export may still be running. You’ll see a notification when it finishes.
-            </p>
-          )}
-          <p className="text-xs text-zinc-400">
-            Long clips may take several minutes. Don’t close the app.
-          </p>
+            </ul>
 
-        </div>
-      )}
+            <p className="mt-3 text-xs text-zinc-500">Keep Klipprr open until the export finishes.</p>
+          </div>
+        );
+      })()}
 
       <div className="space-y-1 relative group">
         <label className="text-xs text-zinc-500 dark:text-gray-400">Export folder</label>
@@ -930,29 +792,6 @@ export default function ExportPanel({
           ) : null}
         </div>
       </div>
-
-      {isExporting && exportHQ && qualityGlobal && (
-        <div className="rounded border border-zinc-800 bg-zinc-900/50 p-3 space-y-2">
-          <p className="text-xs font-medium text-zinc-400">
-            {qualityGlobal.phase === "quality_download_video"
-              ? "Quality: downloading video…"
-              : qualityGlobal.phase === "quality_download_audio"
-              ? "Quality: downloading audio…"
-              : qualityGlobal.phase === "quality_merge"
-              ? "Quality: preparing full video…"
-              : "Quality: working…"}
-          </p>
-          <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-            <div
-              className="h-full rounded-full transition-all duration-500 ease-out"
-              style={{
-                width: `${qualityGlobal.percent}%`,
-                background: "linear-gradient(90deg, #7c3cff 0%, #c935ff 60%, #ff2e92 100%)",
-              }}
-            />
-          </div>
-        </div>
-      )}
 
       {!isExporting && (
         <>
