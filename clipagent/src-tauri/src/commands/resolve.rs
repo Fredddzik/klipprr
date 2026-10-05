@@ -136,11 +136,20 @@ pub fn handle_resolve(url: String) -> String {
             && (stderr_lower.contains("cookies") || stderr_lower.contains("binarycookies"))
         {
             r#"{"error":"cookies_not_accessible"}"#.to_string()
+        } else if stderr_lower.contains("confirm your age") || stderr_lower.contains("age-restricted")
+            || stderr_lower.contains("inappropriate for some users")
+        {
+            // Checked before the bot block: YouTube's age gate also starts "Sign in to
+            // confirm", and that advice ("YouTube is blocking automated access") is wrong here.
+            r#"{"error":"age_restricted"}"#.to_string()
         } else if stderr_lower.contains("sign in to confirm") || stderr_lower.contains("not a bot") {
             r#"{"error":"youtube_bot_block"}"#.to_string()
         } else if stderr_lower.contains("private video") || stderr_lower.contains("video is private")
             || stderr_lower.contains("login required") || stderr_lower.contains("sign in to view")
             || stderr_lower.contains("this video is not available")
+            // Instagram's answer for posts it only shows to signed-in users: private
+            // accounts and age-limited posts alike.
+            || stderr_lower.contains("empty media response")
         {
             r#"{"error":"login_or_private"}"#.to_string()
         } else if stderr_lower.contains("video unavailable")

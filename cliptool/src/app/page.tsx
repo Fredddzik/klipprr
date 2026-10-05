@@ -684,9 +684,12 @@ function readPendingReservation(): number {
         } else if (code === "youtube_bot_block") {
           message =
             "YouTube is blocking automated access. Use \"Load local file\" or record your screen, then load that file.";
+        } else if (code === "age_restricted") {
+          message =
+            "This video is age-restricted, so the platform only shows it to signed-in adults. Klipprr loads videos without signing in, so it can't open this one. Use screen recording and \"Load local file\" instead.";
         } else if (code === "login_or_private") {
           message =
-            "This video is private or requires login. We can't access it directly. Use \"Load local file\" or screen recording instead.";
+            "This post is private or restricted (for example age-limited), so the platform only shows it to signed-in users. Klipprr loads videos without signing in, so it can't open this one. Use screen recording and \"Load local file\" instead.";
         } else if (code === "video_unavailable") {
           message =
             "This video is unavailable — it may have been removed, or it isn't available in your region.";

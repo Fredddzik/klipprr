@@ -570,4 +570,48 @@ says "Connection lost" on exports that succeed; two headers both say "Exporting 
 4. One header ("Exporting 2 of 3 clips"), one row per clip with a clear state (Waiting,
    Downloading 42%, Finishing, Done, Cancelled, Failed) and its own cancel button.
 
-**Status:** `in progress`.
+Also fixed on the way: local-file and High Quality exports never reported a failed clip,
+so the panel waited on it forever (another route to "Connection lost").
+
+**Verified against the real agent (2026-10-01):** `/download-all` answers in under 1 ms;
+cancelling one of three 60 s clips stopped it with no file and no temp leftovers while the
+other two came out at exactly 60.0 s; "Cancel all" mid-download took all 8 yt-dlp/ffmpeg
+processes to zero within a second, wrote no files and closed the export; cancelling an
+export that already finished answers `running: false` so the panel closes.
+
+**Status:** `done` pending the founder's look at the new panel; ships in 0.1.34.
+
+---
+
+## FR-12 — Restricted posts (age-limited Instagram, age-gated YouTube) cannot be loaded
+
+**Asked (2026-10-01):** an Instagram Reel failed with yt-dlp's raw "Instagram sent an empty
+media response" error.
+
+**Cause: the post, not Klipprr.** Logged out, Instagram shows the page as "People under 18
+can't see this content. This account has set limits on who can see their profile and
+content." Klipprr, like most clippers, fetches without an account, so Instagram returns
+nothing. The latest yt-dlp nightly (2026.09.27) fails the same way; it is not a bug to wait
+out.
+
+**Fixed now (0.1.34):** the error is classified instead of dumped. Instagram's empty media
+response maps to `login_or_private` ("This post is private or restricted, for example
+age-limited…"), and YouTube's age gate gets its own `age_restricted` message. Before, the
+age gate ("Sign in to confirm your age") matched the bot-block rule and told the user
+YouTube was blocking automated access, which was wrong.
+
+**The real fix is a product decision: let users sign in through their browser.** yt-dlp can
+use the user's own browser login (`--cookies-from-browser`). That would open age-limited and
+private-but-followed posts, and age-gated YouTube.
+- Safari's cookies are blocked by macOS for apps without Full Disk Access; Chrome, Brave,
+  Edge and Firefox work, with a one-time Keychain prompt for Chromium browsers.
+- Everything stays on the Mac (promise 4 holds): cookies are read locally and only sent to
+  the platform they belong to.
+- **The risk lands on the user's account.** Instagram and YouTube flag accounts used by
+  download tools; heavy use can get an account rate-limited or suspended. This has to be
+  opt-in, per platform, off by default, with that warning in plain words.
+
+**Recommendation:** build it as an opt-in setting ("Use my Chrome login for Instagram"),
+once there is evidence users hit restricted posts often. The health check and the resolve
+log can count `login_or_private` and `age_restricted` errors to provide that evidence.
+**Effort:** M. **Status:** `parked` pending demand.
