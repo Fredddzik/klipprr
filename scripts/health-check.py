@@ -110,7 +110,8 @@ def dash_probe(info):
 
 # The app's "Original" (stream-copy) export selector at a 1080p cap, the most common
 # export (commands/download.rs, speed mode). Keep in step with it.
-EXPORT_FORMAT = ("bv*[ext=mp4][height<=1080]+ba[ext=m4a]/bv*[ext=mp4][height<=1080]+ba/"
+EXPORT_FORMAT = ("bv*[ext=mp4][vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][vcodec^=?avc1][height<=?1080]/"
+                 "bv*[ext=mp4][height<=1080]+ba[ext=m4a]/bv*[ext=mp4][height<=1080]+ba/"
                  "best[ext=mp4][height<=1080]/best[height<=1080]")
 
 

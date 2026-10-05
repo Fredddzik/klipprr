@@ -44,6 +44,88 @@ fn is_h264(f: &Value) -> bool {
 ///
 /// ffprobe reads only as much of the stream as the first two frames need (~200 ms) and
 /// prints one line per frame, so non-empty stdout means the URL really plays.
+/// Instagram lists its plain MP4 renditions with no codec, size or duration (2026), so
+/// they looked unplayable: the app fell back to downloading a merged preview, and with no
+/// duration anywhere the resolve failed outright. Probe one such file (they are the same
+/// encode) and copy what it is onto all of them. One ffprobe of the file's index, well
+/// under a second, and only when unlabelled muxed formats exist.
+fn label_unlabelled_formats(formats: &mut [Value]) {
+    let unlabelled = |f: &Value| {
+        f["vcodec"].is_null()
+            && f["acodec"].is_null()
+            && f["protocol"].as_str() == Some("https")
+            && f["ext"].as_str() == Some("mp4")
+            && f["url"].as_str().map_or(false, |u| !u.is_empty())
+    };
+    let Some(url) = formats.iter().find(|f| unlabelled(f)).and_then(|f| f["url"].as_str()).map(String::from) else {
+        return;
+    };
+    let Ok(out) = Command::new(ffprobe_path())
+        .args([
+            "-v", "error",
+            "-rw_timeout", "8000000",
+            "-user_agent", "Mozilla/5.0",
+            "-show_entries", "stream=codec_type,codec_name,width,height:format=duration",
+            "-of", "json",
+            &url,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    else {
+        return;
+    };
+    let Ok(probe) = serde_json::from_slice::<Value>(&out.stdout) else { return };
+    let streams = probe["streams"].as_array().cloned().unwrap_or_default();
+    let stream = |kind: &str| streams.iter().find(|s| s["codec_type"].as_str() == Some(kind)).cloned();
+    let (Some(v), a) = (stream("video"), stream("audio")) else { return };
+    // yt-dlp's own spelling, so is_h264 and the format selectors treat them like any other.
+    let vcodec = match v["codec_name"].as_str() {
+        Some("h264") => "avc1",
+        Some(other) => other,
+        None => return,
+    }
+    .to_string();
+    let acodec = match a.as_ref().and_then(|a| a["codec_name"].as_str()) {
+        Some("aac") => "mp4a".to_string(),
+        Some(other) => other.to_string(),
+        None => "none".to_string(),
+    };
+    let duration = probe["format"]["duration"].as_str().and_then(|d| d.parse::<f64>().ok());
+    log_to_file(&format!(
+        "[RESOLVE] labelled unlabelled mp4 formats: {}/{} {}x{} {:?}s",
+        vcodec, acodec, v["width"], v["height"], duration
+    ));
+    for f in formats.iter_mut().filter(|f| unlabelled(f)) {
+        f["vcodec"] = Value::from(vcodec.clone());
+        f["acodec"] = Value::from(acodec.clone());
+        f["width"] = v["width"].clone();
+        f["height"] = v["height"].clone();
+        if let Some(d) = duration {
+            f["duration"] = Value::from(d);
+        }
+    }
+}
+
+/// The media's own length, read from its container. A few hundred ms: ffprobe only needs
+/// the file's index, not the video.
+fn probe_url_duration(url: &str) -> Option<f64> {
+    let out = Command::new(ffprobe_path())
+        .args([
+            "-v", "error",
+            "-rw_timeout", "8000000",
+            "-user_agent", "Mozilla/5.0",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            url,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().ok().filter(|d| *d > 0.0)
+}
+
 fn preview_url_is_playable(url: &str) -> bool {
     let out = Command::new(ffprobe_path())
         .args([
@@ -187,8 +269,9 @@ let parsed: Value = match serde_json::from_str(json_str) {
     }
 };
 
-    let empty_formats: Vec<Value> = Vec::new();
-    let formats = parsed["formats"].as_array().unwrap_or(&empty_formats);
+    let mut formats_owned: Vec<Value> = parsed["formats"].as_array().cloned().unwrap_or_default();
+    label_unlabelled_formats(&mut formats_owned);
+    let formats = &formats_owned;
 
     // Tallest H.264 rendition in the source. This is the ceiling for anything that has to
     // avoid a re-encode — a stream copy, and an in-app preview — because it is the only
@@ -351,7 +434,31 @@ let parsed: Value = match serde_json::from_str(json_str) {
 
     let id = parsed.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let title = parsed.get("title").and_then(|v| v.as_str()).unwrap_or("");
-    let duration = parsed.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    // Newer Instagram Reels come back with no duration at all, which used to fail the
+    // resolve as "invalid_core_fields" even though the video downloads fine. The timeline
+    // needs a length (PIPELINES invariant 2), so take it from the formats, or failing that,
+    // measure the media itself.
+    let duration = parsed
+        .get("duration")
+        .and_then(|v| v.as_f64())
+        .filter(|d| *d > 0.0)
+        .or_else(|| {
+            formats
+                .iter()
+                .filter_map(|f| f["duration"].as_f64())
+                .fold(None, |m: Option<f64>, d| Some(m.map_or(d, |m| m.max(d))))
+                .filter(|d| *d > 0.0)
+        })
+        .or_else(|| {
+            let url = any_video
+                .iter()
+                .rev()
+                .find_map(|(f, _)| f["url"].as_str().filter(|u| !u.is_empty()))?;
+            let d = probe_url_duration(url);
+            log_to_file(&format!("[RESOLVE] no duration from the platform; measured {:?}", d));
+            d
+        })
+        .unwrap_or(0.0);
     let thumbnail = parsed.get("thumbnail").and_then(|v| v.as_str());
 
     if id.is_empty() || title.is_empty() || duration <= 0.0 {

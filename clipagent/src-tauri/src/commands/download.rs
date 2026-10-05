@@ -654,12 +654,22 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             //   2. bv[mp4]+ba        — MP4 video + any audio codec
             //   3. best[ext=mp4]     — best single progressive MP4 (handles TikTok h264, X/Twitter)
             //   4. best              — absolute fallback (may be WebM/VP9 but still valid)
+            //
+            // H.264 first. YouTube and Instagram also ship AV1 and VP9 inside .mp4, and
+            // "best mp4" picked those: files QuickTime and Premiere cannot open (AUDIT B12).
+            // The fast-export ceiling the UI shows is computed from H.264 renditions only
+            // (resolve.rs), so this is what "Original" was always meant to deliver.
             match fast_cap {
+                // `^=?` / `<=?` also match formats whose codec or height is unknown:
+                // Instagram lists its H.264 MP4s with neither, so a strict filter fell
+                // through to VP9.
                 Some(h) => format!(
-                    "bv*[ext=mp4][height<={}]+ba[ext=m4a]/bv*[ext=mp4][height<={}]+ba/best[ext=mp4][height<={}]/best[height<={}]",
-                    h, h, h, h
+                    "bv*[ext=mp4][vcodec^=avc1][height<={h}]+ba[ext=m4a]/b[ext=mp4][vcodec^=?avc1][height<=?{h}]/\
+                     bv*[ext=mp4][height<={h}]+ba[ext=m4a]/bv*[ext=mp4][height<={h}]+ba/best[ext=mp4][height<={h}]/best[height<={h}]"
                 ),
-                None => "bv*[ext=mp4]+ba[ext=m4a]/bv*[ext=mp4]+ba/best[ext=mp4]/best".to_string(),
+                None => "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4][vcodec^=?avc1]/\
+                         bv*[ext=mp4]+ba[ext=m4a]/bv*[ext=mp4]+ba/best[ext=mp4]/best"
+                    .to_string(),
             }
         };
         let needs_reencode_branch: bool = has_watermark || codec == "universal";

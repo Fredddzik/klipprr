@@ -615,3 +615,17 @@ private-but-followed posts, and age-gated YouTube.
 once there is evidence users hit restricted posts often. The health check and the resolve
 log can count `login_or_private` and `age_restricted` errors to provide that evidence.
 **Effort:** M. **Status:** `parked` pending demand.
+
+**Follow-up (2026-10-05): newer Reels failed even when public.** `DeFM9aGsYbg` resolved in
+yt-dlp but the app rejected it with no message. Instagram now lists its plain MP4
+renditions with no codec, size or duration, and resolve required a duration. Fix: resolve
+probes one unlabelled MP4 with ffprobe (well under a second) and labels them all (they were
+H.264 + AAC, 720×1280, 26.19 s), with a duration fallback from formats or the media itself.
+Side effect: such Reels now preview instantly from the direct file instead of downloading.
+
+The same investigation found exports coming out as VP9 (Instagram) and AV1 (YouTube) on
+"Original", because the selector asked only for an MP4 container (AUDIT B12). It now prefers
+H.264, matching the fast-export ceiling resolve computes from H.264 renditions, and uses
+yt-dlp's `^=?` / `<=?` so Instagram's unlabelled H.264 files still qualify. Verified: one
+clip each from Instagram, YouTube, Twitch and X all came out H.264 + AAC at the right length;
+the daily health check passes on all 10 links, all H.264.
