@@ -67,6 +67,13 @@ buyers what they would have paid. Touches `klipprr-web` (Stripe, pricing pages,
 **Counter-point:** the watermark and 720p cap may be enough of a gate on their own.
 **Decide when:** we know whether anyone upgrades *because* of the limit. As of the snapshot,
 only one account has ever hit it.
+**Do not remove yet (2026-10-07):** the first paying customer looks like a limit-driven
+upgrade. They signed up on 2026-10-06 02:34 UTC, had 13 clips counted for October, and bought
+Pro monthly about 26 hours after signing up (2026-10-07 04:49 UTC). 13 > 10 suggests they hit
+the free limit and paid to keep going. **Unconfirmed:** the founder is asking the customer why
+they upgraded. Record the answer here. If it was the limit, the counter-point above is wrong
+and metering is an upsell channel, not just a cost-free restriction. Also check whether the
+2026-11-07 renewal goes through.
 
 ### Remove the Max (8K) tier
 **Why:** almost no source offers 8K, so the tier mostly sells a number.
