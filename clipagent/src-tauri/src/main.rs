@@ -5,6 +5,7 @@ mod http;
 mod preview_cache;
 mod dash;
 mod export_control;
+mod support;
 mod storage;
 mod license;
 
@@ -364,8 +365,29 @@ fn main() {
             commands::license_commands::sync_license_from_supabase,
             commands::license_commands::consume_auth_tokens,
             commands::license_commands::get_stored_session_tokens,
+            support::open_support_email,
         ])
         .setup(|app| {
+            // macOS: the standard menu, plus Help → Contact Support… (a pre-filled email).
+            // Windows has no menu bar; its support links live in the app's own UI.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{Menu, MenuItem, MenuItemKind, HELP_SUBMENU_ID};
+                let menu = Menu::default(app.handle())?;
+                let contact = MenuItem::with_id(app, support::MENU_ID, "Contact Support…", true, None::<&str>)?;
+                if let Some(MenuItemKind::Submenu(help)) = menu.get(HELP_SUBMENU_ID) {
+                    help.append(&contact)?;
+                }
+                app.set_menu(menu)?;
+                app.on_menu_event(|app, event| {
+                    if event.id() == support::MENU_ID {
+                        if let Err(e) = support::open(app, None, None) {
+                            append_file_log(&format!("[SUPPORT] could not open mail: {e}"));
+                        }
+                    }
+                });
+            }
+
             // Register clipagent:// with the OS (required for browser "Open Klipprr"; WiX/NSIS use
             // plugins.deep-link.desktop.schemes). register_all points the scheme at this executable,
             // which also makes deep links work in `tauri dev` without an MSI install.

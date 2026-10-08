@@ -629,3 +629,30 @@ H.264, matching the fast-export ceiling resolve computes from H.264 renditions, 
 yt-dlp's `^=?` / `<=?` so Instagram's unlabelled H.264 files still qualify. Verified: one
 clip each from Instagram, YouTube, Twitch and X all came out H.264 + AAC at the right length;
 the daily health check passes on all 10 links, all H.264.
+
+---
+
+## FR-13 — Help inside the desktop app
+
+**Asked (2026-10-08), in order of value:** a "Contact support" item in the Help menu that
+opens an email with the app and macOS versions filled in; an "Email us" line on error
+screens; a support link in the account or upgrade area.
+
+**Built.** One pre-filled email everywhere: `support.rs` builds a `mailto:hello@klipprr.com`
+draft with Klipprr version, macOS version and chip, and yt-dlp version, plus whatever was on
+screen (the error, the failing link). Nothing is sent by the app; the user's mail client
+opens a draft they can edit or discard. UI side: `contactSupport()` in `lib/support.ts`.
+
+1. **Help → Contact Support…** (macOS). Added to Tauri's standard menu, so Edit, Window
+   and the rest are unchanged. Windows has no menu bar; its users have 2 and 3.
+2. **Error screens:** "Email us" on "Can't load this video" (with the link and the error),
+   on both preview failures, and on export failures. Export failures were `alert()`s, which
+   cannot hold a link; they now ask "Email us about it?" and open the draft on OK, with the
+   source, export mode, and each failed clip's reason. Partial failures (some clips failed,
+   others saved) used to pass silently and now say so.
+3. **"Help & support"** in the sidebar's account section (signed in and signed out, and as
+   an icon when collapsed), and "Questions about plans or billing? Email us" in the upgrade
+   dialog.
+
+**Status:** built and verified in a test build (Help menu present, Edit menu intact);
+founder click-through pending; ships in 0.1.35.

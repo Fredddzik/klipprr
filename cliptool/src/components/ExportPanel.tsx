@@ -5,6 +5,7 @@ import { downloadAll, cancelExport as cancelExportRequest, type AgentResult } fr
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { releaseClipExports } from "@/lib/usage";
+import { offerSupportAfter } from "@/lib/support";
 
 interface Clip {
   id: string;
@@ -157,6 +158,22 @@ export default function ExportPanel({
   const exportTotalDurationRef = useRef(0);
   const refundedClipIndicesRef = useRef<Record<number, true>>({});
   const [exportClipNames, setExportClipNames] = useState<string[]>([]);
+  /** Why each failed clip failed, and what this export was, for a support email. Refs,
+   *  because the event listeners below are registered once and would see stale props. */
+  const failReasonsRef = useRef<Record<number, string>>({});
+  const exportMetaRef = useRef<string>("");
+
+  /** What support needs to look into a failed export. */
+  function exportSupportContext(problem: string): string {
+    const rowsNow = rowsRef.current;
+    const failed = Object.entries(failReasonsRef.current).map(([i, r]) => `  clip ${Number(i) + 1}: ${r}`);
+    return [
+      `Export problem: ${problem}`,
+      exportMetaRef.current,
+      `Clips: ${rowsNow.length}, exported ${exportOkCountRef.current}, failed ${failed.length}`,
+      ...(failed.length ? ["Failures:", ...failed] : []),
+    ].join("\n");
+  }
 
   const isSettled = (s: ClipState) => s === "done" || s === "cancelled" || s === "failed";
 
@@ -192,6 +209,7 @@ export default function ExportPanel({
     setQualityGlobal(null);
     setExportClipNames([]);
     exportClientIdRef.current = null;
+    failReasonsRef.current = {};
     exportOkCountRef.current = 0;
     exportDirRef.current = "";
     exportHadWatermarkRef.current = false;
@@ -202,16 +220,27 @@ export default function ExportPanel({
   function finishExport() {
     const okCount = exportOkCountRef.current;
     const exportDir = exportDirRef.current;
-    const allCancelled = rowsRef.current.length > 0 && rowsRef.current.every((r) => r.state === "cancelled");
+    const total = rowsRef.current.length;
+    const failedCount = Object.keys(failReasonsRef.current).length;
+    const allCancelled = total > 0 && rowsRef.current.every((r) => r.state === "cancelled");
     const hadWatermark = exportHadWatermarkRef.current;
     const totalDuration = exportTotalDurationRef.current;
+    const context = failedCount > 0 ? exportSupportContext(okCount > 0 ? "some clips failed" : "all clips failed") : "";
     onExportReservationComplete?.();
     clearExportingUI();
     if (okCount > 0) {
       if (onExportComplete && exportDir) onExportComplete(okCount, exportDir, hadWatermark, totalDuration);
+      // Partial failures used to pass silently behind the success message.
+      if (failedCount > 0) {
+        offerSupportAfter(
+          `${failedCount} of ${total} clips failed to export. The others were saved.`,
+          "Some clips failed to export",
+          context
+        );
+      }
     } else if (!allCancelled) {
       onExportFailed?.("all_clips_failed");
-      alert("Export failed. No clips were exported.");
+      offerSupportAfter("Export failed. No clips were exported.", "Export failed", context);
     }
   }
 
@@ -258,6 +287,7 @@ export default function ExportPanel({
       const p = event.payload;
       if (isStale(p?.client_export_id) || typeof p?.clipIndex !== "number") return;
       refundClip(p.clipIndex);
+      failReasonsRef.current = { ...failReasonsRef.current, [p.clipIndex]: (p as { reason?: string }).reason ?? "failed" };
       updateRow(p.clipIndex, () => ({ state: "failed" }));
       onExportClipSettled?.();
     });
@@ -286,13 +316,14 @@ export default function ExportPanel({
       const p = event.payload;
       if (isStale(p?.client_export_id) || !exportInProgressRef.current) return;
       const code = String(p?.error ?? "unknown_error");
+      const context = exportSupportContext(code);
       onExportReservationComplete?.();
       rowsRef.current.forEach((r, i) => {
         if (!isSettled(r.state)) refundClip(i);
       });
       clearExportingUI();
       onExportFailed?.(code.toLowerCase().replace(/\s+/g, "_").slice(0, 64));
-      alert(`Export failed (${code}). No clips were exported.`);
+      offerSupportAfter(`Export failed (${code}). No clips were exported.`, "Export failed", context);
     });
 
     return () => {
@@ -381,6 +412,12 @@ export default function ExportPanel({
     exportTotalDurationRef.current = chosen.reduce((sum, c) => sum + Math.max(0, c.end - c.start), 0);
 
     const exportUrl = resolvedUrl && resolvedUrl.trim().length > 0 ? resolvedUrl : videoUrl.trim();
+    failReasonsRef.current = {};
+    exportMetaRef.current = [
+      `Source: ${localFilePath ? "a local file" : exportUrl}`,
+      `Mode: ${localFilePath ? "local file" : exportHQ ? "High Quality" : "Fast"}, codec ${exportCodec}` +
+        `${hasWatermark ? ", free plan (watermark)" : ""}`,
+    ].join("\n");
 
     const result = await downloadAll({
       client_export_id: exportClientIdRef.current,
@@ -414,7 +451,11 @@ export default function ExportPanel({
       rowsRef.current.forEach((_, i) => refundClip(i));
       clearExportingUI();
       onExportFailed?.(String(result.error ?? "unknown_error").toLowerCase().replace(/\s+/g, "_").slice(0, 64));
-      alert("Export could not start: " + result.error);
+      offerSupportAfter(
+        "Export could not start: " + result.error,
+        "Export could not start",
+        `Export problem: could not start (${result.error})\n${exportMetaRef.current}`
+      );
     }
   }
 

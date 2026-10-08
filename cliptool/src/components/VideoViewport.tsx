@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { contactSupport } from "@/lib/support";
 
 interface VideoViewportProps {
   src: string | null;
@@ -217,6 +218,13 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
         <div className="text-xs text-gray-400">
           Use Screen Capture (record your screen while playing the video), then clip the recording.
         </div>
+        <button
+          type="button"
+          onClick={() => contactSupport("Preview won't load", "Preview: every source failed")}
+          className="text-xs text-violet-400 hover:text-violet-300 underline underline-offset-2"
+        >
+          Email us about this
+        </button>
       </div>
     );
   }
@@ -372,6 +380,13 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
           <div className="max-w-lg w-full rounded-xl border border-yellow-700 bg-yellow-950/70 backdrop-blur p-4 text-yellow-100">
             <div className="font-semibold mb-1">Can’t preview this file</div>
             <pre className="text-xs whitespace-pre-wrap opacity-95">{previewError}</pre>
+            <button
+              type="button"
+              onClick={() => contactSupport("A file won't preview", `Preview error:\n${previewError}`)}
+              className="mt-2 text-xs text-yellow-200 hover:text-white underline underline-offset-2"
+            >
+              Email us about this
+            </button>
           </div>
         </div>
       )}

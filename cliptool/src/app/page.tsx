@@ -5,6 +5,7 @@ import posthog from "posthog-js";
 import { supabase, getSupabaseConfigForBackend } from "@/lib/supabase";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { contactSupport } from "@/lib/support";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
@@ -1897,6 +1898,18 @@ useEffect(() => {
         <div className="text-zinc-400 text-xs">{resolveError}</div>
         <div className="mt-2 text-xs text-zinc-600">
           Workaround: record your screen with OBS or macOS screen recording, then use Load local file.
+        </div>
+        <div className="mt-2 text-xs text-zinc-500">
+          Think this should work?{" "}
+          <button
+            type="button"
+            onClick={() =>
+              contactSupport("A video won't load", `Link: ${videoUrl.trim() || "(none)"}\nError shown: ${resolveError}`)
+            }
+            className="text-violet-400 hover:text-violet-300 underline underline-offset-2"
+          >
+            Email us
+          </button>
         </div>
       </div>
     )}

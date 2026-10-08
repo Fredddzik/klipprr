@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
+import { contactSupport } from "@/lib/support";
 import {
   getSubscribeCtaCopy,
   getPricingProCtaCopy,
@@ -257,9 +258,19 @@ export default function AccessModal({
           </>
         )}
 
+        <p className="mt-4 text-xs text-gray-500">
+          Questions about plans or billing?{" "}
+          <button
+            type="button"
+            onClick={() => contactSupport("Question about plans")}
+            className="text-gray-300 hover:text-white underline underline-offset-2"
+          >
+            Email us
+          </button>
+        </p>
         <button
           onClick={onClose}
-          className="mt-4 w-full text-sm text-gray-400 hover:text-gray-200"
+          className="mt-2 w-full text-sm text-gray-400 hover:text-gray-200"
         >
           Cancel
         </button>

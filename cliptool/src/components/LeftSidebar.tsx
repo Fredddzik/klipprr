@@ -1,5 +1,7 @@
 "use client";
 
+import { contactSupport } from "@/lib/support";
+
 interface LeftSidebarProps {
   collapsed: boolean;
   onToggleCollapsed: () => void;
@@ -23,6 +25,34 @@ function initials(email: string | null): string {
   const parts = email.replace(/@.*/, "").split(/[._-]/).filter(Boolean);
   if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
   return email.slice(0, 2).toUpperCase();
+}
+
+function HelpLink({ collapsed }: { collapsed: boolean }) {
+  const icon = (
+    <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  );
+  return collapsed ? (
+    <button
+      type="button"
+      onClick={() => contactSupport()}
+      className="mt-1 p-1.5 rounded text-zinc-500 hover:bg-zinc-800 hover:text-white transition"
+      title="Help & support"
+      aria-label="Help & support"
+    >
+      {icon}
+    </button>
+  ) : (
+    <button
+      type="button"
+      onClick={() => contactSupport()}
+      className="flex items-center gap-2 w-full px-3 py-1.5 rounded text-zinc-500 hover:bg-zinc-800 hover:text-white transition text-xs"
+    >
+      {icon}
+      Help &amp; support
+    </button>
+  );
 }
 
 export default function LeftSidebar({
@@ -195,6 +225,7 @@ export default function LeftSidebar({
                 {plan}
               </span>
             )}
+            <HelpLink collapsed={collapsed} />
             {!collapsed ? (
               <button
                 type="button"
@@ -230,6 +261,7 @@ export default function LeftSidebar({
             >
               {collapsed ? "→" : "Sign in"}
             </button>
+            <HelpLink collapsed={collapsed} />
           </div>
         )}
       </div>
