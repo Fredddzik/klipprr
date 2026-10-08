@@ -91,6 +91,7 @@ same sources every week: stream-clip editors, podcast teams, esports and sports 
 social editors. Reach them in Reddit and Discord rather than through Google Ads.
 **Decide when:** we have talked to 10 of them. `PRODUCT.md` still marks the target user as
 `[ASSUMPTION]`.
+Questions to ask them, and a log of answers: `CUSTOMER-QUESTIONS.md`.
 
 ### SEO: stop writing new "downloader" pages
 Keep the pages that already exist and rank. Do not delete them. Stop new content and ad spend
