@@ -654,5 +654,4 @@ opens a draft they can edit or discard. UI side: `contactSupport()` in `lib/supp
    an icon when collapsed), and "Questions about plans or billing? Email us" in the upgrade
    dialog.
 
-**Status:** built and verified in a test build (Help menu present, Edit menu intact);
-founder click-through pending; ships in 0.1.35.
+**Status:** `done`. Verified in a test build 2026-10-08: Help menu present, Edit menu intact; the menu draft and the "Email us" draft from a failed Instagram link both arrived with versions, link and error filled in.
