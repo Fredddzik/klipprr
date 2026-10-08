@@ -6,6 +6,7 @@ mod preview_cache;
 mod dash;
 mod export_control;
 mod support;
+mod updates;
 mod storage;
 mod license;
 
@@ -366,6 +367,7 @@ fn main() {
             commands::license_commands::consume_auth_tokens,
             commands::license_commands::get_stored_session_tokens,
             support::open_support_email,
+            updates::install_update,
         ])
         .setup(|app| {
             // macOS: the standard menu, plus Help → Contact Support… (a pre-filled email).

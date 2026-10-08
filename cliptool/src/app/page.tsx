@@ -10,7 +10,6 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 
 import {
   resolveVideo,
@@ -86,6 +85,8 @@ export default function HomePage() {
   const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null);
   const updateRef = useRef<Awaited<ReturnType<typeof checkForUpdate>> | null>(null);
   const [showUpdateToast, setShowUpdateToast] = useState(false);
+  /** Live progress of an update download, reported by the agent (updates.rs). */
+  const [updateProgress, setUpdateProgress] = useState<{ phase: string; received: number; total: number } | null>(null);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [exportPanelOpen, setExportPanelOpen] = useState(false);
@@ -1568,23 +1569,23 @@ useEffect(() => {
   }
 
   async function handleInstallUpdate() {
-    const update = updateRef.current;
-    if (!update) return;
+    if (!updateRef.current) return;
     setUpdateStatus("downloading");
+    setUpdateProgress(null);
+    setShowUpdateToast(true);
+    // Downloaded and installed by the agent, which reports progress, restarts a stalled
+    // download, and relaunches the app itself when done.
+    const unlisten = await listen<{ phase: string; received: number; total: number }>("update-progress", (e) =>
+      setUpdateProgress(e.payload)
+    );
     try {
-      await update.downloadAndInstall(() => {});
-      try {
-        await relaunch();
-      } catch (relaunchErr) {
-        console.error("Update installed but relaunch failed:", relaunchErr);
-        setUpdateStatus("latest");
-        setShowUpdateToast(false);
-        alert("Update installed successfully. Please restart Klipprr manually to finish applying it.");
-      }
+      await invoke("install_update");
     } catch (err) {
       console.error("Update install failed:", err);
       setUpdateStatus("error");
-      setTimeout(() => setUpdateStatus("idle"), 4000);
+      setUpdateProgress(null);
+    } finally {
+      unlisten();
     }
   }
 
@@ -1653,17 +1654,44 @@ useEffect(() => {
 
     {isTauri &&
       showUpdateToast &&
-      (updateStatus === "available" || updateStatus === "downloading") &&
+      (updateStatus === "available" || updateStatus === "downloading" || (updateStatus === "error" && updateInfo)) &&
       updateInfo?.version && (
       <div className="fixed bottom-5 right-5 z-50 w-[360px] max-w-[calc(100vw-2.5rem)] rounded-md border border-zinc-800 bg-zinc-900 text-white shadow-xl p-4">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="text-sm font-semibold">
-              {updateStatus === "downloading" ? "Downloading update…" : "Update available"}
+              {updateStatus === "downloading"
+                ? updateProgress?.phase === "installing"
+                  ? "Installing update…"
+                  : "Downloading update…"
+                : updateStatus === "error"
+                ? "Update didn't finish"
+                : "Update available"}
             </div>
             <div className="text-xs text-zinc-300 mt-1">
-              Version <span className="font-mono">{updateInfo.version}</span> is ready to install.
+              {updateStatus === "error" ? (
+                <>The download kept failing. You can install version <span className="font-mono">{updateInfo.version}</span> from the website instead.</>
+              ) : updateStatus === "downloading" && updateProgress?.phase === "retrying" ? (
+                "The download stalled, retrying…"
+              ) : (
+                <>Version <span className="font-mono">{updateInfo.version}</span> is ready to install.</>
+              )}
             </div>
+            {updateStatus === "downloading" && (
+              <div className="mt-2 flex items-center gap-2">
+                <div className="flex-1 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full bg-violet-500 transition-[width] duration-300 ease-linear ${
+                      !updateProgress?.total ? "animate-pulse w-1/12" : ""
+                    }`}
+                    style={updateProgress?.total ? { width: `${Math.min(100, (updateProgress.received / updateProgress.total) * 100)}%` } : undefined}
+                  />
+                </div>
+                <span className="w-10 text-right text-xs tabular-nums text-zinc-400">
+                  {updateProgress?.total ? `${Math.floor((updateProgress.received / updateProgress.total) * 100)}%` : ""}
+                </span>
+              </div>
+            )}
           </div>
           <button
             type="button"
@@ -1683,14 +1711,33 @@ useEffect(() => {
           >
             Later
           </button>
-          <button
-            type="button"
-            className="px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-sm font-semibold text-white disabled:opacity-50 transition"
-            onClick={handleInstallUpdate}
-            disabled={updateStatus === "downloading"}
-          >
-            {updateStatus === "downloading" ? "Downloading…" : "Download & restart"}
-          </button>
+          {updateStatus === "error" ? (
+            <>
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-sm text-zinc-300 transition"
+                onClick={handleInstallUpdate}
+              >
+                Try again
+              </button>
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-sm font-semibold text-white transition"
+                onClick={() => openExternal("https://klipprr.com/download")}
+              >
+                Download from website
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-sm font-semibold text-white disabled:opacity-50 transition"
+              onClick={handleInstallUpdate}
+              disabled={updateStatus === "downloading"}
+            >
+              {updateStatus === "downloading" ? "Downloading…" : "Download & restart"}
+            </button>
+          )}
         </div>
         {updateInfo.body && (
           <div className="mt-3 text-xs text-zinc-300 max-h-24 overflow-auto whitespace-pre-wrap">

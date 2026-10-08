@@ -655,3 +655,29 @@ opens a draft they can edit or discard. UI side: `contactSupport()` in `lib/supp
    dialog.
 
 **Status:** `done`. Verified in a test build 2026-10-08: Help menu present, Edit menu intact; the menu draft and the "Email us" draft from a failed Instagram link both arrived with versions, link and error filled in.
+
+---
+
+## FR-14 — App update "stuck on Downloading…"
+
+**Reported (2026-10-08):** clicking Download on the 0.1.35 update stayed on "Downloading…".
+
+**What was happening.** Not stuck, crawling: measured on the founder's Mac, the update
+received about 5 MB in 90 s with dead spells of 20–60 s, then finished after ~5 minutes.
+curl fetched the same 73 MB file in 31 s on the same connection, over HTTP/2 or 1.1 and with
+the updater's user agent, so GitHub and the network were fine. The app was idle (0% CPU)
+during the dead spells. The JS `downloadAndInstall` reports every chunk to the webview over
+an IPC channel and has no timeout, and the UI showed no progress, so a slow download looked
+exactly like a frozen one.
+
+**Fix (0.1.36):** `updates.rs` runs check, download, signature verification and install in
+Rust. Chunks only bump a counter; the UI gets a percentage twice a second; a download that
+receives nothing for 30 s is restarted (3 tries); on failure the toast offers "Try again"
+and "Download from website" instead of silently resetting.
+
+**Verified:** a test build reporting 0.1.34 updated itself to the published 0.1.35 in about
+15 s (download, verify, install, restart), with the progress bar moving throughout.
+
+**Caveat:** the fix only applies to updates installed *by* 0.1.36 or later. Updating from
+0.1.35 to 0.1.36 still goes through the old code: slow, but it does finish.
+**Status:** `done`; ships in 0.1.36.
