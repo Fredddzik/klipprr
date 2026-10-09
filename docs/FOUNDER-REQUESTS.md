@@ -681,3 +681,52 @@ and "Download from website" instead of silently resetting.
 **Caveat:** the fix only applies to updates installed *by* 0.1.36 or later. Updating from
 0.1.35 to 0.1.36 still goes through the old code: slow, but it does finish.
 **Status:** `done`; ships in 0.1.36.
+
+---
+
+## FR-15 — UI overhaul
+
+**Asked (2026-10-09):** put a UI overhaul on the list and decide whether it goes with the
+rebrand (FR-4). Founder's points:
+
+1. The video title above the preview has no space of its own; it floats over the frame.
+2. The playhead can only be dragged by its small round knob, which feels cheap.
+3. Some progress bars (resolve, update download) don't start at the element's edge; they
+   begin slightly to the right and look off-centre.
+
+**Added from a review of the current screens:**
+
+4. **A "LIVE" badge on finished VODs** (the screenshot shows one on a Twitch VOD). Misleading.
+5. **The timeline cannot do precise work on long sources.** No time ruler, no zoom, no
+   thumbnails. On an 8.5-hour VOD one pixel is about 30 seconds, so marking an exact moment
+   means typing timestamps. This is the biggest *functional* gap, and it hits exactly the
+   heavy-VOD users the strategy targets.
+6. **Marking is non-standard.** Only "Mark IN (M)" is visible until IN is set; every editor
+   users know uses I and O for in/out (and J/K/L for playback). No visible shortcut list.
+7. **Export panel controls clash:** the Resolution dropdown is a native grey macOS control on
+   a dark panel; "Export selected" (green) and "Export all" (pink gradient) look like two
+   different apps, and the disabled green button looks broken rather than disabled.
+8. **Clip rows are cramped and low-contrast:** tiny red/green IN/OUT pills, a faint "#1",
+   checkbox + play + name squeezed into one line, duration in grey at the edge.
+9. **The free-plan upgrade banner takes the top of the export panel on every export.** Fine
+   once; on every visit it reads as nagging.
+10. **No colour system:** purple-pink gradients, violet, green, amber stars and red all carry
+    meaning in different places (this is what FR-4 fixes).
+11. **Wasted space:** the clips column is mostly empty, the preview sits in a letterbox with
+    black above and below, and the sidebar is nearly empty with a red sign-out icon as its
+    most prominent element (an easy misclick).
+
+**Recommendation: do the overhaul together with the rebrand, but pull the functional fixes
+forward.** Restyling every screen twice (once now, again for the rebrand) wastes the work, and
+FR-4 already planned splitting `page.tsx` at the same time. But 2, 3, 4 and 6 are usability
+bugs, not styling: they cost little and should not wait months. Timeline zoom (5) is the one
+substantial piece; it belongs in the overhaul's design, but if heavy-VOD users are the target,
+it may deserve to go first.
+
+| Bucket | Items | When |
+|---|---|---|
+| Quick fixes (small release) | 2 drag anywhere on the timeline, 3 bar alignment, 4 no LIVE on VODs, 6 I/O keys + shortcut hint | next |
+| Overhaul + rebrand (FR-4) | 1, 7, 8, 9, 10, 11, plus `page.tsx` split | after user feedback |
+| Decide with users | 5 timeline zoom / ruler / thumbnails | ask the first heavy clippers |
+
+**Status:** `ready` (quick fixes); overhaul `parked` with FR-4.
