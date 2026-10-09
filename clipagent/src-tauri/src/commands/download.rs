@@ -361,6 +361,7 @@ where
 fn remove_clip_temps(export_stamp: u128, clip: usize) {
     let prefixes = [
         format!("klipprr_wm_tmp_{}_{}.", export_stamp, clip),
+        format!("klipprr_audio_tmp_{}_{}.", export_stamp, clip),
         format!("klipprr_export_{}_{}.", export_stamp, clip),
         format!("klipprr_export_trim_{}_{}.", export_stamp, clip),
     ];
@@ -503,7 +504,14 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         .unwrap()
         .as_millis();
 
-    let mode = parsed.get("mode").and_then(|x| x.as_str()).unwrap_or("quality");
+    let mode_in = parsed.get("mode").and_then(|x| x.as_str()).unwrap_or("quality");
+    // High Quality mode downloads the whole video to cut clean video frames; audio has no
+    // keyframe problem, so audio exports always take the per-clip path.
+    let mode = if matches!(parsed.get("codec").and_then(|x| x.as_str()), Some("mp3") | Some("wav")) {
+        "speed"
+    } else {
+        mode_in
+    };
     let fast_cap_in = parsed.get("fast_max_height").and_then(|x| x.as_i64());
     let keep_full = parsed.get("keep_full").and_then(|x| x.as_bool()).unwrap_or(false);
 
@@ -524,6 +532,14 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         None
     };
     let codec = parsed.get("codec").and_then(|x| x.as_str()).unwrap_or("universal");
+    // Audio-only export (FR-5): MP3 320 kbps for sharing and voice, WAV 48 kHz / 24-bit
+    // for sound effects going into an editor. Never watermarked (there is no sensible audio
+    // watermark) and never resolution-capped; it still counts as one clip.
+    let audio_format: Option<(&'static str, &'static [&'static str])> = match codec {
+        "mp3" => Some(("mp3", &["-c:a", "libmp3lame", "-b:a", "320k"])),
+        "wav" => Some(("wav", &["-c:a", "pcm_s24le", "-ar", "48000"])),
+        _ => None,
+    };
 
     let export_path_opt = parsed.get("export_path").and_then(|x| x.as_str());
     let _preview_url = parsed.get("preview_url").and_then(|x| x.as_str()).unwrap_or("");
@@ -588,22 +604,30 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 continue;
             }
             let safe: String = name.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect();
-            let out_path = unique_output_path_with_ext(&base_dir, &safe, ext);
+            let out_ext = audio_format.map_or(ext, |(e, _)| e);
+            let out_path = unique_output_path_with_ext(&base_dir, &safe, out_ext);
             let out_str = out_path.to_string_lossy().to_string();
 
             let temp_path =
-                std::env::temp_dir().join(format!("klipprr_export_{}_{}.{}", export_stamp, i, ext));
+                std::env::temp_dir().join(format!("klipprr_export_{}_{}.{}", export_stamp, i, out_ext));
             let temp_str = temp_path.to_string_lossy().to_string();
 
+            let mut args: Vec<String> = vec![
+                "-ss".into(), format!("{:.3}", start),
+                "-to".into(), format!("{:.3}", end),
+                "-i".into(), local_str.clone(),
+            ];
+            match audio_format {
+                Some((_, codec_args)) => {
+                    args.push("-vn".into());
+                    args.extend(codec_args.iter().map(|a| a.to_string()));
+                }
+                None => args.extend(["-c".to_string(), "copy".to_string()]),
+            }
+            args.extend(["-y".to_string(), temp_str.clone()]);
             let ok = Command::new(ffmpeg_path())
                 .current_dir(&base_dir)
-                .args([
-                    "-ss", &format!("{:.3}", start),
-                    "-to", &format!("{:.3}", end),
-                    "-i", &local_str,
-                    "-c", "copy",
-                    "-y", &temp_str,
-                ])
+                .args(&args)
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);
@@ -769,7 +793,101 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         let status = {
                             let needs_reencode = needs_reencode_branch;
 
-                            if needs_reencode {
+                            if let Some((audio_ext, audio_args)) = audio_format {
+                    let desired_dur = (end - start).max(0.001);
+                    let section_range = format!("*{:.3}-{:.3}", start, end);
+                    let ffmpeg_str = ffmpeg_path().to_string_lossy().into_owned();
+                    let tmp_base = std::env::temp_dir().join(format!("klipprr_audio_tmp_{}_{}", export_stamp, i));
+                    let tmp_template = format!("{}.%(ext)s", tmp_base.display());
+                    let mut dl_args: Vec<&str> = yt_dlp_cookie_args();
+                    dl_args.extend(yt_dlp_speed_args());
+                    dl_args.extend([
+                        // Audio only: a fraction of the bytes, so it is also the fastest export.
+                        "-f", "ba[ext=m4a]/ba/b",
+                        "--download-sections", &section_range,
+                        "--ffmpeg-location", &ffmpeg_str,
+                        "-o", tmp_template.as_str(),
+                        "--newline",
+                        &url,
+                    ]);
+                    let mut last_pct: i64 = -1;
+                    let (dl_ok, dl_stderr) = run_ytdlp_with_progress(
+                        Command::new(yt_dlp_path()).current_dir(&base_dir).args(&dl_args),
+                        job,
+                        Some(desired_dur),
+                        |pct| {
+                            let p = (pct * 0.9).round() as i64;
+                            if p > last_pct {
+                                last_pct = p;
+                                let _ = app.emit("export-progress", serde_json::json!({
+                                    "clipIndex": i, "totalClips": total_clips, "phase": "clip", "clipPercent": p, "client_export_id": client_export_id
+                                }));
+                            }
+                        },
+                    );
+                    if !dl_ok {
+                        log_to_file(&format!("[AUDIO] yt-dlp failed i={}: {}", i, dl_stderr.chars().take(600).collect::<String>()));
+                    }
+                    let src = if dl_ok {
+                        pick_existing_with_ext(&tmp_base, &["m4a", "webm", "opus", "mp4", "mp3", "mkv"])
+                    } else {
+                        None
+                    };
+                    match src {
+                        None => Err(std::io::Error::new(std::io::ErrorKind::Other, "yt_dlp_failed")),
+                        Some(src) => {
+                            let _ = app.emit("export-progress", serde_json::json!({
+                                "clipIndex": i, "totalClips": total_clips, "phase": "finishing", "clipPercent": 92, "client_export_id": client_export_id
+                            }));
+                            // Section downloads can start before the requested point; trim the
+                            // padding from the front so the audio is exactly the marked range.
+                            let pad = probe_duration_secs(&src)
+                                .map(|d| (d - desired_dur).max(0.0))
+                                .filter(|p| *p > 0.05);
+                            let final_path = unique_output_path_with_ext(base_dir, &safe, audio_ext);
+                            let temp_out = std::env::temp_dir()
+                                .join(format!("klipprr_export_{}_{}.{}", export_stamp, i, audio_ext));
+                            let mut args: Vec<String> = vec![];
+                            if let Some(p) = pad {
+                                args.extend(["-ss".to_string(), format!("{:.3}", p)]);
+                            }
+                            args.extend([
+                                "-i".to_string(), src.to_string_lossy().to_string(),
+                                "-t".to_string(), format!("{:.3}", desired_dur),
+                                "-vn".to_string(),
+                            ]);
+                            args.extend(audio_args.iter().map(|a| a.to_string()));
+                            args.extend(["-y".to_string(), temp_out.to_string_lossy().to_string()]);
+                            let encoded = export_control::prepare(
+                                Command::new(ffmpeg_path()).current_dir(base_dir).args(&args)
+                                    .stdout(Stdio::null()).stderr(Stdio::piped()),
+                            )
+                            .spawn()
+                            .and_then(|c| {
+                                export_control::track(job, c.id());
+                                let pid = c.id();
+                                let out = c.wait_with_output();
+                                export_control::untrack(job, pid);
+                                out
+                            });
+                            let _ = std::fs::remove_file(&src);
+                            match encoded {
+                                Ok(o) if o.status.success() => {
+                                    let moved = move_temp_to_final(&temp_out, &final_path).is_ok();
+                                    let path = if moved { final_path } else { temp_out };
+                                    Ok((std::process::ExitStatus::from_raw(0), Some(path.to_string_lossy().to_string())))
+                                }
+                                Ok(o) => {
+                                    log_to_file(&format!("[AUDIO] encode failed i={}: {}", i,
+                                        String::from_utf8_lossy(&o.stderr).chars().take(600).collect::<String>()));
+                                    let _ = std::fs::remove_file(&temp_out);
+                                    Err(std::io::Error::new(std::io::ErrorKind::Other, "audio_encode_failed"))
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                    }
+                            } else if needs_reencode {
                     println!("[FAST] Re-encoding (watermark or universal codec)");
 
                     // Let yt-dlp choose the container/extension. We'll re-encode to MP4 anyway.
@@ -1599,6 +1717,11 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     "[1:v]format=rgba,colorchannelmixer=aa=0.8,scale={wm_w}:-1[wm];\
 [0:v][wm]overlay=x='max(0,W-w-32)':y='max(0,H-h-72)'"
                 ),
+                // The looped watermark image never ends, and `-to` above only limits the
+                // video input, so without an output length ffmpeg encoded forever (found by
+                // the 0.1.37 regression run: a 10 s clip still encoding after 5 minutes).
+                "-t".to_string(), format!("{:.3}", clip_dur),
+                "-shortest".to_string(),
                 "-progress".to_string(), "pipe:2".to_string(),
                 "-nostats".to_string(),
             ];

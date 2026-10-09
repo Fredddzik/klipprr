@@ -235,7 +235,31 @@ small paid desktop app does not want.
 
 **Decision (2026-09-10):** ship **MP3 320 kbps and WAV 48 kHz/24-bit**. An audio export
 **counts as one clip** against the monthly quota, same as video.
-**Status:** `ready`
+
+**Built (2026-10-09).** "Export as: Video | Audio only" in the export panel; audio offers MP3
+(libmp3lame, 320 kbps) and WAV (pcm_s24le, 48 kHz) and hides the video-only settings. URL
+sources download only the audio for the marked section (`-f ba`), trim any leading padding
+to the exact range, and encode; local files are cut and encoded directly. Audio exports
+always take the per-clip path (High Quality mode does not apply), are never watermarked,
+and support progress and per-clip cancel like video.
+
+**Verified on the real agent before release (13-case regression run):** MP3 and WAV from
+YouTube, a Twitch VOD, Instagram and a local file (exact length, correct codec and sample
+rate, audible); every video path unchanged (YouTube Original and Universal, Instagram,
+Twitch clip, local copy, High Quality); cancelling one of two audio clips left no files or
+processes. The UI was checked in the built frontend: the switch, both formats, and the video
+settings returning when switching back.
+
+**Found by the same run and fixed:** High Quality + watermark (Free) encoded forever,
+because the looped watermark image has no end and the output had no length. Unreachable from
+the UI today (High Quality is Pro-only, Pro has no watermark) but now bounded with `-t`.
+Also fixed: the export format button still said "AV1 – Original" after 0.1.34 made Original
+exports H.264; it now reads "Original – no re-encode", here and in Settings.
+
+**Known, not fixed:** YouTube intermittently refuses a download with 403 (1 of 18 YouTube
+exports in the run; 5 times in the log since September). Previews retry once; exports do
+not. Candidate follow-up: retry an export's yt-dlp download once on a 403.
+**Status:** `done`; ships in 0.1.37.
 
 ---
 

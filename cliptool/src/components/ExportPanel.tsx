@@ -158,6 +158,10 @@ export default function ExportPanel({
   const exportTotalDurationRef = useRef(0);
   const refundedClipIndicesRef = useRef<Record<number, true>>({});
   const [exportClipNames, setExportClipNames] = useState<string[]>([]);
+  /** Export the clips as video, or as audio only (FR-5: sound effects, quotes, podcast cuts). */
+  const [exportKind, setExportKind] = useState<"video" | "audio">("video");
+  const [audioFormat, setAudioFormat] = useState<"mp3" | "wav">("mp3");
+  const isAudio = exportKind === "audio";
   /** Why each failed clip failed, and what this export was, for a support email. Refs,
    *  because the event listeners below are registered once and would see stale props. */
   const failReasonsRef = useRef<Record<number, string>>({});
@@ -415,7 +419,7 @@ export default function ExportPanel({
     failReasonsRef.current = {};
     exportMetaRef.current = [
       `Source: ${localFilePath ? "a local file" : exportUrl}`,
-      `Mode: ${localFilePath ? "local file" : exportHQ ? "High Quality" : "Fast"}, codec ${exportCodec}` +
+      `Mode: ${localFilePath ? "local file" : isAudio ? "audio only" : exportHQ ? "High Quality" : "Fast"}, codec ${isAudio ? audioFormat : exportCodec}` +
         `${hasWatermark ? ", free plan (watermark)" : ""}`,
     ].join("\n");
 
@@ -427,7 +431,7 @@ export default function ExportPanel({
       url: localFilePath ? "" : exportUrl,
       local_path: localFilePath ?? undefined,
       clips: chosen,
-      mode: localFilePath ? "speed" : exportHQ ? "quality" : "speed",
+      mode: localFilePath || isAudio ? "speed" : exportHQ ? "quality" : "speed",
       // Free exports are capped at 720p max (enforced client + backend).
       fast_max_height: localFilePath
         ? null
@@ -441,7 +445,7 @@ export default function ExportPanel({
       video_id: videoData?.id ?? null,
       export_path: sanitizeExportPath(exportPath),
       has_watermark: Boolean(hasWatermark),
-      codec: exportCodec,
+      codec: isAudio ? audioFormat : exportCodec,
     });
 
     // The agent answers as soon as the export has started, so a failure here means it
@@ -537,7 +541,70 @@ export default function ExportPanel({
       )}
 
       {/* QUALITY TOGGLE */}
-      {!localFilePath && (!fastReachesMax || showAdvancedExport) && (
+      <div className="space-y-1">
+        <label className="text-xs text-gray-400">Export as</label>
+        <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setExportKind("video")}
+              className={`flex-1 py-2 rounded text-sm font-medium transition ${
+                exportKind === "video"
+                  ? "btn-brand"
+                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+              }`}
+            >
+              Video
+            </button>
+            <button
+              type="button"
+              onClick={() => setExportKind("audio")}
+              className={`flex-1 py-2 rounded text-sm font-medium transition ${
+                exportKind === "audio"
+                  ? "btn-brand"
+                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+              }`}
+            >
+              Audio only
+            </button>
+        </div>
+      </div>
+
+      {isAudio && (
+        <div className="space-y-1">
+          <label className="text-xs text-gray-400">Audio format</label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setAudioFormat("mp3")}
+              className={`flex-1 py-2 rounded text-sm font-medium transition ${
+                audioFormat === "mp3"
+                  ? "btn-brand"
+                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+              }`}
+            >
+              MP3
+            </button>
+            <button
+              type="button"
+              onClick={() => setAudioFormat("wav")}
+              className={`flex-1 py-2 rounded text-sm font-medium transition ${
+                audioFormat === "wav"
+                  ? "btn-brand"
+                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+              }`}
+            >
+              WAV
+            </button>
+          </div>
+          <p className="text-xs text-zinc-500 mt-1">
+            {audioFormat === "mp3"
+              ? "MP3, 320 kbps: small files for sharing, voice and podcast cuts."
+              : "WAV, 48 kHz / 24-bit: lossless, best for sound effects going into an editor."}
+          </p>
+        </div>
+      )}
+
+      {!isAudio && !localFilePath && (!fastReachesMax || showAdvancedExport) && (
         <div className="space-y-2">
           <label className="flex items-center gap-2 text-sm">
             <span className={!exportHQ ? "text-zinc-900 dark:text-white" : "text-zinc-500 dark:text-gray-400"}>
@@ -583,7 +650,7 @@ export default function ExportPanel({
         </div>
       )}
 
-      {!localFilePath && !exportHQ ? (
+      {isAudio ? null : !localFilePath && !exportHQ ? (
         <div className="space-y-1">
           <label className="text-xs text-gray-400">Video format</label>
 
@@ -609,15 +676,17 @@ export default function ExportPanel({
                   : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
               }`}
             >
-              AV1 – Original
+              Original – no re-encode
             </button>
           </div>
 
-          {exportCodec === "original" && (
-            <p className="text-xs text-yellow-400 mt-1">
-              AV1 may not play in QuickTime on older Macs.
-            </p>
-          )}
+          {/* Since 0.1.34 "Original" stream-copies the H.264 rendition when the source has one
+              (download.rs); the old "AV1" label described the bug that fix removed. */}
+          <p className="text-xs text-zinc-500 mt-1">
+            {exportCodec === "original"
+              ? "Copies the source's own H.264 stream: fastest, no quality loss."
+              : "Re-encodes to H.264: plays everywhere, slightly slower."}
+          </p>
         </div>
       ) : !localFilePath ? (
         <div className="space-y-2">
@@ -636,7 +705,7 @@ export default function ExportPanel({
         </div>
       ) : null}
 
-      {!localFilePath && !exportHQ && fastMax > 0 && (
+      {!isAudio && !localFilePath && !exportHQ && fastMax > 0 && (
         <div className="space-y-1">
           <label className="text-xs text-zinc-400">Resolution</label>
           <select
@@ -660,7 +729,7 @@ export default function ExportPanel({
         </div>
       )}
 
-      {fastReachesMax && !showAdvancedExport && (
+      {!isAudio && fastReachesMax && !showAdvancedExport && (
         <button
           type="button"
           onClick={() => setShowAdvancedExport(true)}
@@ -670,7 +739,7 @@ export default function ExportPanel({
         </button>
       )}
 
-      {exportHQ && (
+      {!isAudio && exportHQ && (
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"

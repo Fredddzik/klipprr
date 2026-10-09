@@ -2,7 +2,7 @@
 
 export type ThemePreference = "light" | "dark" | "system";
 export type ClipSortOption = "timeline" | "created";
-export type DefaultExportFormat = "universal" | "original"; // H.264 - Universal | AV1 - Original
+export type DefaultExportFormat = "universal" | "original"; // H.264 re-encode | stream copy (H.264 when available)
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -28,7 +28,7 @@ const CLIP_SORT_OPTIONS: { value: ClipSortOption; label: string }[] = [
 
 const EXPORT_FORMAT_OPTIONS: { value: DefaultExportFormat; label: string }[] = [
   { value: "universal", label: "H.264 – Universal" },
-  { value: "original", label: "AV1 – Original" },
+  { value: "original", label: "Original – no re-encode" },
 ];
 
 export default function SettingsModal({

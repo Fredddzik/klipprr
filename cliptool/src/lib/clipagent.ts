@@ -264,7 +264,9 @@ export interface DownloadAllPayload {
   video_id: string | null;
   export_path: string | null;
   has_watermark?: boolean;
-  codec?: "universal" | "original";
+  /** Video: "universal" re-encodes to H.264, "original" stream-copies. Audio only (FR-5):
+   *  "mp3" (320 kbps) or "wav" (48 kHz, 24-bit). */
+  codec?: "universal" | "original" | "mp3" | "wav";
 }
 
 export interface DownloadAllResponse {
