@@ -56,6 +56,25 @@ ed25519-signed license token.
 | Custom export path | No | Yes | Yes |
 | Export resolution cap | 720p | source | source |
 
+### Product decision: local files are exported untouched, on every plan
+
+Clips cut from a file on the user's own Mac are a straight stream-copy trim on **every** plan,
+Free included: **no watermark, no resolution cap, no re-encode**. The output has exactly the
+quality and format of the file the user loaded (`download.rs`, local-file branch).
+
+This is deliberate (founder decision, confirmed 2026-10-09), not a bug:
+- The file is already the user's own media, often their own recording or a client's raw
+  footage. Stamping it or downscaling it would damage their material for no reason.
+- It fits promise 2: source quality survives.
+- The watermark and the 720p cap are how Free differs from Pro **for URL sources only**.
+
+What still applies to local files: a free account is required to export, and each clip
+counts toward the monthly clip limit (`reserveExportQuota` in `page.tsx` does not
+distinguish sources).
+
+Do not "fix" this by adding the watermark or cap to local exports. If the free tier ever
+needs a stronger reason to upgrade, change it on purpose, as a pricing decision recorded here.
+
 **Known inconsistency:** `plan.ts::PLAN_CAPABILITIES` only defines `free` and `pro`. A `max`
 user resolved through that map falls through to whatever the caller defaults to. Rust
 (`license.rs::Plan`) and `usage.ts` both know `max`. This is a live bug, not a design.

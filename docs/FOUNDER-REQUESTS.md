@@ -98,7 +98,7 @@ Also verified: a request the player abandons halfway keeps what it received; `HE
 past-the-end (`416`) and full `GET` without `Range`; a real `<video>` element seeking
 8 → 2 → 5 → 9.5 s lands on each exact time.
 
-**Status:** `done`, pending founder verification on a real Twitch clip.
+**Status:** `done`. Founder-confirmed 2026-10-09.
 
 ---
 
@@ -302,7 +302,7 @@ Measured on a 1.1 GB / 4 min / 39 Mbps H.264 + Linear PCM file, cold cache:
 Their 2.6 GB file should see the same first-frame time (the head is bounded by duration,
 not file size) and roughly 11 s to fully scrubbable.
 
-**Status:** `done`, pending founder verification on the real client file.
+**Status:** `done`. Founder-confirmed 2026-10-09.
 
 ---
 
