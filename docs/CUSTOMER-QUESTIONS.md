@@ -108,4 +108,9 @@ our own data cannot answer them (we already know when they signed up and how muc
 
 | Customer | Date | Source | Q | Answer, in their words |
 |----------|------|--------|---|------------------------|
-| #1 (first Pro sale, 2026-10-07) | | | | |
+| #1 (first Pro sale, 2026-10-07) | 2026-10-15 | PostHog (no reply yet) | 3 | Not asked; observed. Landed on `/download?utm_source=chatgpt.com` from chatgpt.com and clicked Download within a second, without seeing the homepage or pricing. California |
+| #1 | 2026-10-15 | PostHog | 7 | Observed. Signup from the app took about 5 minutes: tried "Sign in" with no account, toggled Sign in / Sign up, clicked "Resend the link" twice, then the confirmation link opened the homepage instead of returning to the app, so they downloaded the .dmg a second time before getting back in |
+| #1 | 2026-10-15 | PostHog | 8 | Observed. The app's upgrade link opened `/upgrade` on yearly ($120) and asked them to log in again on the web. They switched to monthly and paid about a minute after the page loaded |
+
+**What the observation does not answer:** why they upgraded (Q4), what they clip (Q1), or whether
+they hit the free limit first. The app sends no analytics, so only Supabase counts show usage.
