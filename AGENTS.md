@@ -21,13 +21,14 @@ Read this file fully before touching code. It is short on purpose; the detail li
 4. **Nothing leaves the machine that doesn't have to.** Media is fetched and processed
    locally. We are not a cloud transcoder and must not become one by accident.
 
-## Repo map (four locations, one product)
+## Repo map (one product)
 
 | Location | What it is | Owns |
 |---|---|---|
 | `~/dev/klipprr` (this repo) | Desktop app | Tauri/Rust agent + Next.js editor UI |
 | `~/dev/klipprr-web` | Marketing site + API | Stripe, Resend, license *signing*, `/api/track` |
-| `~/dev/klipprr-local` | Supabase | migrations, plan/usage schema, docs |
+| `supabase/` (this repo) | Supabase | schema baseline, migrations, edge functions — see its README |
+| `~/dev/klipprr-local` | Old Supabase notes | **Superseded by `supabase/`.** Email templates and docs only |
 | `~/dev/klipprr copy` | **Stale manual copy — do not use.** Slated for deletion. | — |
 
 Changes to licensing or plans usually touch **two or three** of these. See
@@ -37,7 +38,8 @@ Changes to licensing or plans usually touch **two or three** of these. See
 
 ```
 clipagent/src-tauri/   Rust desktop agent — the real engine
-  src/http.rs            localhost HTTP API (:4000 / :4001) the UI talks to
+  src/http.rs            localhost HTTP API (:4000) the UI talks to
+  src/quota.rs           monthly clip reservations and refunds (Supabase RPCs)
   src/commands/resolve.rs  URL -> metadata + preview decision
   src/commands/download.rs export pipeline (yt-dlp + ffmpeg)
   src/license.rs         ed25519 license verification
@@ -63,7 +65,9 @@ docs/                  You are here
   `docs/PIPELINES.md#testing-resolve-locally`.
 - **Two plan vocabularies exist.** `usage.ts` knows `free|pro|max`; `plan.ts` knows only
   `free|pro`. Rust knows all three. Do not add a fourth.
-- **There are zero tests.** Anything you change, you verify by running it.
+- **Tests are thin.** `cargo test` covers the pure logic (13 tests, run in the Release
+  check); `scripts/export-regression.sh` drives a running app through every export path.
+  Anything else you change, you verify by running it.
 
 ## Working agreements
 

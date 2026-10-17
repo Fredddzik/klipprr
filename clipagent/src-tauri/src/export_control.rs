@@ -116,3 +116,32 @@ fn kill_tree(pid: u32) {
         let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelling_one_clip_leaves_the_others_running() {
+        begin("t-one");
+        assert!(cancel("t-one", Some(1)));
+        assert!(is_cancelled(Job { export_id: Some("t-one"), clip: 1 }));
+        assert!(!is_cancelled(Job { export_id: Some("t-one"), clip: 0 }));
+        assert!(!all_cancelled(Some("t-one")));
+        end("t-one");
+        // A finished export is unknown: nothing to cancel, and nothing reads as cancelled.
+        assert!(!cancel("t-one", None));
+        assert!(!is_cancelled(Job { export_id: Some("t-one"), clip: 1 }));
+    }
+
+    #[test]
+    fn cancel_all_reaches_every_clip() {
+        begin("t-all");
+        assert!(cancel("t-all", None));
+        assert!(all_cancelled(Some("t-all")));
+        assert!(is_cancelled(Job { export_id: Some("t-all"), clip: 7 }));
+        end("t-all");
+        // Exports without an id cannot be cancelled.
+        assert!(!is_cancelled(Job { export_id: None, clip: 0 }));
+    }
+}

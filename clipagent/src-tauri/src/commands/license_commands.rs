@@ -235,7 +235,7 @@ struct AuthTokenResponse {
 }
 
 /// Refresh Supabase session using refresh_token. Returns (access_token, refresh_token) on success.
-async fn refresh_supabase_token(
+pub(crate) async fn refresh_supabase_token(
     supabase_url: &str,
     supabase_anon_key: &str,
     refresh_token: &str,

@@ -4,7 +4,6 @@ import { useEffect, useState, useRef } from "react";
 import { downloadAll, cancelExport as cancelExportRequest, type AgentResult } from "../lib/clipagent";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
-import { releaseClipExports } from "@/lib/usage";
 import { offerSupportAfter, contactSupport } from "@/lib/support";
 
 interface Clip {
@@ -78,8 +77,11 @@ interface ExportPanelProps {
   onUpgradeRequested?: (feature: string) => void;
 
   onBeforeExport?: (clipCount: number) => Promise<boolean>;
-  onExportReservationStart?: (clipCount: number) => void;
-  onExportClipSettled?: () => void;
+  /** The access token the agent charges the export to. */
+  getAccessToken?: () => Promise<string | null>;
+  /** The agent refused to start: not signed in, or the monthly limit is used up. */
+  onQuotaRefused?: (reason: "sign_in" | "limit") => void;
+  /** An export ended; usage changed. */
   onExportReservationComplete?: () => void;
 
   /** Called when export finishes successfully. hadWatermark reflects what was actually sent to the backend. */
@@ -136,8 +138,8 @@ export default function ExportPanel({
   onUpgradeRequested,
   onExportFailed,
   onBeforeExport,
-  onExportReservationStart,
-  onExportClipSettled,
+  getAccessToken,
+  onQuotaRefused,
   onExportReservationComplete,
   onExportComplete,
 }: ExportPanelProps) {
@@ -156,7 +158,6 @@ export default function ExportPanel({
   const exportDirRef = useRef<string>("");
   const exportHadWatermarkRef = useRef(false);
   const exportTotalDurationRef = useRef(0);
-  const refundedClipIndicesRef = useRef<Record<number, true>>({});
   const [exportClipNames, setExportClipNames] = useState<string[]>([]);
   /** Export the clips as video, or as audio only (FR-5: sound effects, quotes, podcast cuts). */
   const [exportKind, setExportKind] = useState<"video" | "audio">("video");
@@ -212,15 +213,6 @@ export default function ExportPanel({
     setRowsNow(next);
   }
 
-  /** A failed or cancelled clip gives its reserved export back to the monthly quota. */
-  function refundClip(idx: number) {
-    if (refundedClipIndicesRef.current[idx]) return;
-    refundedClipIndicesRef.current[idx] = true;
-    releaseClipExports({ count: 1 }).then((res) => {
-      if (!res.ok) console.warn("[Export] Failed to refund quota", { idx, error: res.error });
-    });
-  }
-
   function clearExportingUI() {
     exportInProgressRef.current = false;
     setIsExporting(false);
@@ -233,7 +225,6 @@ export default function ExportPanel({
     exportDirRef.current = "";
     exportHadWatermarkRef.current = false;
     exportTotalDurationRef.current = 0;
-    refundedClipIndicesRef.current = {};
   }
 
   function finishExport() {
@@ -300,17 +291,14 @@ export default function ExportPanel({
         if (typeof p.export_dir === "string") exportDirRef.current = p.export_dir;
         exportOkCountRef.current += 1;
         updateRow(p.clipIndex, () => ({ state: "done", percent: 100 }));
-        onExportClipSettled?.();
       }
     );
 
     const unlistenFailed = listen<{ clipIndex?: number; client_export_id?: string }>("export-clip-failed", (event) => {
       const p = event.payload;
       if (isStale(p?.client_export_id) || typeof p?.clipIndex !== "number") return;
-      refundClip(p.clipIndex);
       failReasonsRef.current = { ...failReasonsRef.current, [p.clipIndex]: (p as { reason?: string }).reason ?? "failed" };
       updateRow(p.clipIndex, () => ({ state: "failed" }));
-      onExportClipSettled?.();
     });
 
     const unlistenCancelled = listen<{ clipIndex?: number; client_export_id?: string }>(
@@ -318,9 +306,7 @@ export default function ExportPanel({
       (event) => {
         const p = event.payload;
         if (isStale(p?.client_export_id) || typeof p?.clipIndex !== "number") return;
-        refundClip(p.clipIndex);
         updateRow(p.clipIndex, () => ({ state: "cancelled" }));
-        onExportClipSettled?.();
       }
     );
 
@@ -339,9 +325,6 @@ export default function ExportPanel({
       const code = String(p?.error ?? "unknown_error");
       const context = exportSupportContext(code);
       onExportReservationComplete?.();
-      rowsRef.current.forEach((r, i) => {
-        if (!isSettled(r.state)) refundClip(i);
-      });
       clearExportingUI();
       onExportFailed?.(code.toLowerCase().replace(/\s+/g, "_").slice(0, 64));
       offerSupportAfter(`Export failed (${code}). No clips were exported.`, "Export failed", context);
@@ -419,7 +402,6 @@ export default function ExportPanel({
       const ok = await onBeforeExport(chosen.length);
       if (!ok) return;
     }
-    onExportReservationStart?.(chosen.length);
 
     setRetryOffer(null);
     exportClipsRef.current = chosen;
@@ -427,7 +409,6 @@ export default function ExportPanel({
     exportClientIdRef.current = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     exportOkCountRef.current = 0;
     exportDirRef.current = "";
-    refundedClipIndicesRef.current = {};
     setQualityGlobal(null);
     setRowsNow(chosen.map(() => ({ state: "waiting", percent: 0 })));
     setExportClipNames(chosen.map((c, i) => (c?.name && c.name.trim()) || `Clip ${i + 1}`));
@@ -445,6 +426,7 @@ export default function ExportPanel({
     ].join("\n");
 
     const result = await downloadAll({
+      access_token: getAccessToken ? await getAccessToken() : null,
       client_export_id: exportClientIdRef.current,
       source_title: (videoData as any)?.title ? String((videoData as any).title) : null,
       quality_reencode_h264: !localFilePath && exportHQ ? Boolean(qualityReencodeH264) : undefined,
@@ -473,8 +455,16 @@ export default function ExportPanel({
     // never started (the agent is unreachable); everything after this comes by event.
     if (!result.ok && exportInProgressRef.current) {
       onExportReservationComplete?.();
-      rowsRef.current.forEach((_, i) => refundClip(i));
       clearExportingUI();
+      // Refused by the agent's quota check (quota.rs): nothing was charged.
+      if (result.status === 401 || result.status === 402) {
+        onQuotaRefused?.(result.status === 401 ? "sign_in" : "limit");
+        return;
+      }
+      if (result.error === "quota_unavailable") {
+        alert("Couldn't check your monthly clip limit. Check your internet connection and try again.");
+        return;
+      }
       onExportFailed?.(String(result.error ?? "unknown_error").toLowerCase().replace(/\s+/g, "_").slice(0, 64));
       offerSupportAfter(
         "Export could not start: " + result.error,

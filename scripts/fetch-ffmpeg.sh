@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Fetch the pinned arm64 ffmpeg + ffprobe into clipagent/src-tauri/bin/ and verify them.
+# Fetch the pinned ffmpeg + ffprobe into clipagent/src-tauri/bin/ and verify them.
 #
-# The binaries are built by .github/workflows/build-ffmpeg.yml (scripts/build-ffmpeg.sh)
-# and published as an asset on a pre-release of this repository. Used by CI before the
-# Tauri build, and by developers after a fresh clone. macOS only; the Windows jobs fetch
-# their own build.
+# macOS (arm64): built by .github/workflows/build-ffmpeg.yml (scripts/build-ffmpeg.sh).
+# Windows (x64): BtbN's GPL build, mirrored unchanged. Both are assets on pre-releases of
+# this repository, pinned by hash in tools.lock. Used by CI before the Tauri build, and by
+# developers after a fresh clone.
 #
-#   ./scripts/fetch-ffmpeg.sh
+#   ./scripts/fetch-ffmpeg.sh            # macOS
+#   ./scripts/fetch-ffmpeg.sh windows    # Windows (Git Bash on the CI runner)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,6 +18,32 @@ REPO="${FFMPEG_REPO:-Fredddzik/klipprr}"
 BASE_URL="${FFMPEG_BASE_URL:-https://github.com/$REPO/releases/download}"
 
 lock() { grep -E "^$1=" "$LOCK" | cut -d= -f2 | tr -d '[:space:]'; }
+sha256() { if command -v shasum >/dev/null; then shasum -a 256 "$1"; else sha256sum "$1"; fi | awk '{print $1}'; }
+
+if [ "${1:-}" = windows ]; then
+  NAME="$(lock FFMPEG_WINDOWS_BUILD)"
+  EXPECTED="$(lock FFMPEG_WINDOWS_SHA256)"
+  mkdir -p "$BIN_DIR"
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  echo "Fetching $NAME …"
+  curl --fail --location --silent --show-error -o "$TMP/$NAME.zip" "$BASE_URL/$NAME/$NAME.zip"
+  ACTUAL="$(sha256 "$TMP/$NAME.zip")"
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "CHECKSUM MISMATCH for $NAME"
+    echo "  expected $EXPECTED"
+    echo "  actual   $ACTUAL"
+    exit 1
+  fi
+  unzip -q "$TMP/$NAME.zip" -d "$TMP/x"
+  find "$TMP/x" -name ffmpeg.exe -exec cp {} "$BIN_DIR/" \;
+  find "$TMP/x" -name ffprobe.exe -exec cp {} "$BIN_DIR/" \;
+  find "$TMP/x" -name LICENSE.txt -exec cp {} "$BIN_DIR/ffmpeg-LICENSE.txt" \;
+  [ -f "$BIN_DIR/ffmpeg.exe" ] && [ -f "$BIN_DIR/ffprobe.exe" ] || { echo "ffmpeg.exe/ffprobe.exe missing from $NAME"; exit 1; }
+  echo "ffmpeg $NAME verified and installed in $BIN_DIR"
+  exit 0
+fi
+
 NAME="$(lock FFMPEG_MACOS_BUILD)"
 EXPECTED="$(lock FFMPEG_MACOS_SHA256)"
 [ -n "$NAME" ] && [ -n "$EXPECTED" ] || {
@@ -39,7 +66,7 @@ curl --fail --location --silent --show-error -o "$TMP/$NAME.tar.gz" \
 
 # The hash is pinned here, not fetched alongside the file: we produced this build, so
 # the lock is the record of which bytes we tested and ship.
-ACTUAL="$(shasum -a 256 "$TMP/$NAME.tar.gz" | awk '{print $1}')"
+ACTUAL="$(sha256 "$TMP/$NAME.tar.gz")"
 if [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "CHECKSUM MISMATCH for $NAME"
   echo "  expected $EXPECTED"

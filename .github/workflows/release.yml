@@ -273,19 +273,11 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
 
-      - name: Download Windows ffmpeg and ffprobe
-        run: |
-          $binDir = "clipagent\src-tauri\bin"
-          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-          # A direct download URL, not the GitHub API: the API is rate-limited per IP, and on
-          # shared runners that failed the whole Windows build (v0.1.31). Pinned to the 9.0
-          # release line to match the macOS build (scripts/build-ffmpeg.sh), instead of master.
-          $zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-9.0.zip"
-          Invoke-WebRequest -Uri $zipUrl -OutFile ffmpeg.zip -UseBasicParsing
-          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extract -Force
-          Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffmpeg.exe | Copy-Item -Destination $binDir -Force
-          Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffprobe.exe | Copy-Item -Destination $binDir -Force
-          Remove-Item -Recurse -Force ffmpeg.zip, ffmpeg_extract
+      - name: Fetch pinned Windows ffmpeg and ffprobe
+        shell: bash
+        # Pinned by hash in tools.lock (a mirrored BtbN build); BtbN's own "latest" URL
+        # changes daily and could not be verified.
+        run: ./scripts/fetch-ffmpeg.sh windows
 
       - name: Fetch pinned yt-dlp
         shell: bash
@@ -368,19 +360,11 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
 
-      - name: Download Windows ffmpeg and ffprobe
-        run: |
-          $binDir = "clipagent\src-tauri\bin"
-          New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-          # A direct download URL, not the GitHub API: the API is rate-limited per IP, and on
-          # shared runners that failed the whole Windows build (v0.1.31). Pinned to the 9.0
-          # release line to match the macOS build (scripts/build-ffmpeg.sh), instead of master.
-          $zipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-9.0.zip"
-          Invoke-WebRequest -Uri $zipUrl -OutFile ffmpeg.zip -UseBasicParsing
-          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extract -Force
-          Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffmpeg.exe | Copy-Item -Destination $binDir -Force
-          Get-ChildItem -Path ffmpeg_extract -Recurse -Filter ffprobe.exe | Copy-Item -Destination $binDir -Force
-          Remove-Item -Recurse -Force ffmpeg.zip, ffmpeg_extract
+      - name: Fetch pinned Windows ffmpeg and ffprobe
+        shell: bash
+        # Pinned by hash in tools.lock (a mirrored BtbN build); BtbN's own "latest" URL
+        # changes daily and could not be verified.
+        run: ./scripts/fetch-ffmpeg.sh windows
 
       - name: Fetch pinned yt-dlp
         shell: bash

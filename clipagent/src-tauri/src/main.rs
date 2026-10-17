@@ -9,15 +9,16 @@ mod support;
 mod updates;
 mod storage;
 mod license;
+mod quota;
+mod body;
+mod agent_token;
 
 /// Supabase URL and anon key embedded at build from cliptool/.env.local (fallback when frontend has none).
 mod supabase_embed {
     include!(concat!(env!("OUT_DIR"), "/supabase_embed.rs"));
 }
 
-use crate::commands::download::handle_download_all;
-use crate::commands::ping::handle_ping;
-use crate::http::{with_cors, json_response, text_response, handle_http};
+use crate::http::handle_http;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_single_instance::init as single_instance;
 use tauri::{Emitter, Manager};
@@ -50,15 +51,11 @@ async fn start_http_server(app: tauri::AppHandle) {
 
 let app_handle = app.clone();
 
-tokio::spawn(async move {
-    let svc = hyper::service::service_fn(move |req| {
-        handle_http(req, app_handle.clone())
-    });
-
-            let _ = hyper::server::conn::Http::new()
-                .http1_only(true)
-                .http1_keep_alive(true)
-                .serve_connection(tcp, svc)
+        tokio::spawn(async move {
+            let svc = hyper::service::service_fn(move |req| handle_http(req, app_handle.clone()));
+            let _ = hyper::server::conn::http1::Builder::new()
+                .keep_alive(true)
+                .serve_connection(hyper_util::rt::TokioIo::new(tcp), svc)
                 .await;
         });
     }
@@ -66,226 +63,9 @@ tokio::spawn(async move {
 
 use std::path::PathBuf;
 
-
-
-use std::fs;
-use std::sync::Arc;
-
-use hyper::{Body, Method, Request, Response};
-use hyper::service::service_fn;
-use hyper::body::to_bytes;
-use hyper::server::conn::Http;
-
-use tokio::net::TcpListener;
-
-use tokio_rustls::TlsAcceptor;
-use rustls::{Certificate, PrivateKey, ServerConfig};
-
-use rcgen::generate_simple_self_signed;
-
-// =============================================================
-// TLS HELPERS
-// =============================================================
-fn tls_paths() -> (PathBuf, PathBuf) {
-    let base = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("ClipAgent");
-
-    fs::create_dir_all(&base).ok();
-
-    (
-        base.join("cert.pem"),
-        base.join("key.pem"),
-    )
-}
-
-fn load_or_generate_cert() -> (Vec<Certificate>, PrivateKey) {
-    let (cert_path, key_path) = tls_paths();
-
-    if cert_path.exists() && key_path.exists() {
-        let cert = fs::read(&cert_path).unwrap();
-        let key = fs::read(&key_path).unwrap();
-
-        return (
-            vec![Certificate(cert)],
-            PrivateKey(key),
-        );
-    }
-
-    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let cert_der = cert.serialize_der().unwrap();
-    let key_der = cert.serialize_private_key_der();
-
-    fs::write(&cert_path, &cert_der).unwrap();
-    fs::write(&key_path, &key_der).unwrap();
-
-    (
-        vec![Certificate(cert_der)],
-        PrivateKey(key_der),
-    )
-}
-
-
-
-// =============================================================
-// HTTPS REQUEST HANDLER
-// =============================================================
-async fn handle_request(req: Request<Body>, app: tauri::AppHandle) -> Result<Response<Body>, hyper::Error> {
-    // CORS preflight
-    if req.method() == Method::OPTIONS {
-        return Ok(with_cors(Response::new(Body::empty())));
-    }
-
-    let method = req.method().clone();
-    let path = req.uri().path().to_string();
-
-    // /ping
-    if method == Method::GET && path == "/ping" {
-        return Ok(with_cors(handle_ping()));
-    }
-
-    // GET /resolve?url=...
-    if method == Method::GET && path == "/resolve" {
-        let query = req.uri().query().unwrap_or("");
-        let mut url_val: Option<String> = None;
-
-        for part in query.split('&') {
-            let mut it = part.splitn(2, '=');
-            let k = it.next().unwrap_or("");
-            let v = it.next().unwrap_or("");
-            if k == "url" {
-                url_val = Some(v.to_string());
-                break;
-            }
-        }
-
-        if let Some(u) = url_val {
-            if u.trim().is_empty() {
-                return Ok(json_response(400, r#"{\"error\":\"missing_url\"}"#.to_string()));
-            }
-            let json = commands::resolve::handle_resolve(u);
-            return Ok(json_response(200, json));
-        }
-
-        return Ok(json_response(400, r#"{\"error\":\"missing_url\"}"#.to_string()));
-    }
-
-    // GET /preview?id=VIDEO_ID
-    if method == Method::GET && path == "/preview" {
-        let query = req.uri().query().unwrap_or("");
-        let mut id: Option<String> = None;
-
-        for part in query.split('&') {
-            let mut it = part.splitn(2, '=');
-            if it.next() == Some("id") {
-                id = it.next().map(|v| v.to_string());
-                break;
-            }
-        }
-
-        let video_id = match id {
-            Some(v) if !v.is_empty() => v,
-            _ => return Ok(text_response(400, "missing_id")),
-        };
-
-        let url = format!("https://www.youtube.com/watch?v={}", video_id);
-        let json = commands::resolve::handle_resolve(url);
-
-        let parsed: serde_json::Value = match serde_json::from_str(&json) {
-            Ok(v) => v,
-            Err(_) => return Ok(text_response(500, "resolve_parse_failed")),
-        };
-
-        let preview_url = parsed
-            .get("preview")
-            .and_then(|p| p.get("url"))
-            .and_then(|u| u.as_str());
-
-        let preview_url = match preview_url {
-            Some(u) => u,
-            None => return Ok(text_response(500, "no_preview_url")),
-        };
-
-        return Ok(with_cors(
-            Response::builder()
-                .status(302)
-                .header("Location", preview_url)
-                .body(Body::empty())
-                .unwrap(),
-        ));
-    }
-
-    // POST /download-all
-    if method == Method::POST && path == "/download-all" {
-        let bytes = to_bytes(req.into_body()).await?;
-        let body = String::from_utf8_lossy(&bytes).to_string();
-        let json = handle_download_all(app.clone(), &body);
-        return Ok(json_response(200, json));
-    }
-
-    Ok(text_response(404, "Not Found"))
-}
-
-// =============================================================
-// HTTPS SERVER BOOTSTRAP
-// =============================================================
-async fn start_https_server(app: tauri::AppHandle) {
-    let (certs, key) = load_or_generate_cert();
-
-    let tls_config = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .unwrap();
-
-    let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
-
-    let listener = match TcpListener::bind(("127.0.0.1", 4001)).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("ClipAgent HTTPS failed to bind 127.0.0.1:4001: {e}");
-            return;
-        }
-    };
-
-    println!("🔒 ClipAgent HTTPS running at https://localhost:4001");
-
-    loop {
-        let (tcp, _) = match listener.accept().await {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let acceptor = tls_acceptor.clone();
-        let app_handle = app.clone();
-
-        tokio::spawn(async move {
-            let tls = match acceptor.accept(tcp).await {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-
-            let svc = service_fn(move |req| {
-                let app_handle = app_handle.clone();
-                async move {
-                    match handle_request(req, app_handle).await {
-                        Ok(res) => Ok::<_, hyper::Error>(res),
-                        Err(e) => Err(e),
-                    }
-                }
-            });
-
-            let _ = Http::new()
-                .http1_only(true)
-                .http1_keep_alive(true)
-                .serve_connection(tls, svc)
-                .await;
-        });
-    }
-}
-
-
-
+// The HTTPS server on :4001 (self-signed certificate, its own router) served the editor
+// when it ran on klipprr.com. Nothing has called it since the UI moved into the app, and
+// its /download-all skipped every check the :4000 router makes. Removed in 0.1.38.
 
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
@@ -298,6 +78,14 @@ fn init_file_logger() {
 
     let mut log_path = log_dir.clone();
     log_path.push("clipagent.log");
+
+    // Every module appends to this one file, and nothing ever trimmed it. Past 5 MB it
+    // moves to clipagent.1.log at launch, so a support request has the last two runs'
+    // worth and the disk never fills.
+    const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+    if std::fs::metadata(&log_path).map_or(false, |m| m.len() > MAX_LOG_BYTES) {
+        let _ = std::fs::rename(&log_path, log_dir.join("clipagent.1.log"));
+    }
 
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
@@ -368,8 +156,10 @@ fn main() {
             commands::license_commands::get_stored_session_tokens,
             support::open_support_email,
             updates::install_update,
+            agent_token::agent_token,
         ])
         .setup(|app| {
+            agent_token::write_for_scripts(app.handle());
             // macOS: the standard menu, plus Help → Contact Support… (a pre-filled email).
             // Windows has no menu bar; its support links live in the app's own UI.
             #[cfg(target_os = "macos")]
@@ -475,13 +265,6 @@ fn main() {
                 });
             });
 
-            // HTTPS
-            let https_handle = app_handle.clone();
-            std::thread::spawn(move || {
-                tauri::async_runtime::block_on(async {
-                    start_https_server(https_handle).await;
-                });
-            });
             Ok(())
         })
         .run(tauri::generate_context!())

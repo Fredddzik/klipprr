@@ -12,9 +12,9 @@ server, plus **three supporting cloud services** it talks to.
 │    └── Next.js static export, embedded in the binary             │
 │          talks to ──────────┐                                    │
 │                             │ http://localhost:4000              │
-│                             │ https://localhost:4001             │
 │  Rust "clipagent"           ▼                                    │
-│    ├── http.rs      the API surface (9 endpoints)                │
+│    ├── http.rs      the API surface (11 endpoints)               │
+│    ├── quota.rs     reserves and refunds monthly clips           │
 │    ├── resolve.rs   spawns yt-dlp --dump-single-json             │
 │    ├── download.rs  spawns yt-dlp + ffmpeg per clip              │
 │    ├── license.rs   ed25519 verify, offline                      │
@@ -35,9 +35,15 @@ Because `<video>` needs a URL it can issue **Range** requests against, and Tauri
 cannot serve a seekable byte stream. Once an HTTP server existed for `/local-preview`, the
 rest of the API followed it. This is a defensible choice — keep it.
 
-Two listeners exist: plain HTTP on 4000 and HTTPS on 4001. The UI prefers HTTPS
-(`CLIPAGENT_HTTPS`) because a page served over `tauri://` cannot fetch plain HTTP without
-mixed-content complaints on some platforms.
+One listener, plain HTTP on 127.0.0.1:4000. (An HTTPS listener on 4001 served the editor
+when it ran on klipprr.com; it was removed in 0.1.38.) Three guards, all in http.rs:
+
+- **Origin:** browsers may only call from the app's own origins or localhost.
+- **Agent token:** `/resolve`, `/yt-preview-cache`, `/download-all` and `/export-cancel`
+  need the per-launch `X-Klipprr-Token` (`agent_token.rs`), which only the app's window can
+  read. Media endpoints cannot carry headers and stay open.
+- **Preview proxy targets:** never this Mac or the local network, by address, by DNS and
+  after redirects.
 
 ## The HTTP API (`clipagent/src-tauri/src/http.rs`)
 
@@ -109,21 +115,31 @@ Consequences you must internalise:
   `app/`+`components/` dirs, a `.next/` dev cache and 436 MB of `node_modules`. None of it
   is used. It is a fossil of an earlier layout.
 
-## Data model (Supabase, defined in `~/dev/klipprr-local/supabase/migrations`)
+## Data model (Supabase, defined in `supabase/` in this repo)
 
-- `licenses` — `user_id`, `plan`, `active`, plus a signed desktop payload + signature
-- `clip_usage_monthly` — `user_id`, `period_start`, `clips_used`
-- `activation_codes` — redeemable codes with a license duration
-- RPCs: `reserve_clip_exports(p_plan, p_requested)`, `release_clip_exports(p_count)`
+```
+auth.users ─1:1─ profiles            (created by trigger on signup; signup email to founder)
+          ├─1:1─ licenses            (plan + signed desktop licence; clients read only)
+          ├─1:N─ clip_usage_monthly  (one row per month)
+          ├─1:N─ export_reservations (one row per export; what may be refunded)
+          └─1:N─ email_sequence_log, email_unsubscribes
+activation_codes, waitlist: stand alone
+```
 
-Usage is **reserved before export and refunded on failure**. That is the correct pattern —
-it prevents a crashed export from burning quota. Keep it.
+- RPCs: `reserve_clip_exports(p_plan, p_requested)` returns a `reservation_id`;
+  `release_export_reservation(id, count)` refunds clips of that reservation only, within a
+  day and a monthly cap. `release_clip_exports(p_count)` remains for 0.1.37 and earlier.
+
+Usage is **reserved before export and refunded on failure**, and since 0.1.38 the agent does
+both (`quota.rs`): `/download-all` reserves before anything runs and answers 401/402 when it
+cannot, and refunds the clips that did not export when the export ends. The UI only
+pre-checks to show the upgrade dialog early.
 
 ## Cross-repo changes
 
 Some changes cannot be made in one repo. Before starting, work out which of these applies:
 
-| Change | klipprr | klipprr-web | klipprr-local |
+| Change | klipprr | klipprr-web | supabase/ (in this repo) |
 |---|---|---|---|
 | New plan tier | capabilities + `plan.ts` + `license.rs::Plan` | signing, Stripe price | migration, RPC limits |
 | New plan limit value | display only | — | RPC + migration |

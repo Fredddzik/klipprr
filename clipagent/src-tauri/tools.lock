@@ -19,3 +19,11 @@ YT_DLP_VERSION=2026.08.19
 # below in a commit of its own. Never edit them by hand.
 FFMPEG_MACOS_BUILD=ffmpeg-9.0.2-macos-arm64-r1
 FFMPEG_MACOS_SHA256=8699590dde6918214ae43db34c49e611f70615543341a4686f338dcaa1178ddc
+
+# ffmpeg and ffprobe (Windows, x64): BtbN's GPL 9.0 build, mirrored unchanged as a
+# pre-release asset of this repo so the bytes we ship are the bytes we tested. BtbN's own
+# "latest" URL changes daily and cannot be pinned. To upgrade: download a newer
+# ffmpeg-n9.x-latest-win64-gpl zip, publish it as a pre-release named like the one below,
+# and update both lines.
+FFMPEG_WINDOWS_BUILD=ffmpeg-9.0-windows-x64-20261016
+FFMPEG_WINDOWS_SHA256=177bec2e8c3397c5e9739901993dadc1cad0954de97d2604a2704c8531a59e32

@@ -1,0 +1,2 @@
+-- Server-side plan lookup in reserve_clip_exports (p_plan is ignored from here on).
+-- Full body: see ../schema.sql, section "clip quota"; it is identical.

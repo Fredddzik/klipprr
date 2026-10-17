@@ -1,0 +1,3 @@
+-- Read the signup-notification secret from Supabase Vault instead of hard-coding it in the
+-- function body. Same body as 20260923092006 except that it still called
+-- supabase_functions.http_request(), which this project does not have.

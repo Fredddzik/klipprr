@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
-use std::io::{self, Write, Read, BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::io::{Write, BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,129 +13,11 @@ use std::os::windows::process::ExitStatusExt;
 
 use crate::output::{unique_output_path, unique_output_path_with_ext};
 use crate::export_control;
-use crate::paths::{running_from_sandboxed_app, skip_browser_cookies_for_yt_dlp, yt_dlp_path, ffmpeg_path, ffprobe_path, yt_dlp_cookies_browser};
+use crate::paths::{yt_dlp_path, ffmpeg_path, ffprobe_path};
 use crate::storage;
+use super::media::*;
+use super::ytdlp::*;
 use tauri::Emitter;
-
-/// Watermark image embedded at build time so it cannot be removed or replaced from the app bundle.
-static EMBEDDED_WATERMARK: &[u8] = include_bytes!("../../assets/watermark.png");
-
-/// If not sandboxed and not skipping cookies (e.g. Windows DPAPI), returns [\"--cookies-from-browser\", browser]; otherwise [].
-fn yt_dlp_cookie_args() -> Vec<&'static str> {
-    if running_from_sandboxed_app() || skip_browser_cookies_for_yt_dlp() {
-        vec![]
-    } else {
-        vec!["--cookies-from-browser", yt_dlp_cookies_browser()]
-    }
-}
-
-/// Returns a path to the watermark image for ffmpeg. Always uses the embedded asset so deleting
-/// or replacing assets/watermark.png in the bundle has no effect. Writes to a temp file per export run.
-fn watermark_path_for_export(export_stamp: u128) -> Result<PathBuf, String> {
-    let temp = std::env::temp_dir().join(format!("klipprr_watermark_{}.png", export_stamp));
-    std::fs::write(&temp, EMBEDDED_WATERMARK).map_err(|e| e.to_string())?;
-    Ok(temp)
-}
-
-/// Which optional `h264_videotoolbox` tuning options the bundled ffmpeg understands.
-///
-/// These options were added in different ffmpeg releases (`-prio_speed` in 6.0,
-/// `-power_efficient` in 6.1). Passing one the binary does not know is not a warning — it
-/// aborts the whole command with "Error splitting the argument list: Option not found",
-/// so a hard-coded list turns every macOS export into a failure the moment the bundled
-/// ffmpeg is swapped for an older build. Ask the binary instead of assuming.
-#[cfg(target_os = "macos")]
-fn videotoolbox_supported_options() -> &'static (bool, bool) {
-    static SUPPORTED: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
-    SUPPORTED.get_or_init(|| {
-        let help = std::process::Command::new(ffmpeg_path())
-            .args(["-hide_banner", "-h", "encoder=h264_videotoolbox"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        let prio = help.contains("-prio_speed");
-        let power = help.contains("-power_efficient");
-        log_to_file(&format!(
-            "[FFMPEG] videotoolbox options: prio_speed={} power_efficient={}",
-            prio, power
-        ));
-        (prio, power)
-    })
-}
-
-/// The subset of `-prio_speed` / `-power_efficient` this ffmpeg actually accepts, ready to
-/// splice into a videotoolbox command line. Shared with the preview proxy encoder in http.rs.
-#[cfg(target_os = "macos")]
-pub fn videotoolbox_speed_args() -> Vec<&'static str> {
-    let (prio, power) = *videotoolbox_supported_options();
-    let mut args: Vec<&'static str> = Vec::new();
-    if prio {
-        args.extend(["-prio_speed", "1"]);
-    }
-    if power {
-        args.extend(["-power_efficient", "0"]);
-    }
-    args
-}
-
-/// Full H.264 encoder args tuned for speed on the target platform.
-/// macOS: h264_videotoolbox with power/speed hints that default to "auto" on battery
-/// and can cap throughput at real-time; forcing prio_speed=1 and power_efficient=0 lifts
-/// the cap to 5–15x realtime on Apple Silicon. Both hints are optional — see above.
-/// Windows/Linux: libx264 with veryfast preset.
-fn h264_encoder_args() -> Vec<&'static str> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut args = vec!["-c:v", "h264_videotoolbox"];
-        args.extend(videotoolbox_speed_args());
-        args.extend(["-pix_fmt", "yuv420p", "-b:v", "6M"]);
-        args
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        vec![
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-pix_fmt", "yuv420p",
-            "-b:v", "6M",
-        ]
-    }
-}
-
-/// yt-dlp flags that improve throughput on DASH/HLS sources (YouTube, Twitch Clips).
-/// Progressive HTTP sources (IG, X) ignore these.
-fn yt_dlp_speed_args() -> &'static [&'static str] {
-    &["--concurrent-fragments", "4"]
-}
-
-/// Probe a single codec name (e.g. "h264", "aac", "av1") for the given stream.
-fn probe_codec_name(path: &Path, stream: &str) -> Option<String> {
-    let path_str = path.to_string_lossy();
-    let out = Command::new(ffprobe_path())
-        .args([
-            "-v", "error",
-            "-select_streams", stream,
-            "-show_entries", "stream=codec_name",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            path_str.as_ref(),
-        ])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
-}
-
-/// Conservative check: can we stream-copy this file into an MP4 container and get a
-/// video that plays everywhere (QuickTime, Windows Media, browsers)?
-/// Only H.264 + AAC qualifies. Watermarking requires a filter graph, so forces re-encode.
-fn can_stream_copy_to_mp4(path: &Path, has_watermark: bool) -> bool {
-    if has_watermark {
-        return false;
-    }
-    let vcodec = probe_codec_name(path, "v:0");
-    let acodec = probe_codec_name(path, "a:0");
-    matches!(vcodec.as_deref(), Some("h264")) && matches!(acodec.as_deref(), Some("aac"))
-}
 
 /// Returns the default export directory path (e.g. ~/Downloads) for the UI to display.
 #[tauri::command]
@@ -265,161 +147,6 @@ pub(crate) fn log_to_file(msg: &str) {
     }
 }
 
-fn parse_ffmpeg_out_time_ms(line: &str) -> Option<i64> {
-    // When using `-progress pipe:2`, ffmpeg prints lines like:
-    // out_time_ms=12345678
-    if let Some(rest) = line.strip_prefix("out_time_ms=") {
-        return rest.trim().parse::<i64>().ok();
-    }
-    None
-}
-
-fn parse_ytdlp_progress_pct(line: &str) -> Option<f32> {
-    // [download]  45.2% of 123.45MiB at 2.34MiB/s ETA 00:30
-    let rest = line.trim().strip_prefix("[download]")?.trim_start();
-    let pct_str = rest.split('%').next()?.trim();
-    pct_str.parse::<f32>().ok().filter(|&p| p >= 0.0 && p <= 100.0)
-}
-
-/// `time=00:01:02.50` from ffmpeg's stats line, in seconds. yt-dlp runs ffmpeg for
-/// `--download-sections`, and that is the only progress it reports for them.
-fn parse_ffmpeg_stats_time(line: &str) -> Option<f64> {
-    let t = line.split("time=").nth(1)?.split_whitespace().next()?;
-    let mut parts = t.split(':');
-    let (h, m, s) = (parts.next()?, parts.next()?, parts.next()?);
-    Some(h.parse::<f64>().ok()? * 3600.0 + m.parse::<f64>().ok()? * 60.0 + s.parse::<f64>().ok()?)
-}
-
-/// Waits between attempts when a download is refused. YouTube's 403s come in bursts of
-/// 20-30 seconds (two exports in a row refused, the next one fine), so the waits grow.
-const YTDLP_RETRY_DELAYS_SECS: [u64; 2] = [3, 10];
-
-/// Failures that another attempt will not fix. Everything else (403, 429, 5xx, timeouts,
-/// dropped connections) is retried, since yt-dlp extracts fresh stream URLs every run.
-fn ytdlp_failure_is_permanent(stderr: &str) -> bool {
-    const PERMANENT: [&str; 10] = [
-        "Private video",
-        "Video unavailable",
-        "This video is not available",
-        "Sign in to confirm your age",
-        "members-only",
-        "Join this channel",
-        "Requested format is not available",
-        "Unsupported URL",
-        "This live event will begin",
-        "No video formats found",
-    ];
-    PERMANENT.iter().any(|m| stderr.contains(m))
-}
-
-/// Sleeps for `secs`, waking early if the clip is cancelled. Returns false when cancelled.
-fn wait_unless_cancelled(job: export_control::Job, secs: u64) -> bool {
-    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    while std::time::Instant::now() < end {
-        if export_control::is_cancelled(job) {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    !export_control::is_cancelled(job)
-}
-
-/// Spawn yt-dlp with stderr piped, calling `on_progress(pct)` with 0.0..=100.0 as it
-/// works. Returns (success, stderr_string) after the process exits.
-///
-/// `section_secs` is the section length for `--download-sections` downloads: those print
-/// no percentage at all, only ffmpeg's `time=` position, which is turned into one here.
-/// The process is tracked under `job` so a cancel can stop it.
-///
-/// A refused or dropped download is tried up to three times in all; the stderr returned
-/// is the last attempt's.
-fn run_ytdlp_with_progress<F>(
-    cmd: &mut Command,
-    job: export_control::Job,
-    section_secs: Option<f64>,
-    mut on_progress: F,
-) -> (bool, String)
-where
-    F: FnMut(f32),
-{
-    let mut attempt = 0;
-    loop {
-        let (ok, stderr) = run_ytdlp_once(cmd, job, section_secs, &mut on_progress);
-        if ok || stderr.is_empty() || export_control::is_cancelled(job) || ytdlp_failure_is_permanent(&stderr) {
-            return (ok, stderr);
-        }
-        let Some(&delay) = YTDLP_RETRY_DELAYS_SECS.get(attempt) else {
-            return (ok, stderr);
-        };
-        attempt += 1;
-        let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
-        log_to_file(&format!("[RETRY] yt-dlp attempt {} failed, retrying in {}s: {}", attempt, delay, tail.chars().take(300).collect::<String>()));
-        if !wait_unless_cancelled(job, delay) {
-            return (false, "cancelled".to_string());
-        }
-    }
-}
-
-fn run_ytdlp_once<F>(
-    cmd: &mut Command,
-    job: export_control::Job,
-    section_secs: Option<f64>,
-    on_progress: &mut F,
-) -> (bool, String)
-where
-    F: FnMut(f32),
-{
-    if export_control::is_cancelled(job) {
-        return (false, "cancelled".to_string());
-    }
-    let mut child = match export_control::prepare(cmd).stdout(Stdio::null()).stderr(Stdio::piped()).spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            log_to_file(&format!("yt-dlp spawn error: {}", e));
-            return (false, String::new());
-        }
-    };
-    let pid = child.id();
-    export_control::track(job, pid);
-    let mut stderr_buf = String::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        // ffmpeg rewrites its stats line with `\r`, so split on both line endings.
-        let mut pending: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            let n = match stderr.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            for &b in &chunk[..n] {
-                if b != b'\n' && b != b'\r' {
-                    pending.push(b);
-                    continue;
-                }
-                if pending.is_empty() {
-                    continue;
-                }
-                let line = String::from_utf8_lossy(&pending).into_owned();
-                pending.clear();
-                if stderr_buf.len() < 200_000 {
-                    stderr_buf.push_str(&line);
-                    stderr_buf.push('\n');
-                }
-                if let Some(pct) = parse_ytdlp_progress_pct(&line) {
-                    on_progress(pct);
-                } else if let (Some(total), Some(t)) = (section_secs, parse_ffmpeg_stats_time(&line)) {
-                    if total > 0.0 {
-                        on_progress(((t / total) * 100.0).clamp(0.0, 100.0) as f32);
-                    }
-                }
-            }
-        }
-    }
-    let success = child.wait().map(|s| s.success()).unwrap_or(false);
-    export_control::untrack(job, pid);
-    (success, stderr_buf)
-}
-
 /// Deletes a clip's intermediate files, including yt-dlp's `.part` leftovers, after the
 /// clip was cancelled mid-download.
 fn remove_clip_temps(export_stamp: u128, clip: usize) {
@@ -437,75 +164,6 @@ fn remove_clip_temps(export_stamp: u128, clip: usize) {
             }
         }
     }
-}
-
-fn pick_existing_with_ext(base: &Path, exts: &[&str]) -> Option<PathBuf> {
-    for ext in exts {
-        let p = PathBuf::from(format!("{}.{}", base.display(), ext));
-        if p.exists() {
-            return Some(p);
-        }
-        let part = PathBuf::from(format!("{}.part", p.display()));
-        if part.exists() {
-            // Rename .part → final so ffmpeg can open it reliably.
-            let _ = std::fs::rename(&part, &p);
-            return Some(p);
-        }
-    }
-    None
-}
-
-fn probe_duration_secs(path: &Path) -> Option<f64> {
-    let path_str = path.to_string_lossy();
-    let out = Command::new(ffprobe_path())
-        .args([
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            path_str.as_ref(),
-        ])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    s.parse::<f64>().ok()
-}
-
-fn probe_video_dims(path: &Path) -> Option<(i64, i64)> {
-    let path_str = path.to_string_lossy();
-    let out = Command::new(ffprobe_path())
-        .args([
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=s=x:p=0",
-            path_str.as_ref(),
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let mut parts = s.split('x');
-    let w = parts.next()?.trim().parse::<i64>().ok()?;
-    let h = parts.next()?.trim().parse::<i64>().ok()?;
-    if w > 0 && h > 0 { Some((w, h)) } else { None }
-}
-
-fn watermark_target_width(video_w: i64, video_h: i64) -> i64 {
-    // Classic watermark behavior: preserve watermark AR; size relative to video width with caps.
-    let vertical = video_h > video_w;
-    let frac = if vertical { 0.38_f64 } else { 0.18_f64 };
-    let raw = (video_w as f64 * frac).round() as i64;
-    raw.clamp(140, 320)
-}
-
-/// Move temp file to final path so the file appears in the user's folder only when fully complete.
-fn move_temp_to_final(temp_path: &Path, final_path: &Path) -> io::Result<()> {
-    std::fs::rename(temp_path, final_path).or_else(|_| {
-        std::fs::copy(temp_path, final_path)?;
-        std::fs::remove_file(temp_path)
-    })
 }
 
 pub fn handle_download_all(app: AppHandle, body: &str) -> String {
@@ -700,6 +358,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
             if success {
                 results.push(serde_json::json!({"index": i, "name": name, "ok": true, "path": written_path}));
+                crate::quota::clip_done(client_export_id.as_deref());
                 let _ = app.emit("export-clip-done", serde_json::json!({
                     "clipIndex": i, "clip_name": name, "export_dir": base_str, "client_export_id": client_export_id
                 }));
@@ -1432,6 +1091,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                             Ok((s, fallback_path)) if s.success() => {
                                 log_to_file(&format!("[EXPORT] fast clip_done i={}", i));
                                 let path: String = fallback_path.unwrap_or_else(|| out_str.clone());
+                                crate::quota::clip_done(client_export_id.as_deref());
                                 let _ = app.emit("export-clip-done", serde_json::json!({
                                     "clipIndex": i,
                                     "clip_name": name,
@@ -1850,6 +1510,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         }));
         if ok {
             log_to_file(&format!("[EXPORT] quality clip_done i={}", i));
+            crate::quota::clip_done(client_export_id.as_deref());
             let _ = app.emit("export-clip-done", serde_json::json!({
                 "clipIndex": i,
                 "clip_name": name,
@@ -1882,4 +1543,47 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         "client_export_id": client_export_id,
     }));
     serde_json::json!({ "ok": true, "results": results, "export_dir": base_str }).to_string()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ytdlp_percent_lines() {
+        assert_eq!(parse_ytdlp_progress_pct("[download]  45.2% of 123.45MiB at 2.34MiB/s ETA 00:30"), Some(45.2));
+        assert_eq!(parse_ytdlp_progress_pct("[download] 100% of 5.00MiB"), Some(100.0));
+        assert_eq!(parse_ytdlp_progress_pct("[download] Destination: clip.mp4"), None);
+        assert_eq!(parse_ytdlp_progress_pct("[info] 45.2%"), None);
+    }
+
+    #[test]
+    fn ffmpeg_stats_time() {
+        let line = "frame=  240 fps=0.0 q=-1.0 size=    1024KiB time=00:01:02.50 bitrate=134.2kbits/s speed=12x";
+        assert_eq!(parse_ffmpeg_stats_time(line), Some(62.5));
+        assert_eq!(parse_ffmpeg_stats_time("size=N/A time=01:00:00.00 bitrate=N/A"), Some(3600.0));
+        assert_eq!(parse_ffmpeg_stats_time("Input #0, mov,mp4"), None);
+        assert_eq!(parse_ffmpeg_out_time_ms("out_time_ms=12345678"), Some(12_345_678));
+    }
+
+    #[test]
+    fn refused_downloads_are_retried_and_dead_ones_are_not() {
+        // Transient: what YouTube actually sends (from the founder's log, 2026-10).
+        assert!(!ytdlp_failure_is_permanent(
+            "[https @ 0x15000da00] HTTP error 403 Forbidden\nERROR: ffmpeg exited with code 8"
+        ));
+        assert!(!ytdlp_failure_is_permanent("ERROR: unable to download video data: HTTP Error 403: Forbidden"));
+        assert!(!ytdlp_failure_is_permanent("ERROR: Read timed out."));
+        // Permanent: another attempt cannot help.
+        assert!(ytdlp_failure_is_permanent("ERROR: [youtube] abc: Private video. Sign in if you've been granted access"));
+        assert!(ytdlp_failure_is_permanent("ERROR: [youtube] abc: Video unavailable"));
+        assert!(ytdlp_failure_is_permanent("ERROR: [twitch:clips] 1: Requested format is not available."));
+    }
+
+    #[test]
+    fn watermark_scales_with_the_frame_within_limits() {
+        assert_eq!(watermark_target_width(1920, 1080), 320); // 18% = 346, capped
+        assert_eq!(watermark_target_width(1280, 720), 230);
+        assert_eq!(watermark_target_width(640, 360), 140); // 115, raised to the floor
+        assert_eq!(watermark_target_width(1080, 1920), 320); // vertical: 38%, capped
+    }
 }

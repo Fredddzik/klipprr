@@ -168,3 +168,10 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           KLIPPRR_LICENSE_ED25519_PUB_B64: ${{ secrets.KLIPPRR_LICENSE_ED25519_PUB_B64 }}
         run: cd clipagent/src-tauri && cargo build --release --target aarch64-apple-darwin
+
+      - name: Unit tests
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          KLIPPRR_LICENSE_ED25519_PUB_B64: ${{ secrets.KLIPPRR_LICENSE_ED25519_PUB_B64 }}
+        run: cd clipagent/src-tauri && cargo test --target aarch64-apple-darwin

@@ -9,12 +9,12 @@ import { contactSupport } from "@/lib/support";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
-import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
 
 import {
   resolveVideo,
   downloadAll,
   CLIPAGENT_HTTP,
+  agentFetch,
   type ResolvedVideo,
 } from "@/lib/clipagent";
 import { useUndoRedo } from "@/hooks/useUndoRedo";
@@ -22,6 +22,8 @@ import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { tauriInvoke } from "@/lib/tauri";
 import VideoViewport from "@/components/VideoViewport";
 import Timeline from "@/components/Timeline";
+import UpdateToast from "@/components/UpdateToast";
+import { useAppUpdate } from "@/hooks/useAppUpdate";
 import ClipsPanel from "@/components/ClipsPanel";
 import ExportPanel from "@/components/ExportPanel";
 import LeftSidebar from "@/components/LeftSidebar";
@@ -36,8 +38,6 @@ import type { Capabilities } from "@/lib/capabilities";
 import {
   getCurrentMonthlyUsage,
   normalizePlan,
-  releaseClipExports,
-  reserveClipExports,
 } from "@/lib/usage";
 import { track, type AnalyticsBase } from "@/lib/analytics";
 import {
@@ -51,7 +51,8 @@ const SETTINGS_KEYS = {
   clipSort: "klipprr-clip-sort",
   defaultExportFormat: "klipprr-default-export-format",
 } as const;
-const PENDING_EXPORT_RESERVATION_KEY = "klipprr-pending-export-reservation";
+/** Held refunds the UI owed before the agent took over the quota (0.1.38). Cleared on start. */
+const LEGACY_PENDING_RESERVATION_KEY = "klipprr-pending-export-reservation";
 
 export default function HomePage() {
   const [videoUrl, setVideoUrl] = useState("");
@@ -78,15 +79,6 @@ export default function HomePage() {
     pricingProCtaVariant: "control",
   });
   const [usage, setUsage] = useState<{ used: number; limit: number; remaining: number } | null>(null);
-
-  const [updateStatus, setUpdateStatus] = useState<
-    "idle" | "checking" | "latest" | "available" | "downloading" | "error"
-  >("idle");
-  const [updateInfo, setUpdateInfo] = useState<{ version: string; body?: string } | null>(null);
-  const updateRef = useRef<Awaited<ReturnType<typeof checkForUpdate>> | null>(null);
-  const [showUpdateToast, setShowUpdateToast] = useState(false);
-  /** Live progress of an update download, reported by the agent (updates.rs). */
-  const [updateProgress, setUpdateProgress] = useState<{ phase: string; received: number; total: number } | null>(null);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [exportPanelOpen, setExportPanelOpen] = useState(false);
@@ -523,31 +515,36 @@ async function refreshCapabilities() {
   }
 }
 
-async function reserveExportQuota(clipCount: number): Promise<boolean> {
-  if (!session?.user?.id) {
+function showQuotaRefusal(reason: "sign_in" | "limit") {
+  if (reason === "sign_in") {
     trackEvent("paywall_hit", { feature: "sign_in" });
     setUpgradeFeature("sign_in");
     setUpgradeReason("feature_locked");
-    setShowUpgrade(true);
-    return false;
-  }
-
-  const planKey = normalizePlan(plan);
-  const result = await reserveClipExports({ plan: planKey, requested: clipCount });
-  if (!result.ok) {
-    alert(result.error || "Could not verify your clip quota.");
-    return false;
-  }
-
-  if (!result.result.allowed) {
+  } else {
     trackEvent("export_limit_reached");
     setUpgradeFeature("clip_limit");
     setUpgradeReason("clip_limit_reached");
-    setShowUpgrade(true);
+  }
+  setShowUpgrade(true);
+}
+
+/** Answers early what the agent would refuse anyway. The agent makes the actual
+ *  reservation when the export starts (quota.rs); this only saves the round trip. */
+async function checkExportAllowed(clipCount: number): Promise<boolean> {
+  if (!session?.user?.id) {
+    showQuotaRefusal("sign_in");
     return false;
   }
-  await refreshUsage();
+  if (usage && usage.remaining < clipCount) {
+    showQuotaRefusal("limit");
+    return false;
+  }
   return true;
+}
+
+async function currentAccessToken(): Promise<string | null> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token ?? null;
 }
 
 async function refreshUsage() {
@@ -562,33 +559,6 @@ async function refreshUsage() {
     return;
   }
   setUsage(result.result);
-}
-
-function savePendingReservation(remaining: number) {
-  if (typeof window === "undefined") return;
-  if (remaining <= 0) {
-    window.localStorage.removeItem(PENDING_EXPORT_RESERVATION_KEY);
-    return;
-  }
-  window.localStorage.setItem(
-    PENDING_EXPORT_RESERVATION_KEY,
-    JSON.stringify({
-      remaining,
-      updatedAt: Date.now(),
-    })
-  );
-}
-
-function readPendingReservation(): number {
-  if (typeof window === "undefined") return 0;
-  const raw = window.localStorage.getItem(PENDING_EXPORT_RESERVATION_KEY);
-  if (!raw) return 0;
-  try {
-    const parsed = JSON.parse(raw) as { remaining?: number };
-    return Math.max(0, Number(parsed?.remaining ?? 0));
-  } catch {
-    return 0;
-  }
 }
 
   // Load video metadata from ClipAgent
@@ -842,7 +812,7 @@ function readPendingReservation(): number {
     // Only block the viewport on a download the preview actually depends on. An upgrade
     // fetch happens behind a video that is already playing.
     if (isTikTok || needsLocalPreview) setYtPreviewLoading(true);
-    fetch(`${CLIPAGENT_HTTP}/yt-preview-cache?${params}`)
+    agentFetch(`${CLIPAGENT_HTTP}/yt-preview-cache?${params}`)
       .then((r) => r.json())
       .then((data: any) => {
         // bg=1 only queues the background job; the swap arrives via /yt-proxy-status.
@@ -1021,20 +991,22 @@ useEffect(() => {
 }, [session?.user?.id]);
 
 useEffect(() => {
-  const recoverPendingReservation = async () => {
-    const pending = readPendingReservation();
-    if (pending <= 0) return;
-    const result = await releaseClipExports({ count: pending });
-    if (!result.ok) {
-      console.warn("[Usage] failed to recover pending reservation refund", result.error);
-      return;
-    }
-    savePendingReservation(0);
-    await refreshUsage();
-  };
-  recoverPendingReservation();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  try {
+    window.localStorage.removeItem(LEGACY_PENDING_RESERVATION_KEY);
+  } catch {}
 }, []);
+
+// The agent refunds clips that did not export once an export ends.
+useEffect(() => {
+  if (typeof window === "undefined" || !(window as any).__TAURI__) return;
+  const unlisten = listen("usage-changed", () => {
+    refreshUsage();
+  });
+  return () => {
+    unlisten.then((fn) => fn());
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [session?.user?.id, plan]);
 
 // Shared handler: set Supabase session from tokens and refresh license/caps
 async function handleAuthTokens(access_token: string, refresh_token: string) {
@@ -1547,64 +1519,17 @@ useEffect(() => {
     setExportToasts((prev) => prev.filter((t) => t.id !== id));
   }
 
-  async function handleCheckForUpdates() {
-    if (typeof window === "undefined" || !(window as any).__TAURI__) return;
-    setUpdateStatus("checking");
-    setUpdateInfo(null);
-    updateRef.current = null;
-    try {
-      const update = await checkForUpdate();
-      if (update) {
-        updateRef.current = update;
-        setUpdateInfo({ version: update.version, body: update.body ?? undefined });
-        setUpdateStatus("available");
-      } else {
-        setUpdateStatus("latest");
-        setTimeout(() => setUpdateStatus("idle"), 3000);
-      }
-    } catch (err) {
-      console.error("Update check failed:", err);
-      setUpdateStatus("error");
-      setTimeout(() => setUpdateStatus("idle"), 5000);
-    }
-  }
-
-  async function handleInstallUpdate() {
-    if (!updateRef.current) return;
-    setUpdateStatus("downloading");
-    setUpdateProgress(null);
-    setShowUpdateToast(true);
-    // Downloaded and installed by the agent, which reports progress, restarts a stalled
-    // download, and relaunches the app itself when done.
-    const unlisten = await listen<{ phase: string; received: number; total: number }>("update-progress", (e) =>
-      setUpdateProgress(e.payload)
-    );
-    try {
-      await invoke("install_update");
-    } catch (err) {
-      console.error("Update install failed:", err);
-      setUpdateStatus("error");
-      setUpdateProgress(null);
-    } finally {
-      unlisten();
-    }
-  }
-
   const isTauri = typeof window !== "undefined" && !!(window as any).__TAURI__;
 
-  // Check for updates on startup (desktop only). If an update exists, show a toast bottom-right.
-  useEffect(() => {
-    if (!isTauri) return;
-    handleCheckForUpdates();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isTauri]);
-
-  useEffect(() => {
-    if (!isTauri) return;
-    if (updateStatus === "available" && updateInfo?.version) {
-      setShowUpdateToast(true);
-    }
-  }, [isTauri, updateStatus, updateInfo?.version]);
+  const {
+    updateStatus,
+    updateInfo,
+    updateProgress,
+    showUpdateToast,
+    setShowUpdateToast,
+    handleCheckForUpdates,
+    handleInstallUpdate,
+  } = useAppUpdate(isTauri);
 
   return (
   <div className="h-screen min-h-dvh flex overflow-hidden bg-zinc-950 text-zinc-200">
@@ -1653,99 +1578,15 @@ useEffect(() => {
       }}
     />
 
-    {isTauri &&
-      showUpdateToast &&
-      (updateStatus === "available" || updateStatus === "downloading" || (updateStatus === "error" && updateInfo)) &&
-      updateInfo?.version && (
-      <div className="fixed bottom-5 right-5 z-50 w-[360px] max-w-[calc(100vw-2.5rem)] rounded-md border border-zinc-800 bg-zinc-900 text-white shadow-xl p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold">
-              {updateStatus === "downloading"
-                ? updateProgress?.phase === "installing"
-                  ? "Installing update…"
-                  : "Downloading update…"
-                : updateStatus === "error"
-                ? "Update didn't finish"
-                : "Update available"}
-            </div>
-            <div className="text-xs text-zinc-300 mt-1">
-              {updateStatus === "error" ? (
-                <>The download kept failing. You can install version <span className="font-mono">{updateInfo.version}</span> from the website instead.</>
-              ) : updateStatus === "downloading" && updateProgress?.phase === "retrying" ? (
-                "The download stalled, retrying…"
-              ) : (
-                <>Version <span className="font-mono">{updateInfo.version}</span> is ready to install.</>
-              )}
-            </div>
-            {updateStatus === "downloading" && (
-              <div className="mt-2 flex items-center gap-2">
-                <div className="flex-1 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
-                  <div
-                    className={`h-full bg-violet-500 transition-[width] duration-300 ease-linear ${
-                      !updateProgress?.total ? "animate-pulse w-1/12" : ""
-                    }`}
-                    style={updateProgress?.total ? { width: `${Math.min(100, (updateProgress.received / updateProgress.total) * 100)}%` } : undefined}
-                  />
-                </div>
-                <span className="w-10 text-right text-xs tabular-nums text-zinc-400">
-                  {updateProgress?.total ? `${Math.floor((updateProgress.received / updateProgress.total) * 100)}%` : ""}
-                </span>
-              </div>
-            )}
-          </div>
-          <button
-            type="button"
-            className="text-zinc-400 hover:text-white text-sm"
-            onClick={() => setShowUpdateToast(false)}
-            aria-label="Dismiss update notification"
-          >
-            ✕
-          </button>
-        </div>
-        <div className="mt-3 flex items-center justify-end gap-2">
-          <button
-            type="button"
-            className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-sm text-zinc-300 transition"
-            onClick={() => setShowUpdateToast(false)}
-            disabled={updateStatus === "downloading"}
-          >
-            Later
-          </button>
-          {updateStatus === "error" ? (
-            <>
-              <button
-                type="button"
-                className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-sm text-zinc-300 transition"
-                onClick={handleInstallUpdate}
-              >
-                Try again
-              </button>
-              <button
-                type="button"
-                className="px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-sm font-semibold text-white transition"
-                onClick={() => openExternal("https://klipprr.com/download")}
-              >
-                Download from website
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              className="px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-sm font-semibold text-white disabled:opacity-50 transition"
-              onClick={handleInstallUpdate}
-              disabled={updateStatus === "downloading"}
-            >
-              {updateStatus === "downloading" ? "Downloading…" : "Download & restart"}
-            </button>
-          )}
-        </div>
-        {updateInfo.body && (
-          <div className="mt-3 text-xs text-zinc-300 max-h-24 overflow-auto whitespace-pre-wrap">
-            {updateInfo.body}
-          </div>
-        )}
-      </div>
+    {isTauri && (
+      <UpdateToast
+        visible={showUpdateToast}
+        status={updateStatus}
+        info={updateInfo}
+        progress={updateProgress}
+        onDismiss={() => setShowUpdateToast(false)}
+        onInstall={handleInstallUpdate}
+      />
     )}
 
     {/* Main content — reserve left margin so sidebar never hides content */}
@@ -2343,17 +2184,10 @@ useEffect(() => {
                   setUpgradeReason("feature_locked");
                   setShowUpgrade(true);
                 }}
-                onBeforeExport={reserveExportQuota}
-                onExportReservationStart={(clipCount) => {
-                  savePendingReservation(clipCount);
-                }}
-                onExportClipSettled={() => {
-                  const pending = readPendingReservation();
-                  if (pending <= 0) return;
-                  savePendingReservation(pending - 1);
-                }}
+                onBeforeExport={checkExportAllowed}
+                getAccessToken={currentAccessToken}
+                onQuotaRefused={showQuotaRefusal}
                 onExportReservationComplete={() => {
-                  savePendingReservation(0);
                   refreshUsage();
                 }}
                 onExportComplete={(count, exportDir, hadWatermark, totalDurationSeconds) => {

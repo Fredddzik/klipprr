@@ -1,0 +1,2 @@
+-- Same function as 20260504123323 with the webhook secret written into the body as a
+-- string literal. REDACTED here; see README.md. Superseded by 20260919152212 (Vault).

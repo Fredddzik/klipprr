@@ -60,7 +60,7 @@ yt-dlp working as sites change. A subscriber whose downloads break asks for a re
 perpetual buyer waits for the patch.
 **Decide when:** we know download → export → paid conversion, and have asked a handful of
 buyers what they would have paid. Touches `klipprr-web` (Stripe, pricing pages,
-`check-claims.mjs`), `klipprr-local` (plan schema) and `license.rs`.
+`check-claims.mjs`), `supabase/` (plan schema) and `license.rs`.
 
 ### Remove clip metering (10 / 120 / 500)
 **Why:** it limits something that costs us nothing, and users can tell.

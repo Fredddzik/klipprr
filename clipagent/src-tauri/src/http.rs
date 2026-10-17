@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
-use hyper::{Body, Response, StatusCode};
-use hyper::body::to_bytes;
+use hyper::{Response, StatusCode};
+use hyper::body::Incoming;
 use hyper::{Method, Request};
+use http_body_util::BodyExt;
+use crate::body::{self, Body};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
@@ -25,12 +27,12 @@ pub fn with_cors(mut res: Response<Body>) -> Response<Body> {
     );
     headers.insert(
         "Access-Control-Allow-Headers",
-        "Content-Type, Range".parse().unwrap(),
+        "Content-Type, Range, X-Klipprr-Token".parse().unwrap(),
     );
     res
 }
 
-fn origin_is_allowed(req: &Request<Body>) -> bool {
+fn origin_is_allowed<B>(req: &Request<B>) -> bool {
     let Some(origin) = req.headers().get("origin") else {
         // Non-browser or same-process calls may not send Origin.
         return true;
@@ -49,6 +51,37 @@ fn origin_is_allowed(req: &Request<Body>) -> bool {
     url.scheme() == "tauri" && host == "localhost"
 }
 
+/// Addresses the preview proxy must never reach: this Mac, the local network, cloud
+/// metadata endpoints.
+fn ip_is_blocked(ip: IpAddr) -> bool {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    };
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local() || v4.is_broadcast() || v4.is_documentation(),
+        IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+    }
+}
+
+/// Resolves the target's host and refuses it when any address is a blocked one, so a
+/// public name pointing at 127.0.0.1 (localtest.me, or a rebinding domain) gets nowhere.
+async fn resolves_to_blocked_ip(decoded: &str) -> bool {
+    let Ok(url) = Url::parse(decoded) else { return true };
+    let Some(host) = url.host_str().map(str::to_string) else { return true };
+    if matches!(url.host(), Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_))) {
+        return false; // literal addresses were already checked
+    }
+    let port = url.port_or_known_default().unwrap_or(443);
+    match tokio::net::lookup_host(format!("{}:{}", host, port)).await {
+        Ok(addrs) => addrs.into_iter().any(|a| ip_is_blocked(a.ip())),
+        Err(_) => false, // the request itself will fail
+    }
+}
+
 fn is_blocked_preview_target(decoded: &str) -> bool {
     let Ok(url) = Url::parse(decoded) else {
         return true;
@@ -62,21 +95,20 @@ fn is_blocked_preview_target(decoded: &str) -> bool {
         return true;
     }
 
-    if let Ok(ip) = host_lc.parse::<IpAddr>() {
-        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+    // `host_str` keeps the brackets of an IPv6 literal ("[::1]"), which never parses as
+    // an address; `host()` gives the address itself.
+    let ip = match url.host() {
+        Some(url::Host::Ipv4(v4)) => Some(IpAddr::V4(v4)),
+        Some(url::Host::Ipv6(v6)) => Some(match v6.to_ipv4_mapped() {
+            // ::ffff:127.0.0.1 reaches the IPv4 loopback.
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        }),
+        _ => host_lc.parse::<IpAddr>().ok(),
+    };
+    if let Some(ip) = ip {
+        if ip_is_blocked(ip) {
             return true;
-        }
-        match ip {
-            IpAddr::V4(v4) => {
-                if v4.is_private() || v4.is_link_local() || v4.is_broadcast() || v4.is_documentation() {
-                    return true;
-                }
-            }
-            IpAddr::V6(v6) => {
-                if v6.is_unique_local() || v6.is_unicast_link_local() {
-                    return true;
-                }
-            }
         }
     }
     false
@@ -210,7 +242,7 @@ fn ensure_head_proxy(file_path: &Path) -> Option<PathBuf> {
         {
             args.extend(["-vf".to_string(), "scale=-2:720".to_string()]);
             args.extend(["-c:v".to_string(), "h264_videotoolbox".to_string()]);
-            args.extend(download::videotoolbox_speed_args().iter().map(|s| s.to_string()));
+            args.extend(crate::commands::media::videotoolbox_speed_args().iter().map(|s| s.to_string()));
             args.extend(["-b:v".to_string(), "6M".to_string()]);
             args.extend(["-pix_fmt".to_string(), "yuv420p".to_string()]);
         }
@@ -326,7 +358,7 @@ fn start_hq_proxy_bg(file_path: &Path) {
             // Built from a capability probe rather than hard-coded: -power_efficient only
             // exists from ffmpeg 6.1, and an unknown option aborts the entire command.
             let mut a = vec!["-vf", "scale=-2:720", "-c:v", "h264_videotoolbox"];
-            a.extend(download::videotoolbox_speed_args());
+            a.extend(crate::commands::media::videotoolbox_speed_args());
             a.extend(["-b:v", "4M", "-pix_fmt", "yuv420p"]);
             a
         };
@@ -533,6 +565,14 @@ fn resolve_local_preview_path(decoded: &str, force_pcm_fix: bool) -> Result<Path
 /// on every seek.
 static PREVIEW_CLIENT: Lazy<Option<reqwest::Client>> = Lazy::new(|| {
     reqwest::Client::builder()
+        // A redirect must not lead the proxy where a direct request may not go.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 || is_blocked_preview_target(attempt.url().as_str()) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build()
         .ok()
@@ -561,7 +601,7 @@ enum PreviewRange {
     From(u64, Option<u64>),
 }
 
-fn parse_preview_range(req: &Request<Body>) -> Option<PreviewRange> {
+fn parse_preview_range<B>(req: &Request<B>) -> Option<PreviewRange> {
     let Some(v) = req.headers().get(hyper::header::RANGE) else {
         return Some(PreviewRange::Whole);
     };
@@ -617,9 +657,9 @@ fn serve_cached_preview(
     }
     let len = end - start + 1;
     let body = if *method == Method::HEAD {
-        Body::empty()
+        body::empty()
     } else {
-        let (tx, body) = Body::channel();
+        let (tx, body) = body::channel();
         tokio::spawn(fill_from_cache(tx, url, start, end + 1));
         body
     };
@@ -643,7 +683,7 @@ fn serve_cached_preview(
 
 /// Streams `[pos, end)`: cached runs from disk, gaps from the origin (caching them
 /// as they pass). Stops quietly when the player hangs up, which it does on every seek.
-async fn fill_from_cache(mut tx: hyper::body::Sender, url: String, mut pos: u64, end: u64) {
+async fn fill_from_cache(mut tx: body::Sender, url: String, mut pos: u64, end: u64) {
     let Some(path) = preview_cache::path_for(&url) else {
         tx.abort();
         return;
@@ -714,7 +754,7 @@ async fn fill_from_cache(mut tx: hyper::body::Sender, url: String, mut pos: u64,
 
 /// Relays an origin response to the player while writing each chunk into the cache
 /// at its offset in the file.
-async fn tee_into_cache(mut upstream: reqwest::Response, mut tx: hyper::body::Sender, url: String, mut pos: u64) {
+async fn tee_into_cache(mut upstream: reqwest::Response, mut tx: body::Sender, url: String, mut pos: u64) {
     let path = preview_cache::path_for(&url);
     loop {
         let chunk = match upstream.chunk().await {
@@ -773,7 +813,7 @@ async fn probe_dash_layout(url: String) -> Option<dash::Layout> {
 }
 
 pub fn json_response(status: u16, body: String) -> Response<Body> {
-    let mut res = Response::new(Body::from(body));
+    let mut res = Response::new(body::full(body));
     *res.status_mut() = StatusCode::from_u16(status).unwrap();
     res.headers_mut()
         .insert("Content-Type", "application/json".parse().unwrap());
@@ -781,13 +821,13 @@ pub fn json_response(status: u16, body: String) -> Response<Body> {
 }
 
 pub fn text_response(status: u16, body: &str) -> Response<Body> {
-    let mut res = Response::new(Body::from(body.to_string()));
+    let mut res = Response::new(body::full(body.to_string()));
     *res.status_mut() = StatusCode::from_u16(status).unwrap();
     with_cors(res)
 }
 
 pub async fn handle_http(
-    req: Request<Body>,
+    req: Request<Incoming>,
     app: AppHandle,
 ) -> Result<Response<Body>, hyper::Error> {
     let method = req.method().clone();
@@ -797,7 +837,7 @@ pub async fn handle_http(
         if !origin_is_allowed(&req) {
             return Ok(text_response(403, "forbidden_origin"));
         }
-        return Ok(with_cors(Response::new(Body::empty())));
+        return Ok(with_cors(Response::new(body::empty())));
     }
 
     if method == Method::GET && path == "/ping" {
@@ -908,12 +948,12 @@ pub async fn handle_http(
             }
             let limited = file.take(len);
             let stream = ReaderStream::new(limited);
-            let body = Body::wrap_stream(stream);
+            let body = body::stream(stream);
             let content_range = format!("bytes {}-{}/{}", start, end, file_size);
             (StatusCode::PARTIAL_CONTENT, body, Some(content_range), Some(len))
         } else {
             let stream = ReaderStream::new(file);
-            let body = Body::wrap_stream(stream);
+            let body = body::stream(stream);
             (StatusCode::OK, body, None, Some(file_size))
         };
         let mut res = Response::new(body);
@@ -960,7 +1000,7 @@ pub async fn handle_http(
         if !decoded.starts_with("https://") && !decoded.starts_with("http://") {
             return Ok(text_response(400, "url_must_be_http_or_https"));
         }
-        if is_blocked_preview_target(&decoded) {
+        if is_blocked_preview_target(&decoded) || resolves_to_blocked_ip(&decoded).await {
             return Ok(text_response(400, "blocked_target_host"));
         }
         let Some(client) = PREVIEW_CLIENT.as_ref() else {
@@ -1039,7 +1079,7 @@ pub async fn handle_http(
             .map_or(false, |(_, total)| preview_cache::ensure_entry(&decoded, total, &content_type));
 
         if method == Method::HEAD {
-            let mut res = Response::new(Body::empty());
+            let mut res = Response::new(body::empty());
             *res.status_mut() = status;
             res.headers_mut()
                 .insert("Content-Type", content_type.parse().unwrap());
@@ -1069,11 +1109,11 @@ pub async fn handle_http(
         // GET: stream body; preserve 200 vs 206 and range headers from upstream.
         let body = match placement {
             Some((start, _)) if cacheable => {
-                let (tx, body) = Body::channel();
+                let (tx, body) = body::channel();
                 tokio::spawn(tee_into_cache(upstream, tx, decoded, start));
                 body
             }
-            _ => Body::wrap_stream(upstream.bytes_stream()),
+            _ => body::stream(upstream.bytes_stream()),
         };
         let mut res = Response::new(body);
         *res.status_mut() = status;
@@ -1167,6 +1207,9 @@ pub async fn handle_http(
     //         inline. Used when the source already has a directly playable URL and only
     //         the quality upgrade has to be fetched.
     if method == Method::GET && path == "/yt-preview-cache" {
+        if !crate::agent_token::is_valid(&req) {
+            return Ok(text_response(401, "missing_agent_token"));
+        }
         if !origin_is_allowed(&req) {
             return Ok(text_response(403, "forbidden_origin"));
         }
@@ -1333,7 +1376,7 @@ pub async fn handle_http(
             video.iter().map(|(r, _)| format!("{}p", r.height)).collect::<Vec<_>>().join(", "),
             duration
         ));
-        let mut res = Response::new(Body::from(body));
+        let mut res = Response::new(body::full(body));
         res.headers_mut()
             .insert("Content-Type", "application/dash+xml".parse().unwrap());
         res.headers_mut()
@@ -1405,6 +1448,9 @@ pub async fn handle_http(
 
 
     if method == Method::GET && path == "/resolve" {
+        if !crate::agent_token::is_valid(&req) {
+            return Ok(text_response(401, "missing_agent_token"));
+        }
         if !origin_is_allowed(&req) {
             return Ok(text_response(403, "forbidden_origin"));
         }
@@ -1440,10 +1486,13 @@ pub async fn handle_http(
     }
 
     if method == Method::POST && path == "/download-all" {
+        if !crate::agent_token::is_valid(&req) {
+            return Ok(text_response(401, "missing_agent_token"));
+        }
         if !origin_is_allowed(&req) {
             return Ok(text_response(403, "forbidden_origin"));
         }
-        let body_bytes = to_bytes(req.into_body()).await?;
+        let body_bytes = req.into_body().collect().await?.to_bytes();
         let body_str = String::from_utf8_lossy(&body_bytes).to_string();
 
         // Answer as soon as the export has started. Progress, completion and errors all
@@ -1453,10 +1502,45 @@ pub async fn handle_http(
         //
         // The export itself runs on the blocking pool: it drives yt-dlp and ffmpeg for
         // minutes, and a tokio worker held that long starves /ping and /local-preview.
-        let export_id = serde_json::from_str::<serde_json::Value>(&body_str)
-            .ok()
+        let parsed_body = serde_json::from_str::<serde_json::Value>(&body_str).ok();
+        let export_id = parsed_body
+            .as_ref()
             .and_then(|v| v.get("client_export_id").and_then(|x| x.as_str()).map(|s| s.trim().to_string()))
             .filter(|s| !s.is_empty());
+        let clip_count = parsed_body
+            .as_ref()
+            .and_then(|v| v.get("clips").and_then(|c| c.as_array()).map(|a| a.len()))
+            .unwrap_or(0);
+        if clip_count == 0 {
+            return Ok(json_response(400, r#"{"error":"no_clips"}"#.to_string()));
+        }
+        // Charge the month before anything runs. The UI cannot skip this, and neither can
+        // anything else that talks to this port.
+        let ui_token = parsed_body
+            .as_ref()
+            .and_then(|v| v.get("access_token").and_then(|x| x.as_str()).map(String::from));
+        let reservation = match crate::quota::reserve(&app, ui_token.as_deref(), clip_count).await {
+            Ok(r) => r,
+            Err(crate::quota::Refused::SignIn) => {
+                return Ok(json_response(401, r#"{"error":"sign_in_required"}"#.to_string()));
+            }
+            Err(crate::quota::Refused::Limit { used, limit, remaining }) => {
+                return Ok(json_response(
+                    402,
+                    serde_json::json!({
+                        "error": "clip_limit_reached",
+                        "used": used,
+                        "limit": limit,
+                        "remaining": remaining,
+                    })
+                    .to_string(),
+                ));
+            }
+            Err(crate::quota::Refused::Unavailable(e)) => {
+                download::log_to_file(&format!("[QUOTA] reservation failed: {}", e));
+                return Ok(json_response(503, r#"{"error":"quota_unavailable"}"#.to_string()));
+            }
+        };
         if let Some(id) = &export_id {
             crate::export_control::begin(id);
         }
@@ -1478,6 +1562,7 @@ pub async fn handle_http(
                     "client_export_id": export_id,
                 }));
             }
+            crate::quota::settle(&app_for_export, export_id.as_deref(), reservation);
             if let Some(id) = &export_id {
                 crate::export_control::end(id);
             }
@@ -1487,10 +1572,13 @@ pub async fn handle_http(
 
     // Cancels one clip of a running export, or all of it when `clipIndex` is absent.
     if method == Method::POST && path == "/export-cancel" {
+        if !crate::agent_token::is_valid(&req) {
+            return Ok(text_response(401, "missing_agent_token"));
+        }
         if !origin_is_allowed(&req) {
             return Ok(text_response(403, "forbidden_origin"));
         }
-        let body_bytes = to_bytes(req.into_body()).await?;
+        let body_bytes = req.into_body().collect().await?.to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
         let Some(id) = body.get("client_export_id").and_then(|x| x.as_str()) else {
             return Ok(json_response(400, r#"{"error":"missing_client_export_id"}"#.to_string()));
@@ -1505,4 +1593,58 @@ pub async fn handle_http(
     }
 
     Ok(text_response(404, "not_found"))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_with_origin(origin: Option<&str>) -> Request<()> {
+        let mut b = Request::builder().uri("/download-all");
+        if let Some(o) = origin {
+            b = b.header("origin", o);
+        }
+        b.body(()).unwrap()
+    }
+
+    #[test]
+    fn only_the_app_and_localhost_may_call_the_agent() {
+        assert!(origin_is_allowed(&req_with_origin(None)));
+        assert!(origin_is_allowed(&req_with_origin(Some("tauri://localhost"))));
+        assert!(origin_is_allowed(&req_with_origin(Some("http://tauri.localhost"))));
+        assert!(origin_is_allowed(&req_with_origin(Some("http://localhost:3000"))));
+        assert!(!origin_is_allowed(&req_with_origin(Some("https://evil.example"))));
+        assert!(!origin_is_allowed(&req_with_origin(Some("https://localhost.evil.example"))));
+        assert!(!origin_is_allowed(&req_with_origin(Some("null"))));
+    }
+
+    #[test]
+    fn preview_proxy_refuses_local_and_private_targets() {
+        for blocked in [
+            "http://localhost:4000/ping",
+            "http://127.0.0.1/x",
+            "http://192.168.1.10/x",
+            "http://10.0.0.1/x",
+            "http://169.254.169.254/latest/meta-data",
+            "http://printer.local/x",
+            "http://[::1]/x",
+            "http://[::ffff:127.0.0.1]/x",
+            "http://[fd00::1]/x",
+            "http://0.0.0.0/x",
+            "not a url",
+        ] {
+            assert!(is_blocked_preview_target(blocked), "{blocked} should be blocked");
+        }
+        assert!(!is_blocked_preview_target("https://rr4---sn-2oh0j5-54.googlevideo.com/videoplayback?x=1"));
+    }
+
+    #[tokio::test]
+    async fn names_that_resolve_to_this_mac_are_refused() {
+        // localtest.me is public DNS that answers 127.0.0.1. Without DNS (offline CI)
+        // there is nothing to check.
+        if tokio::net::lookup_host("localtest.me:80").await.is_err() {
+            return;
+        }
+        assert!(resolves_to_blocked_ip("http://localtest.me/x").await);
+        assert!(!resolves_to_blocked_ip("https://www.youtube.com/").await);
+    }
 }

@@ -3,8 +3,12 @@
 ## How a release happens today
 
 ```
+0. If the release needs a database change, apply its supabase/migrations/ file first
+   (supabase/README.md). The live database must accept both the old and the new app.
 1. Bump the version in both places (below) and push to main.
 2. Wait for "Release check" to go green on that commit (Actions tab, ~10 min).
+2b. If resolve, preview or export changed: stage the build (below), sign in with a test
+    account, run scripts/export-regression.sh. Every case must say "ok".
 3. git tag v0.1.29 && git push origin v0.1.29
    → .github/workflows/release.yml
        job "preflight"        (macos-latest)  the same Release check, run again
@@ -31,6 +35,8 @@ in about ten minutes, everything that has ever made a release fail late:
 - the pinned yt-dlp and ffmpeg download and verify; ffmpeg passes
   `scripts/smoke-test-ffmpeg.sh` (the app's real export commands)
 - the frontend builds and the app compiles for release
+- the unit tests pass (`cargo test`: retry rules, cancel bookkeeping, origin and preview
+  proxy guards, export height selection)
 
 What it cannot check: notarization itself (Apple's verdict on the finished app) and the
 upload steps. Those can still fail, but no longer because of a credential or a binary.
@@ -121,9 +127,11 @@ installs can never auto-update again — they must be manually re-downloaded. Sa
 
 ## Windows
 
-Unsigned. `continue-on-error: true`, so a Windows failure does not fail the release. The
-job **downloads ffmpeg and yt-dlp at build time** from `latest` upstream releases, which
-means two Windows builds of the same tag are not guaranteed to contain the same binaries.
+Unsigned. `continue-on-error: true`, so a Windows failure does not fail the release.
+ffmpeg and yt-dlp are pinned by hash in `tools.lock`, like macOS: ffmpeg is BtbN's GPL
+build mirrored unchanged as a pre-release of this repo (`FFMPEG_WINDOWS_BUILD`), fetched by
+`scripts/fetch-ffmpeg.sh windows`. The Windows build cannot be compiled on a Mac (a C
+dependency needs the Windows SDK), so Windows-only code is checked by the release job.
 
 There are two near-identical Windows jobs (`release-windows`, `release-windows-only`)
 differing only in trigger and how the tag is derived — roughly 80 duplicated lines.

@@ -150,6 +150,57 @@ fn preview_url_is_playable(url: &str) -> bool {
     }
 }
 
+/// What the export panel may offer, from the source's formats.
+#[derive(Debug, PartialEq)]
+struct ExportHeights {
+    /// Tallest H.264 rendition: the ceiling for a stream copy and for an in-app preview,
+    /// the only codec both a plain MP4 remux and WKWebView handle.
+    max_h264_height: i64,
+    /// Tallest rendition "Fast" export can stream-copy into MP4.
+    fast_max_height: i64,
+    /// Tallest rendition of any codec.
+    true_max_height: i64,
+    /// Reaching `true_max_height` needs a re-encode.
+    true_max_requires_reencode: bool,
+}
+
+fn export_heights(formats: &[Value]) -> ExportHeights {
+    let max_h264_height = formats
+        .iter()
+        .filter(|f| is_h264(f))
+        .filter_map(|f| f["height"].as_i64())
+        .max()
+        .unwrap_or(0);
+
+    // "Fast" export stream-copies the source into MP4, so only H.264 renditions qualify.
+    // The container alone is not enough: YouTube publishes its VP9 and AV1 renditions in
+    // .mp4 too, and copying one of those produces a file most players and editors refuse.
+    let fast_max_height = formats
+        .iter()
+        .filter(|f| {
+            is_h264(f)
+                && matches!(f["ext"].as_str(), Some("mp4") | Some("ts"))
+                && f["height"].as_i64().unwrap_or(0) >= 360
+        })
+        .filter_map(|f| f["height"].as_i64())
+        .max()
+        .unwrap_or(0);
+
+    let true_max_height = formats
+        .iter()
+        .filter(|f| f["vcodec"] != "none")
+        .filter_map(|f| f["height"].as_i64())
+        .max()
+        .unwrap_or(0);
+
+    // Reaching the true maximum needs a re-encode whenever no H.264 rendition goes that
+    // high. Testing the container of whichever format happens to sort last was both wrong
+    // (AV1 and VP9 ship in .mp4) and unstable, since several formats share the top height.
+    let true_max_requires_reencode = true_max_height > 0 && true_max_height > max_h264_height;
+
+    ExportHeights { max_h264_height, fast_max_height, true_max_height, true_max_requires_reencode }
+}
+
 pub fn handle_resolve(url: String) -> String {
     let decoded_url = match decode(&url) {
         Ok(u) => u.into_owned(),
@@ -273,46 +324,15 @@ let parsed: Value = match serde_json::from_str(json_str) {
     label_unlabelled_formats(&mut formats_owned);
     let formats = &formats_owned;
 
-    // Tallest H.264 rendition in the source. This is the ceiling for anything that has to
-    // avoid a re-encode — a stream copy, and an in-app preview — because it is the only
-    // codec both a plain MP4 remux and WKWebView handle.
-    let max_h264_height = formats
-        .iter()
-        .filter(|f| is_h264(f))
-        .filter_map(|f| f["height"].as_i64())
-        .max()
-        .unwrap_or(0);
-
-    // "Fast" export stream-copies the source into MP4, so only H.264 renditions qualify.
-    // The container alone is not enough: YouTube publishes its VP9 and AV1 renditions in
-    // .mp4 too, and copying one of those produces a file most players and editors refuse.
-    let mut fast_export_heights: Vec<i64> = formats
-        .iter()
-        .filter(|f| {
-            is_h264(f)
-                && matches!(f["ext"].as_str(), Some("mp4") | Some("ts"))
-                && f["height"].as_i64().unwrap_or(0) >= 360
-        })
-        .filter_map(|f| f["height"].as_i64())
-        .collect();
-
-    fast_export_heights.sort_unstable();
-    let fast_max_height = fast_export_heights.last().cloned().unwrap_or(0);
+    let ExportHeights { max_h264_height, fast_max_height, true_max_height, true_max_requires_reencode } =
+        export_heights(formats);
 
     let mut any_video: Vec<(&Value, i64)> = formats
         .iter()
         .filter(|f| f["vcodec"] != "none")
         .filter_map(|f| f["height"].as_i64().map(|h| (f, h)))
         .collect();
-
     any_video.sort_by_key(|(_, h)| *h);
-
-    let true_max_height = any_video.last().map(|(_, h)| *h).unwrap_or(0);
-
-    // Reaching the true maximum needs a re-encode whenever no H.264 rendition goes that
-    // high. Testing the container of whichever format happens to sort last was both wrong
-    // (AV1 and VP9 ship in .mp4) and unstable, since several formats share the top height.
-    let true_max_requires_reencode = true_max_height > 0 && true_max_height > max_h264_height;
 
     let mut progressive: Vec<&Value> = formats
         .iter()
@@ -495,4 +515,57 @@ let parsed: Value = match serde_json::from_str(json_str) {
     });
 
     result.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn f(ext: &str, vcodec: &str, height: i64) -> Value {
+        json!({ "ext": ext, "vcodec": vcodec, "height": height })
+    }
+
+    #[test]
+    fn youtube_4k_offers_1080_fast_and_flags_4k_as_reencode() {
+        // YouTube's real ladder: H.264 stops at 1080p, VP9 and AV1 (also in .mp4) go to 2160p.
+        let formats = vec![
+            f("mp4", "avc1.4d401e", 360),
+            f("mp4", "avc1.4d401f", 720),
+            f("mp4", "avc1.640028", 1080),
+            f("webm", "vp9", 1440),
+            f("mp4", "av01.0.12M.08", 2160),
+            json!({ "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2" }),
+        ];
+        assert_eq!(
+            export_heights(&formats),
+            ExportHeights { max_h264_height: 1080, fast_max_height: 1080, true_max_height: 2160, true_max_requires_reencode: true }
+        );
+    }
+
+    #[test]
+    fn av1_in_mp4_is_never_a_fast_export() {
+        let formats = vec![f("mp4", "av01.0.08M.08", 1080), f("mp4", "avc1.4d401f", 720)];
+        let h = export_heights(&formats);
+        assert_eq!(h.fast_max_height, 720);
+        assert!(h.true_max_requires_reencode);
+    }
+
+    #[test]
+    fn twitch_hls_h264_counts_as_fast() {
+        let formats = vec![f("ts", "avc1.64002A", 1080), f("ts", "avc1.4D401F", 480)];
+        let h = export_heights(&formats);
+        assert_eq!((h.fast_max_height, h.true_max_height, h.true_max_requires_reencode), (1080, 1080, false));
+    }
+
+    #[test]
+    fn tiny_renditions_and_audio_only_sources() {
+        // Below 360p is not offered as a fast export height.
+        assert_eq!(export_heights(&[f("mp4", "h264", 240)]).fast_max_height, 0);
+        let audio_only = vec![json!({ "ext": "m4a", "vcodec": "none" })];
+        assert_eq!(
+            export_heights(&audio_only),
+            ExportHeights { max_h264_height: 0, fast_max_height: 0, true_max_height: 0, true_max_requires_reencode: false }
+        );
+    }
 }

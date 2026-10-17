@@ -2,7 +2,6 @@
 // Single source of truth for talking to the local ClipAgent
 
 export const CLIPAGENT_HTTP = "http://localhost:4000";
-export const CLIPAGENT_HTTPS = "https://localhost:4001";
 
 
 // Dev UI detection: allow HTTP in dev (localhost), require HTTPS in prod (Vercel)
@@ -18,6 +17,34 @@ export type AgentResult<T> =
   | { ok: false; error: string; agentState?: AgentState; status?: number; details?: string };
 
 type FetchOpts = RequestInit & { timeoutMs?: number; signal?: AbortSignal };
+
+let agentTokenPromise: Promise<string | null> | null = null;
+
+/** The per-launch secret the agent wants on endpoints that start work (agent_token.rs).
+ *  Only the app's own window can read it. */
+export function agentToken(): Promise<string | null> {
+  if (!agentTokenPromise) {
+    agentTokenPromise = (async () => {
+      if (typeof window === "undefined" || !(window as any).__TAURI__) return null;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        return await invoke<string>("agent_token");
+      } catch {
+        agentTokenPromise = null;
+        return null;
+      }
+    })();
+  }
+  return agentTokenPromise;
+}
+
+/** fetch() to the agent with its token attached. */
+export async function agentFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const token = await agentToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set("X-Klipprr-Token", token);
+  return fetch(url, { ...init, headers });
+}
 
 async function fetchWithTimeout(url: string, opts: FetchOpts = {}) {
   const { timeoutMs = 4000, signal: externalSignal, ...rest } = opts;
@@ -37,7 +64,7 @@ async function fetchWithTimeout(url: string, opts: FetchOpts = {}) {
   }
 
   try {
-    const res = await fetch(url, { ...rest, signal: ctrl.signal });
+    const res = await agentFetch(url, { ...rest, signal: ctrl.signal });
     return res;
   } finally {
     window.clearTimeout(t);
@@ -46,25 +73,6 @@ async function fetchWithTimeout(url: string, opts: FetchOpts = {}) {
     }
   }
 }
-
-/**
- * Prefer HTTPS, but allow HTTP fallback (dev / older agents).
- * Note: If HTTPS is not trusted by the browser yet, requests may fail with a network error.
- */
-export function getClipAgentBases() {
-  return [CLIPAGENT_HTTPS] as const;
-}
-
-// HTTPS is used ONLY for trust UI (window.open), never for fetch()
-export function getPrimaryClipAgentBase() {
-  return CLIPAGENT_HTTPS;
-}
-
-// For *detection* we must try HTTP first to distinguish "not running" from "untrusted TLS".
-export function getPingBases() {
-  return [CLIPAGENT_HTTP, CLIPAGENT_HTTPS] as const;
-}
-
 
 /**
  * --- Agent health ---
@@ -247,6 +255,9 @@ export interface ClipSpec {
 }
 
 export interface DownloadAllPayload {
+  /** The signed-in user's Supabase access token. The agent charges the export to this
+   *  account before it starts (quota.rs). */
+  access_token?: string | null;
   /** Client-generated export id to correlate progress events. */
   client_export_id?: string | null;
   /** Video title for naming whole-video export (when keep_full). */
@@ -340,12 +351,4 @@ export async function downloadAll(
   } catch {
     return { ok: false, error: "download_fetch_failed", agentState: "offline" };
   }
-}
-
-/**
- * --- TLS trust helper ---
- * Used only to intentionally trigger browser trust UI
- */
-export function openTrustPage() {
-  window.open(`${getPrimaryClipAgentBase()}/ping`, "_blank", "noopener,noreferrer");
 }
