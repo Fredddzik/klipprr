@@ -5,7 +5,7 @@ import { downloadAll, cancelExport as cancelExportRequest, type AgentResult } fr
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { releaseClipExports } from "@/lib/usage";
-import { offerSupportAfter } from "@/lib/support";
+import { offerSupportAfter, contactSupport } from "@/lib/support";
 
 interface Clip {
   id: string;
@@ -166,6 +166,21 @@ export default function ExportPanel({
    *  because the event listeners below are registered once and would see stale props. */
   const failReasonsRef = useRef<Record<number, string>>({});
   const exportMetaRef = useRef<string>("");
+  /** The clips this export was started with, so the failed ones can be retried. */
+  const exportClipsRef = useRef<Clip[]>([]);
+  /** Shown after an export in which some clips failed: retry them, or email us. */
+  const [retryOffer, setRetryOffer] = useState<{
+    clips: Clip[];
+    names: string[];
+    total: number;
+    okCount: number;
+    context: string;
+  } | null>(null);
+
+  // The offer belongs to the video it was exported from; a retry must not cut a new one.
+  useEffect(() => {
+    setRetryOffer(null);
+  }, [videoUrl, resolvedUrl, localFilePath]);
 
   /** What support needs to look into a failed export. */
   function exportSupportContext(problem: string): string {
@@ -230,21 +245,23 @@ export default function ExportPanel({
     const hadWatermark = exportHadWatermarkRef.current;
     const totalDuration = exportTotalDurationRef.current;
     const context = failedCount > 0 ? exportSupportContext(okCount > 0 ? "some clips failed" : "all clips failed") : "";
+    const failedIdx = Object.keys(failReasonsRef.current)
+      .map(Number)
+      .filter((i) => !!exportClipsRef.current[i])
+      .sort((a, b) => a - b);
+    const failedClips = failedIdx.map((i) => exportClipsRef.current[i]);
+    const failedNames = failedIdx.map((i) => exportClipsRef.current[i].name?.trim() || `Clip ${i + 1}`);
     onExportReservationComplete?.();
     clearExportingUI();
+    // Failed clips stay on screen with a Retry button instead of a dialog: the agent has
+    // already retried them, so a failure here is usually a platform refusing for a while.
+    if (failedClips.length > 0) {
+      setRetryOffer({ clips: failedClips, names: failedNames, total, okCount, context });
+    }
     if (okCount > 0) {
       if (onExportComplete && exportDir) onExportComplete(okCount, exportDir, hadWatermark, totalDuration);
-      // Partial failures used to pass silently behind the success message.
-      if (failedCount > 0) {
-        offerSupportAfter(
-          `${failedCount} of ${total} clips failed to export. The others were saved.`,
-          "Some clips failed to export",
-          context
-        );
-      }
     } else if (!allCancelled) {
       onExportFailed?.("all_clips_failed");
-      offerSupportAfter("Export failed. No clips were exported.", "Export failed", context);
     }
   }
 
@@ -374,8 +391,10 @@ export default function ExportPanel({
       console.warn("Folder dialog failed:", e);
     }
   }
-  async function doExport(selectedOnly: boolean) {
-    const chosen = selectedOnly
+  async function doExport(selectedOnly: boolean, retryClips?: Clip[]) {
+    const chosen = retryClips
+      ? retryClips
+      : selectedOnly
       ? clips.filter((c) => selectedClipIds.includes(c.id))
       : clips;
 
@@ -402,6 +421,8 @@ export default function ExportPanel({
     }
     onExportReservationStart?.(chosen.length);
 
+    setRetryOffer(null);
+    exportClipsRef.current = chosen;
     exportInProgressRef.current = true;
     exportClientIdRef.current = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     exportOkCountRef.current = 0;
@@ -808,7 +829,7 @@ export default function ExportPanel({
                 </div>
                 <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
                   <div
-                    className="h-full rounded-full transition-[width] duration-300 ease-linear"
+                    className="h-full transition-[width] duration-300 ease-linear"
                     style={{ width: `${qualityGlobal.percent}%`, background: "linear-gradient(90deg, #7c3cff 0%, #c935ff 60%, #ff2e92 100%)" }}
                   />
                 </div>
@@ -826,7 +847,7 @@ export default function ExportPanel({
                     </span>
                     <div className="flex-1 min-w-0 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
                       <div
-                        className={`h-full rounded-full transition-[width] duration-300 ease-linear ${
+                        className={`h-full transition-[width] duration-300 ease-linear ${
                           r.state === "running" && r.percent === 0 ? "animate-pulse" : ""
                         }`}
                         style={barStyle(r)}
@@ -902,6 +923,50 @@ export default function ExportPanel({
           ) : null}
         </div>
       </div>
+
+      {!isExporting && retryOffer && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 space-y-2">
+          <div className="flex items-start gap-2">
+            <p className="flex-1 min-w-0 text-sm text-zinc-200">
+              {retryOffer.okCount > 0
+                ? `${retryOffer.clips.length} of ${retryOffer.total} clips failed. The others were saved.`
+                : retryOffer.clips.length === 1
+                ? "The clip failed to export."
+                : "No clips were exported."}
+              <span className="block text-xs text-zinc-500 truncate" title={retryOffer.names.join(", ")}>
+                {retryOffer.names.join(", ")}
+              </span>
+            </p>
+            <button
+              type="button"
+              onClick={() => setRetryOffer(null)}
+              className="shrink-0 p-0.5 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition"
+              aria-label="Dismiss"
+              title="Dismiss"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => doExport(false, retryOffer.clips)}
+              className="flex-1 py-1.5 rounded text-xs font-semibold bg-zinc-100 text-zinc-900 hover:bg-white transition"
+            >
+              {retryOffer.clips.length === 1 ? "Retry" : `Retry ${retryOffer.clips.length} clips`}
+            </button>
+            <button
+              type="button"
+              onClick={() => void contactSupport("Some clips failed to export", retryOffer.context)}
+              className="py-1.5 px-3 rounded text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 transition"
+            >
+              Email us
+            </button>
+          </div>
+        </div>
+      )}
 
       {!isExporting && (
         <>

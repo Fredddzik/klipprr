@@ -5,6 +5,7 @@ export function useKeyboardShortcuts({
   onProgrammaticSeek,
   clips,
   markIn,
+  markOut,
   setMarkIn,
   setMarkOut,
   setClips,
@@ -19,6 +20,9 @@ export function useKeyboardShortcuts({
   onProgrammaticSeek?: (t: number) => void;
   clips: any[];
   markIn: number | null;
+  /** Set together with markIn after the Mark OUT button made a clip; the range stays on
+   *  the timeline, but no clip is open any more. */
+  markOut?: number | null;
   setMarkIn: (v: number | null) => void;
   setMarkOut: (v: number | null) => void;
   setClips: (fn: (prev: any[]) => any[]) => void;
@@ -139,16 +143,58 @@ export function useKeyboardShortcuts({
         return;
       }
 
+      const plainKey = !e.metaKey && !e.ctrlKey && !e.altKey;
+      const openIn = markOut == null ? markIn : null;
+
+      // I / O: the in and out keys every editor uses. I (re)sets the start, O closes the clip.
+      if (!editTarget && plainKey && e.key.toLowerCase() === "i") {
+        e.preventDefault();
+        pushHistory();
+        setMarkIn(video.currentTime);
+        setMarkOut(null);
+        showUndoToast("Mark IN");
+        return;
+      }
+
+      if (!editTarget && plainKey && e.key.toLowerCase() === "o") {
+        e.preventDefault();
+        if (openIn === null) {
+          showUndoToast("Press I to mark the start first");
+          return;
+        }
+        const t = video.currentTime;
+        if (Math.abs(t - openIn) < 0.05) {
+          showUndoToast("Move the playhead past the IN point");
+          return;
+        }
+        pushHistory();
+        setClips(prev => {
+          const start = Math.min(openIn, t);
+          const end = Math.max(openIn, t);
+          return [...prev, {
+            id: crypto.randomUUID(),
+            start,
+            end,
+            name: `Clip ${prev.length + 1}`,
+          }].sort((a, b) => a.start - b.start);
+        });
+        setMarkIn(null);
+        setMarkOut(null);
+        showUndoToast("Clip created");
+        return;
+      }
+
      // Mark IN / OUT toggle (M)
 if (!editTarget && e.key.toLowerCase() === "m") {
   e.preventDefault();
 
   const t = video.currentTime;
 
-  // No marks → set IN
-  if (markIn === null) {
+  // No open IN → set IN
+  if (openIn === null) {
     pushHistory();
     setMarkIn(t);
+    setMarkOut(null);
     showUndoToast("Mark IN");
     return;
   }
@@ -156,8 +202,8 @@ if (!editTarget && e.key.toLowerCase() === "m") {
   // IN exists → set OUT + create clip
   pushHistory();
   setClips(prev => {
-    const start = Math.min(markIn, t);
-    const end = Math.max(markIn, t);
+    const start = Math.min(openIn, t);
+    const end = Math.max(openIn, t);
 
     return [...prev, {
       id: crypto.randomUUID(),
@@ -178,6 +224,7 @@ if (!editTarget && e.key.toLowerCase() === "m") {
     return () => window.removeEventListener("keydown", handler, true);
   }, [
     markIn,
+    markOut,
     editTarget,
     undo,
     redo,

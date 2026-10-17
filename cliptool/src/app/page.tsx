@@ -437,6 +437,7 @@ useEffect(() => {
     },
     clips,
     markIn,
+    markOut,
     setMarkIn,
     setMarkOut,
     setClips,
@@ -1658,7 +1659,7 @@ useEffect(() => {
       updateInfo?.version && (
       <div className="fixed bottom-5 right-5 z-50 w-[360px] max-w-[calc(100vw-2.5rem)] rounded-md border border-zinc-800 bg-zinc-900 text-white shadow-xl p-4">
         <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
+          <div className="flex-1 min-w-0">
             <div className="text-sm font-semibold">
               {updateStatus === "downloading"
                 ? updateProgress?.phase === "installing"
@@ -1681,7 +1682,7 @@ useEffect(() => {
               <div className="mt-2 flex items-center gap-2">
                 <div className="flex-1 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
                   <div
-                    className={`h-full rounded-full bg-violet-500 transition-[width] duration-300 ease-linear ${
+                    className={`h-full bg-violet-500 transition-[width] duration-300 ease-linear ${
                       !updateProgress?.total ? "animate-pulse w-1/12" : ""
                     }`}
                     style={updateProgress?.total ? { width: `${Math.min(100, (updateProgress.received / updateProgress.total) * 100)}%` } : undefined}
@@ -1878,11 +1879,6 @@ useEffect(() => {
     <div className="shrink-0 px-4 py-3 border-b border-zinc-800 bg-zinc-900">
       <div className="flex items-center gap-3 flex-wrap">
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          {videoData && (
-            <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest px-2 py-1 rounded bg-zinc-800 shrink-0">
-              LIVE
-            </span>
-          )}
           <span className="text-zinc-600 text-sm shrink-0">URL</span>
           <input
             type="text"
@@ -1923,10 +1919,10 @@ useEffect(() => {
         )}
       </div>
       {loading && (
-        <div className="max-w-5xl mx-auto mt-2 space-y-1.5">
+        <div className="mt-2 space-y-1.5">
           <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
             <div
-              className="h-full rounded-full transition-all duration-500 ease-out"
+              className="h-full transition-all duration-500 ease-out"
               style={{
                 width: `${loadProgress}%`,
                 background: "linear-gradient(90deg, #7c3cff 0%, #c935ff 60%, #ff2e92 100%)",
@@ -2165,11 +2161,21 @@ useEffect(() => {
                   {editTarget
                     ? `Editing ${editTarget.field.toUpperCase()}`
                     : markIn === null && markOut === null
-                    ? "Mark IN (M)"
+                    ? "Mark IN (I)"
                     : markIn !== null && markOut === null
-                    ? "Mark OUT (M)"
-                    : "Mark IN (M)"}
+                    ? "Mark OUT (O)"
+                    : "Mark IN (I)"}
                 </button>
+                {!editTarget && (
+                  <span
+                    className="self-center ml-auto text-[11px] text-zinc-500 whitespace-nowrap"
+                    title="M also toggles IN and OUT. Arrow keys jump 5 seconds; with ⌘ they step one frame."
+                  >
+                    <kbd className="font-sans text-zinc-400">I</kbd> in · <kbd className="font-sans text-zinc-400">O</kbd> out ·{" "}
+                    <kbd className="font-sans text-zinc-400">Space</kbd> play · <kbd className="font-sans text-zinc-400">← →</kbd> 5s ·{" "}
+                    <kbd className="font-sans text-zinc-400">⌘Z</kbd> undo
+                  </span>
+                )}
                 {editTarget && (
                   <div className="flex gap-2">
                     <button

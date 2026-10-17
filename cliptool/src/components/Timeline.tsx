@@ -95,23 +95,20 @@ export default function Timeline({
         isDragging ? "cursor-grabbing" : "cursor-pointer"
       }`}
       onMouseDown={(e) => {
-        // clicking timeline seeks immediately
+        // Pressing anywhere on the track grabs the playhead: seek now, follow the drag.
+        if (e.button !== 0) return;
+        e.preventDefault();
+        setIsDragging(true);
         seekFromClientX(e.clientX);
       }}
     >
       <div className="relative h-5">
         {/* PLAYHEAD */}
         <div
-          className="absolute left-0 flex flex-col items-center cursor-ew-resize"
+          className="absolute left-0 flex flex-col items-center pointer-events-none z-10"
           style={{
             left: `${(currentTime / duration) * 100}%`,
             top: 0,
-          }}
-          onMouseDown={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setIsDragging(true);
-            seekFromClientX(e.clientX);
           }}
         >
           {/* line (inside track) */}
@@ -122,9 +119,7 @@ export default function Timeline({
           {/* handle (below track) */}
           <div
             ref={playheadRef}
-            className={`absolute top-[20px] w-2 h-2 rounded-full bg-white shadow ${
-              isDragging ? "cursor-grabbing" : "cursor-grab"
-            }`}
+            className="absolute top-[20px] w-2 h-2 rounded-full bg-white shadow"
           />
         </div>
 
