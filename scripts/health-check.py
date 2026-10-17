@@ -51,10 +51,19 @@ GONE = re.compile(
 
 
 def run(cmd, timeout=180):
+    # Own process group, so a timeout also kills the ffmpeg yt-dlp started. Killing only
+    # yt-dlp once left an ffmpeg running for four days.
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         start_new_session=True)
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, p.stdout, p.stderr
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, out, err
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, 9)
+        except OSError:
+            pass
+        p.communicate()
         return 124, "", "timed out after %ds" % timeout
 
 

@@ -146,14 +146,16 @@ universal / watermarked:  bv*[height<=H] + ba / best      → re-encoded to H.26
 Up to **3 clips export in parallel**, each spawning its own yt-dlp + ffmpeg. Quota is
 reserved before the run and refunded on failure.
 
-### ⚠ The "Original" label is wrong
+**Refused downloads are retried.** YouTube refuses section downloads with a 403 now and
+then, in bursts of 20-30 seconds. `run_ytdlp_with_progress` (download.rs) tries every
+yt-dlp run up to three times, waiting 3 s and then 10 s, and each attempt extracts fresh
+stream URLs. Failures another attempt cannot fix (private, members-only, age-gated,
+"Requested format is not available", unsupported URL) are not retried; see
+`ytdlp_failure_is_permanent`. A cancel ends the wait at once. If a clip still fails, the
+export panel keeps it on screen with **Retry** and **Email us** instead of a dialog.
 
-The UI calls the stream-copy option **"AV1 – Original"** and warns it "may not play in
-QuickTime on older Macs". That is backwards: it is not *supposed* to be AV1. The selector
-asks for `ext=mp4`, and YouTube's 1440p/2160p `.mp4` renditions are AV1/VP9, so at high
-caps the copy silently picks a codec the user cannot use. With `fast_max_height` now capped
-to the tallest H.264 rendition, the resolution picker no longer offers those heights in
-stream-copy mode — but **the label and the warning still need fixing**.
+The "Original" option is labelled "Original – no re-encode" and prefers H.264 (fixed in
+0.1.34 and 0.1.37); the selector above is simplified, the real one is in download.rs.
 
 ---
 

@@ -258,7 +258,9 @@ exports H.264; it now reads "Original – no re-encode", here and in Settings.
 
 **Known, not fixed:** YouTube intermittently refuses a download with 403 (1 of 18 YouTube
 exports in the run; 5 times in the log since September). Previews retry once; exports do
-not. Candidate follow-up: retry an export's yt-dlp download once on a 403.
+not. **Fixed 2026-10-17 (0.1.38):** every export download is retried up to three times
+(3 s, then 10 s apart), and clips that still fail get a Retry button. Founder hit it on a
+4-clip export ("clip 2: yt_dlp_failed").
 **Status:** `done`; ships in 0.1.37.
 
 ---
@@ -753,4 +755,14 @@ it may deserve to go first.
 | Overhaul + rebrand (FR-4) | 1, 7, 8, 9, 10, 11, plus `page.tsx` split | after user feedback |
 | Decide with users | 5 timeline zoom / ruler / thumbnails | ask the first heavy clippers |
 
-**Status:** `ready` (quick fixes); overhaul `parked` with FR-4.
+**Quick fixes done (2026-10-17, ships in 0.1.38):**
+- 2: pressing anywhere on the timeline grabs the playhead and follows the drag.
+- 3: progress fills start flush at the track's edge; the resolve bar spans the URL bar
+  instead of sitting in a centred column; the update bar fills the toast's width.
+- 4: the "LIVE" badge is gone. It showed on every loaded video and meant nothing (resolve
+  has no live flag).
+- 6: I sets IN, O closes the clip; M still toggles. A shortcut line sits next to the Mark
+  button. Also fixed: M after the Mark buttons made a clip used the old IN again and
+  produced a duplicate clip.
+
+**Status:** quick fixes `done`; overhaul `parked` with FR-4.
