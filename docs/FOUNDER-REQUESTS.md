@@ -557,7 +557,22 @@ sign in.
 
 **Effort:** M. **Risk:** medium: sign-in is on the path to every export, so it needs an
 end-to-end test on a clean Mac before shipping.
-**Status:** `ready`.
+
+**Done first, in klipprr-web `2a0392f` (2026-10-15, live):** the problems the first paying
+customer actually hit on 2026-10-07.
+- App and browser no longer share one session (refresh-token rotation logged both out):
+  every hand-off into the app mints its own session via `/api/auth/app-session`, so
+  Upgrade from the app no longer asks for a login.
+- "Resend the link" keeps the redirect, so the confirmation email returns to the app
+  instead of the homepage; a homepage handler forwards any that still land there.
+- Login page: Sign in / Create account tabs; a failed sign-in offers to create the account;
+  "Create account" with an existing email signs in; resend cannot fire twice.
+- Signup asks "How did you hear about Klipprr?" (`6abeb00`).
+
+No one has signed up since (checked 2026-10-18), so the fix is unproven with a real user.
+
+**Status:** customer-facing friction `done`; the security half (PKCE, `state`, Keychain,
+server-side sign-out, loopback or Universal Link redirect) is `ready`, not urgent.
 
 ---
 
