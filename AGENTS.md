@@ -79,6 +79,9 @@ docs/                  You are here
 
 ## Index
 
+- `docs/CONTEXT-BRIEFING.md` — both repos in one pass: stack, structure, data model, conventions,
+  integrations, tech debt. Read it when you need the whole picture; read the focused docs below when
+  you are changing something. Snapshot of 2026-10-18, so check anything load-bearing against the code
 - `docs/PRODUCT.md` — who this is for, what they are trying to do, plans and limits
 - `docs/ARCHITECTURE.md` — processes, boundaries, data flow, cross-repo changes
 - `docs/PIPELINES.md` — resolve → preview → export in detail, and the accuracy invariants
