@@ -1,6 +1,31 @@
 # Context Briefing — Klipprr (desktop + web)
 
-_Produced 2026-10-18 by reading `~/dev/klipprr` and `~/dev/klipprr-web` and verifying claims against source. Read-only: no project file was changed._
+_Produced 2026-10-18 by reading `~/dev/klipprr` and `~/dev/klipprr-web` and verifying claims against source._
+
+**Verification status (2026-10-18, second pass).** The first pass read the structural claims
+off the code but took a good share of the prose from `docs/ARCHITECTURE.md` and
+`docs/PIPELINES.md` on trust, and both have since proved stale (Warnings 25, 26). So
+**Architectural Patterns, Data Model, Infrastructure Constraints and the pipeline invariants
+were re-checked against code and config**, and six claims were wrong: clips export 4-up not
+3-up, `/download-all` answers 202 rather than running to completion in-request, only ffmpeg
+has a hash in `tools.lock`, A5 is closed, there are three custom hooks not two, and there are
+five preview paths not four. All six are corrected in place below.
+
+Verified against source and **correct as stated**: the three `http.rs` guard layers and
+exactly which four endpoints require the agent token; the yt-dlp retry schedule (3 s then
+10 s, three attempts in all); the preview tiering (360p full-length, background 720p, 4 s
+poll, `avc1`+`m4a`, one-hour lock abandonment); the quota flow (agent reserves and refunds,
+UI only pre-checks) and every limit in `reserve_clip_exports` (500/120/10, `FOR UPDATE`,
+`p_plan` ignored, refund cap `greatest(5, limit/4)` within 24 h); the webhook licence rules
+(`past_due` counts as active, plan from price id); the web CSP header set, the `/api/track`
+60-per-60 s limit and the cron schedule; log rotation, the 09:30 launchd check and the
+disabled webview CSP.
+
+**Not verified**, and stated on the strength of the source docs alone: the Conventions
+section, the Integration Points event taxonomy, The Four Promises, and the historical
+narrative in Warnings 7–14 (dates, customer anecdotes, past incidents). Treat those as
+report, not fact. Row counts anywhere in either repo are a snapshot of the day they were
+taken.
 
 Klipprr is **one product across two git repositories plus one shared Supabase project**. Neither repo is complete on its own: licensing, plans and quota span all three. Treat "which of the three does this change touch" as the first question on any task.
 
@@ -157,9 +182,9 @@ next.config.ts                 security headers, CSP, www/http redirects
 - **Routing (UI)**: Next.js file-based, but effectively a single page — `src/app/page.tsx` plus modals.
 - **Why a local HTTP server instead of Tauri IPC**: `<video>` needs a URL it can issue **Range** requests against, and Tauri IPC cannot serve a seekable byte stream. Once HTTP existed for `/local-preview`, the rest followed. Documented as a deliberate, defensible choice.
 - **Data fetching**: UI → `fetch` to `http://127.0.0.1:4000` through the typed client `src/lib/clipagent.ts`. That file is the contract between TypeScript and Rust.
-- **State management**: none. React `useState`/`useRef` concentrated in `page.tsx`; two custom hooks (`useUndoRedo`, `useAppUpdate`). No Redux/Zustand/Context store.
+- **State management**: none. React `useState`/`useRef` concentrated in `page.tsx`; three custom hooks (`useUndoRedo`, `useAppUpdate`, `useKeyboardShortcuts`). No Redux/Zustand/Context store.
 - **Component pattern**: feature components under `src/components/`, flat, no index barrels, props drilled from `page.tsx`.
-- **Concurrency**: `/resolve` runs under `spawn_blocking`; up to **3 clips export in parallel**, each spawning its own yt-dlp + ffmpeg.
+- **Concurrency**: `/resolve` and the export both run under `spawn_blocking`; up to **4 clips export in parallel** (`min(4, total_clips)` in `download.rs`), each spawning its own yt-dlp + ffmpeg. Note the comment directly above that line still says 3 and "Capped at 3" — the code is the authority, and the comment is stale (verified 2026-10-18).
 - **Persistence**: `storage.rs` writes license, Supabase session and export path to the app data dir.
 
 #### The agent API (`clipagent/src-tauri/src/http.rs`, 127.0.0.1:4000, plain HTTP)
@@ -175,7 +200,7 @@ next.config.ts                 security headers, CSP, www/http redirects
 | `/yt-preview-cache` | GET | build a merged local preview (`q`, `full`, `hq`, `bg`) | **yes** |
 | `/yt-dash.mpd` | GET | MPD for the Shaka/MSE DASH path (`dash.rs`) | no |
 | `/yt-proxy-status` | GET | poll the background high-quality preview | no |
-| `/download-all` | POST | the export; reserves quota, runs to completion | **yes** |
+| `/download-all` | POST | the export; reserves quota, answers 202 once started (401 unsigned, 402 over limit) | **yes** |
 | `/export-cancel` | POST | cancel a running export | **yes** |
 
 Three guards, all in `http.rs`:
@@ -291,6 +316,8 @@ Usage is **reserved before the export and refunded on failure, by the agent itse
 
 ## Conventions
 
+_Not re-verified against source in the 2026-10-18 pass — read off the source docs. Spot-check before relying on any one line._
+
 1. **Documentation is the source of truth and is kept honest.** Both repos lead with an agent-facing entry file (`AGENTS.md`, `CLAUDE.md`) that indexes short, purpose-scoped docs. Facts have single homes: product facts in `docs/context/product.md`, company identity in `app/(legal)/legal-meta.ts`, plan limits in `reserve_clip_exports`. The rule is "change the source of truth, not the copy of it" — when you change one, grep for the others.
 
 2. **Comments explain *why*, never *what*, and carry history.** This is the dominant style in both repos and it is load-bearing. Examples verified in source:
@@ -320,8 +347,8 @@ Usage is **reserved before the export and refunded on failure, by the agent itse
 
 ### Desktop
 
-- **Apple Silicon only.** macOS ffmpeg/ffprobe are built arm64 (`ffmpeg-9.0.2-macos-arm64-r1`). Finding A5 in the September audit is that Intel binaries were shipping inside an Apple-Silicon-only app — check its current state before assuming either way.
-- **Bundled binaries are never committed.** `yt-dlp` (pinned `2026.08.19`), `ffmpeg`, `ffprobe` are fetched at build time by `scripts/fetch-*.sh` and verified against the hashes in `clipagent/src-tauri/tools.lock`. Committing yt-dlp weekly grew `.git` by ~350 MB. **Never commit anything to `clipagent/src-tauri/bin/` — ask first.**
+- **Apple Silicon only.** macOS ffmpeg/ffprobe are built arm64 (`ffmpeg-9.0.2-macos-arm64-r1`). Audit finding A5 (Intel binaries inside an Apple-Silicon-only app) is **closed as of 2026-10-18** — see Warnings 15 for why the remaining universal `yt-dlp` is not the waste it looked like.
+- **Bundled binaries are never committed.** `yt-dlp` (pinned `2026.08.19`), `ffmpeg`, `ffprobe` are fetched at build time by `scripts/fetch-*.sh`. They are verified differently, which matters: `tools.lock` carries a SHA-256 for ffmpeg only (`FFMPEG_MACOS_SHA256`, `FFMPEG_WINDOWS_SHA256`), while `yt-dlp` is checked against the `SHA2-256SUMS` yt-dlp publishes for that release — deliberately, since a hash committed here would only prove we downloaded what we downloaded last time. `tools.lock` holds yt-dlp's version and nothing else. Committing yt-dlp weekly grew `.git` by ~350 MB. **Never commit anything to `clipagent/src-tauri/bin/` — ask first.**
 - **ffmpeg is built, not downloaded.** `.github/workflows/build-ffmpeg.yml` (manual dispatch only) builds from pinned sources, runs the app's real command lines against the result (`smoke-test-ffmpeg.sh`), publishes it as a **pre-release** asset (never GitHub's "latest", which the website and updater read), then rewrites `tools.lock` in its own commit. Never edit those lines by hand. Windows ffmpeg is BtbN's GPL 9.0 build mirrored unchanged and pinned by hash, because BtbN's "latest" URL changes daily.
 - **The license public key is embedded at build time** from `KLIPPRR_LICENSE_ED25519_PUB_B64`. **Rotating the keypair stops every shipped app from verifying licenses until users update. Treat rotation as a release-blocking event.** The private key exists in two places, both needed: Vercel and the `redeem_activation_code` edge function.
 - **A dev build on macOS cannot resolve YouTube.** Outside a `.app` bundle the agent passes `--cookies-from-browser safari`, which macOS blocks, so every resolve returns `cookies_not_accessible` (`running_from_sandboxed_app()` keys off `".app/Contents/"` in the executable path). Stage a fake bundle to test the real path — recipe in `docs/PIPELINES.md#testing-resolve-locally`.
@@ -375,6 +402,8 @@ Usage is **reserved before the export and refunded on failure, by the agent itse
 
 ### Event taxonomy (`klipprr_` prefix, snake_case, past tense)
 
+_Not re-verified against source in the 2026-10-18 pass._
+
 | Event | Fired where | Key properties |
 |---|---|---|
 | `page_view` | every consented page load | path, title, referrer |
@@ -401,6 +430,8 @@ Purchases dedupe on the Stripe session id, which both the browser and the webhoo
 
 ## The Four Promises (product invariants that constrain design)
 
+_Quoted from `AGENTS.md`, not independently verified — these are intent, which is the one thing source cannot confirm._
+
 From `AGENTS.md`. These are not aspirations, they are acceptance criteria:
 
 1. **What you see is what you cut.** A timestamp in the preview must produce the same frame in the export. Preview *quality* may be lower; preview *timing* may not differ.
@@ -419,7 +450,7 @@ From `AGENTS.md`. These are not aspirations, they are acceptance criteria:
 
 **Why this is hard:** YouTube no longer publishes muxed formats reliably, and what it returns *varies between requests for the same video*. When `itag 18` is present it is sometimes degenerate — an empty body, or a header advertising the full duration with no decodable frames. That is the origin of the historical "black screen with the right duration" bug. Resolve therefore probes suspect URLs with `ffprobe -read_intervals "%+#2"` (~150 ms) and discards ones that decode nothing. Codec, not container, gates everything: YouTube ships **AV1 and VP9 inside `.mp4`**, which WKWebView cannot decode and which stream-copy into an `.mp4` most editors reject — so `is_h264()` drives `fast_max_height`, and `true_max_requires_reencode` is `true_max_height > max_h264_height`.
 
-There are **four preview paths** (streamed DASH via Shaka/MSE, direct stream through `/preview-stream`, native HLS passed straight to `<video>`, local merged via `/yt-preview-cache`, plus local file). **Knowing which one is active is the first debugging step.** Local previews fetch 360p full-length first, then swap in a background 720p; the format selector pins `avc1` + `m4a`. Previews cache in `$TMPDIR/clipagent_preview_cache/` keyed by URL hash + tier, with `.lock` sentinels that are treated as abandoned after an hour — without that, a hard quit pinned `/yt-proxy-status` at `"downloading"` forever for that URL.
+There are **five preview paths**: streamed DASH via Shaka/MSE, direct stream through `/preview-stream`, native HLS passed straight to `<video>`, local merged via `/yt-preview-cache`, and local file. **Knowing which one is active is the first debugging step.** (`PIPELINES.md` says "four" above a table of five — its count is wrong, not its table; left for a PIPELINES pass.) Local previews fetch 360p full-length first, then swap in a background 720p; the format selector pins `avc1` + `m4a`. Previews cache in `$TMPDIR/clipagent_preview_cache/` keyed by URL hash + tier, with `.lock` sentinels that are treated as abandoned after an hour — without that, a hard quit pinned `/yt-proxy-status` at `"downloading"` forever for that URL.
 
 ---
 
@@ -435,6 +466,8 @@ There are **four preview paths** (streamed DASH via Shaka/MSE, direct stream thr
 6. **An export has no resumability.** Nothing picks it up again if the app dies mid-run. ~~`/download-all` runs the whole export in one request... still a long-lived request~~ — **corrected 2026-10-18:** that was wrong on both counts. It runs under `spawn_blocking` (C5 fixed) *and* answers 202 as soon as the export has started, with progress, completion and errors arriving as events; no request is held open. The UI used to hold one open and the webview abandoned it on long exports, which is why it changed.
 
 ### Known weaknesses in the product itself
+
+_The mechanisms here were verified; the dates, incidents and customer anecdotes were not._
 
 7. **Preview delivery is the #1 product complaint and the one weak subsystem.** `/yt-preview-cache` downloads the **entire file** before responding — tens of seconds of spinner on a long source, nothing streams meanwhile. `/preview-stream` caches byte ranges on disk per session, so re-seeking is local, but the first visit to any region waits on the origin CDN and nothing survives a restart. There is no frame-level seek affordance; the timeline seeks by time only.
 8. **"Frame perfect" is not true yet, and marketing must not claim it.** Cuts are seconds with millisecond precision (`-ss {:.3}`), not frames. At 29.97 fps one frame is 33.4 ms, so cuts can be off by up to a frame, and **stream-copy cuts snap to the nearest keyframe** unless the segment is re-encoded. Closing the gap means snapping in/out to frame boundaries using the real `fps` from resolve, passing frame-derived timestamps to ffmpeg, and either accepting keyframe snapping in copy mode or re-encoding a short head segment. **A deliberate, documented gap.**
@@ -452,7 +485,7 @@ There are **four preview paths** (streamed DASH via Shaka/MSE, direct stream thr
 17. ~~**`klipprr/docs/ARCHITECTURE.md` undercounts the API.**~~ **Fixed 2026-10-18.** `/yt-dash.mpd` and `/export-cancel` were added to the table, which now lists all 11 paths in the `http.rs` dispatch chain.
 18. ~~**`klipprr-web/docs/context/architecture.md` route table is missing three live routes.**~~ **Fixed 2026-10-18.** `/tiktok-video-downloader`, `/about` and `/(legal)/open-source` were added, all three Static. Every other route under `app/` was checked against the table: the remaining 29 pages and all 10 API routes were already listed, so the table is now complete.
 19. ~~**`keyring` 3.6.3 is an unused Cargo dependency.**~~ **Fixed 2026-10-18 — removed.** A grep of the whole `src-tauri` tree (every `.rs` file including the `cfg`-gated blocks in `main.rs`, plus `build.rs`) found the crate named nowhere but its own `Cargo.toml` line. Removing it dropped 38 net lines from `Cargo.lock`; `cargo build` is green and all 13 tests pass. The keychain was never wired up — `storage.rs` still writes the license, Supabase session and export path to the app data dir, which is the intended behaviour as documented.
-20. **Row counts in `klipprr-web/docs/context/architecture.md` are dated "Sep 2026"** (22 profiles, 8 licenses, 17 usage rows, 3 activation codes, 78 email log rows, 2 waitlist). Treat them as historical. They can be refreshed against the live project through the Supabase connector.
+20. ~~**Row counts in `klipprr-web/docs/context/architecture.md` are dated "Sep 2026".**~~ **Refreshed 2026-10-18** from the live project through the Supabase connector (read-only): 27 profiles, 8 licenses, 18 usage rows, 3 export reservations, 4 activation codes, 88 email log rows, 0 unsubscribes, 2 waitlist. That table was also missing `export_reservations` entirely and still pointed at a klipprr-web migration path deleted earlier the same day; both fixed. Growth since September is ~5 signups and ~10 onboarding emails, so the numbers move slowly — but they are a snapshot, not a fact, and they go stale by definition.
 
 ### Non-obvious operational facts
 
@@ -476,6 +509,10 @@ recorded here when found, during a pass scoped to five items, and fixed straight
     `tokio::task::spawn_blocking` (`http.rs` ~1548), and `/download-all` also answers 202 as
     soon as the export starts rather than holding the request open. The note and the
     `/download-all` table row both say so now, and item 6 above was corrected to match.
+
+### Found 2026-10-18 while re-verifying the briefing against source
+
+27. **`cliptool/src/lib/usage.ts` still holds the pre-0.1.38 quota code, unused.** `reserveClipExports()` and `releaseClipExports()` are exported and call the `reserve_clip_exports` and `release_clip_exports` RPCs, but **nothing imports them** — only `getCurrentMonthlyUsage()` is called, from `page.tsx:556`, which is the pre-check. So the quota flow above is accurate in behaviour. The risk is latent, not live: `release_clip_exports` is the legacy RPC that refunds any number, which was finding C1, and a client-side caller is exactly how C1 worked. Deleting both functions would close the door; wiring either back up would reopen it. Found 2026-10-18.
 
 ---
 
