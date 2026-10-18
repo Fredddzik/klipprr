@@ -37,7 +37,7 @@ effects**, which is why audio-only export matters (see `FOUNDER-REQUESTS.md` #5)
 | "Get me this exact 15 seconds" | Works | Cut precision is millisecond, not frame — see PIPELINES invariants |
 | "Don't wreck the quality" | Works | "Original" mode is mislabeled and can emit AV1 |
 | "Let me find the moment fast" | **Weak** | Preview load and seek latency — the #1 complaint |
-| "Give me a batch of clips" | Works | Parallel export, up to 3 concurrent |
+| "Give me a batch of clips" | Works | Parallel export, up to 4 concurrent |
 | "Just the audio" | **Missing** | No audio-only export at all |
 | "Make it not look like a toy" | **Weak** | UI reads as hobbyist; blocks pro adoption |
 

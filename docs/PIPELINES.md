@@ -143,7 +143,9 @@ universal / watermarked:  bv*[height<=H] + ba / best      → re-encoded to H.26
                           / best[ext=mp4][height<=H] / best[height<=H]
 ```
 
-Up to **3 clips export in parallel**, each spawning its own yt-dlp + ffmpeg. Quota is
+Up to **4 clips export in parallel**, each spawning its own yt-dlp + ffmpeg. Not all four
+re-encode: each clip is probed after download and stream-copied when it is already
+H.264/AAC and unwatermarked, so the hardware encoder usually sees fewer than four. Quota is
 reserved before the run and refunded on failure.
 
 **Refused downloads are retried.** YouTube refuses section downloads with a 403 now and

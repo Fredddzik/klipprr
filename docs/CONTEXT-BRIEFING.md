@@ -184,7 +184,7 @@ next.config.ts                 security headers, CSP, www/http redirects
 - **Data fetching**: UI → `fetch` to `http://127.0.0.1:4000` through the typed client `src/lib/clipagent.ts`. That file is the contract between TypeScript and Rust.
 - **State management**: none. React `useState`/`useRef` concentrated in `page.tsx`; three custom hooks (`useUndoRedo`, `useAppUpdate`, `useKeyboardShortcuts`). No Redux/Zustand/Context store.
 - **Component pattern**: feature components under `src/components/`, flat, no index barrels, props drilled from `page.tsx`.
-- **Concurrency**: `/resolve` and the export both run under `spawn_blocking`; up to **4 clips export in parallel** (`min(4, total_clips)` in `download.rs`), each spawning its own yt-dlp + ffmpeg. Note the comment directly above that line still says 3 and "Capped at 3" — the code is the authority, and the comment is stale (verified 2026-10-18).
+- **Concurrency**: `/resolve` and the export both run under `spawn_blocking`; up to **4 clips export in parallel** (`min(4, total_clips)` in `download.rs`), each spawning its own yt-dlp + ffmpeg. The 4 is deliberate (0.1.21 introduced the parallel loop as "up to 4 concurrent clips" and the code has read `min(4, ..)` ever since); the comment above the line used to describe a cap of 3, which was a draft leftover, and was rewritten to match on 2026-10-18. `docs/PIPELINES.md` and `docs/PRODUCT.md` had inherited the 3 and were corrected in the same pass.
 - **Persistence**: `storage.rs` writes license, Supabase session and export path to the app data dir.
 
 #### The agent API (`clipagent/src-tauri/src/http.rs`, 127.0.0.1:4000, plain HTTP)
@@ -513,6 +513,17 @@ recorded here when found, during a pass scoped to five items, and fixed straight
 ### Found 2026-10-18 while re-verifying the briefing against source
 
 27. **`cliptool/src/lib/usage.ts` still holds the pre-0.1.38 quota code, unused.** `reserveClipExports()` and `releaseClipExports()` are exported and call the `reserve_clip_exports` and `release_clip_exports` RPCs, but **nothing imports them** — only `getCurrentMonthlyUsage()` is called, from `page.tsx:556`, which is the pre-check. So the quota flow above is accurate in behaviour. The risk is latent, not live: `release_clip_exports` is the legacy RPC that refunds any number, which was finding C1, and a client-side caller is exactly how C1 worked. Deleting both functions would close the door; wiring either back up would reopen it. Found 2026-10-18.
+
+28. ~~**The export concurrency comment in `download.rs` disagreed with the code.**~~
+    **Resolved 2026-10-18.** The comment said 3 twice, with reasons ("2–3 concurrent 1080p
+    encodes", "capped at 3 to avoid ISP throttling"), while the line read `min(4, ..)`.
+    The history settles it: `min(3` never existed in that file, and comment and code landed
+    together in 3f1047c (v0.1.21), whose message says "up to 4 concurrent clips". So the 4
+    is the intended value and the comment was a draft leftover, never a later divergence.
+    The code is unchanged and the comment now matches it, including why the encoder claim
+    does not bind at 4 (clips that are already H.264/AAC and unwatermarked are stream-copied,
+    not encoded) and that upstream refusals are handled by the yt-dlp retry, not the cap.
+    `docs/PIPELINES.md` and `docs/PRODUCT.md` had inherited the 3 and now say 4.
 
 ---
 

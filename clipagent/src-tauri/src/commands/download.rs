@@ -421,10 +421,16 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         };
         let needs_reencode_branch: bool = has_watermark || codec == "universal";
 
-        // Up to 3 clips run in parallel. Each clip spawns its own yt-dlp + ffmpeg;
-        // 3x memory and network is fine for typical batch exports and the M-series
-        // hardware encoder can sustain 2–3 concurrent 1080p encodes. Capped at 3 to
-        // avoid ISP throttling on long batches and stay polite to upstream sources.
+        // Up to 4 clips run in parallel. Each spawns its own yt-dlp + ffmpeg, so memory
+        // and network scale with this number. 4 is deliberate: it is what 0.1.21 shipped
+        // and described ("up to 4 concurrent clips"). The comment that stood here until
+        // 2026-10-18 said 3 and "capped at 3 to avoid ISP throttling"; that was a draft
+        // leftover rather than a later divergence, since the code has read min(4, ..) ever
+        // since the parallel loop landed. 4 clips is also not 4 hardware encodes:
+        // can_stream_copy_to_mp4 probes each clip after download and skips the re-encode
+        // when the source is already H.264/AAC and unwatermarked, so the M-series encoder
+        // usually sees fewer. Upstream refusals under concurrency are real, but they are
+        // absorbed by run_ytdlp_with_progress's three attempts, not by this cap.
         let max_concurrent: usize = std::cmp::min(4, total_clips.max(1));
         let sem: Arc<(Mutex<usize>, Condvar)> =
             Arc::new((Mutex::new(max_concurrent), Condvar::new()));
