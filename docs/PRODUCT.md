@@ -28,24 +28,81 @@ awareness) points at:
 3. **Occasional users** — one clip for a presentation or a group chat. The free tier.
 
 The founder is himself user type 1 and also uses the app to **pull audio for sound
-effects**, which is why audio-only export matters (see `FOUNDER-REQUESTS.md` #5).
+effects**, which is why audio-only export matters (`FOUNDER-REQUESTS.md` #5). It shipped as
+FR-5 in 0ea0de4: WAV is 48 kHz / 24-bit precisely because that is what the sound-effect use
+needs in an editor.
 
 ## The jobs users hire it for
 
+Every row below was re-verified against source on 2026-10-19 (see CONTEXT-BRIEFING
+findings 29-33). The file references are the authority; do not update a row from another
+doc.
+
 | Job | Today | Gap |
 |---|---|---|
-| "Get me this exact 15 seconds" | Works | Cut precision is millisecond, not frame — see PIPELINES invariants |
-| "Don't wreck the quality" | Works | "Original" mode is mislabeled and can emit AV1 |
-| "Let me find the moment fast" | **Weak** | Preview load and seek latency — the #1 complaint |
+| "Get me this exact 15 seconds" | Works | The length is exact; the start is not. Stream-copy exports begin at the nearest keyframe at or before the mark |
+| "Don't wreck the quality" | Works | High Quality with "Re-encode to H.264" off will stream-copy an AV1 or HEVC source into the MP4 |
+| "Let me find the moment fast" | Works | Latency not re-measured since FR-7. TikTok and sources with an unreadable DASH index still download before the first frame |
 | "Give me a batch of clips" | Works | Parallel export, up to 4 concurrent |
-| "Just the audio" | **Missing** | No audio-only export at all |
-| "Make it not look like a toy" | **Weak** | UI reads as hobbyist; blocks pro adoption |
+| "Just the audio" | Works | MP3 320k and WAV 48 kHz/24-bit; always forced into Speed mode, never watermarked or capped |
+| "Make it not look like a toy" | **Weak** | UI reads as hobbyist; blocks pro adoption. **[ASSUMPTION]** — a founder judgement, not a code fact |
+
+**Row 1, cut precision.** Clip length comes from ffmpeg `-t`/`-to` and is accurate: the
+regression suite asserts duration to within 0.35 s (`scripts/export-regression.sh`). The
+*start* is a different matter. Nothing can cut mid-GOP without re-encoding, so wherever the
+clip is stream-copied the output begins at the nearest keyframe at or before the mark —
+which on YouTube can be seconds early. That covers the local-file branch
+(`download.rs:338`), High Quality without a watermark (`download.rs:1500`), and the Speed
+path whenever `can_stream_copy_to_mp4` says yes (`media.rs:107`); in those, `-ss` sits
+before `-i` with `-c copy` and no `-copyts`, and where no `-ss` is passed at all the
+yt-dlp `--download-sections` boundary is keyframe-aligned for the same reason. Only
+re-encoded exports are millisecond-accurate — watermarked Free exports, Universal/H.264,
+and audio. **Nothing in the repo tests start accuracy**, only duration, so the real drift
+has never been measured. Do not market "exact" or "frame-perfect" cuts until it has been.
+
+**Row 2, Original mode.** The "mislabeled, can emit AV1" claim that stood here until
+2026-10-19 was false on both halves. The label was fixed in 0.1.34 and the button now reads
+"Original – no re-encode" with the honest subtitle "Copies the source's own H.264 stream"
+(`ExportPanel.tsx:690`). The format selector asks for `avc1` first and falls back through
+MP4 tiers (`download.rs:392`), `resolve.rs` counts only H.264 renditions toward the fast
+ceiling (unit test `av1_in_mp4_is_never_a_fast_export`), and if a deep fallback does hand
+back something else, `can_stream_copy_to_mp4` only copies when the codec is exactly `h264`
+— everything else is re-encoded. The one place AV1 still survives into an output is High
+Quality mode: `video_mp4_ok` there accepts `h264 | av1 | hevc`, so with the "Re-encode to
+H.264" box unchecked an AV1/AAC source is remuxed as-is (`download.rs:1277`). That is the
+row's real gap.
+
+**Row 3, finding the moment.** The "#1 complaint" framing predates the preview rebuild and
+is not something the code can confirm either way. What the code now does: YouTube previews
+stream from a generated DASH manifest over the renditions resolve found (FR-7,
+`http.rs:1325`, `dash.rs`), media is fetched through `/preview-stream`, which caches byte
+ranges on disk (FR-2), and a 360p copy plays while a 720p one is merged in the background.
+The spinner is reached only for TikTok, which downloads a throwaway 60 s preview, and for
+DASH-only sources whose index will not probe, which fall back to a downloaded preview
+(`page.tsx:1855`). Re-measure before claiming latency as either a win or a gap.
 
 ## Plans and limits
 
-Defined in `cliptool/src/lib/usage.ts` and `plan.ts`, enforced server-side by the Supabase
-RPCs `reserve_clip_exports` / `release_clip_exports`, and mirrored in the desktop app by an
+The monthly clip limits live in `cliptool/src/lib/usage.ts`
+(`PLAN_MONTHLY_CLIP_LIMIT`) and, authoritatively, in the Supabase function itself
+(`supabase/migrations/20261017120000_export_reservations.sql`, which hard-codes 500 / 120 /
+10 and **ignores the `p_plan` argument**, looking the caller's plan up server-side). The
+capability flags are decided by the agent in `license.rs::capabilities_for_plan` and read
+by the UI over `get_capabilities` / `GET /capabilities`; `cliptool/src/lib/capabilities.ts`
+is only the TypeScript shape.
+
+Enforcement is server-side through the RPCs `reserve_clip_exports` and
+`release_export_reservation` (legacy `release_clip_exports` as a fallback), but the **caller
+is the agent, not the web app**: `quota::reserve` runs in the `/export` route before any
+source branch (`http.rs:1522`), and `quota::settle` refunds whatever did not export
+(`quota.rs:127`, `quota.rs:155`). `usage.ts` still exports unused client-side
+`reserveClipExports` / `releaseClipExports` wrappers from before 0.1.38 — see
+CONTEXT-BRIEFING finding 27. The plan itself is mirrored into the desktop app by an
 ed25519-signed license token.
+
+> There is no `cliptool/src/lib/plan.ts`. It was deleted on `main` in 1e9ed06 and the
+> `PLAN_CAPABILITIES` map it held exists nowhere in the tree. Earlier revisions of this
+> section cited it; they were stale.
 
 | | Free | Pro | Max |
 |---|---|---|---|
@@ -69,15 +126,19 @@ This is deliberate (founder decision, confirmed 2026-10-09), not a bug:
 - The watermark and the 720p cap are how Free differs from Pro **for URL sources only**.
 
 What still applies to local files: a free account is required to export, and each clip
-counts toward the monthly clip limit (`reserveExportQuota` in `page.tsx` does not
-distinguish sources).
+counts toward the monthly clip limit. The reservation is taken in the agent's `/export`
+route before the local-file branch is reached (`quota::reserve`, `http.rs:1522`), so it is
+unconditional and cannot be skipped by source. (It used to be `reserveExportQuota` in
+`page.tsx`; that function is gone — the agent took the quota over in 0.1.38.)
 
 Do not "fix" this by adding the watermark or cap to local exports. If the free tier ever
 needs a stronger reason to upgrade, change it on purpose, as a pricing decision recorded here.
 
-**Known inconsistency:** `plan.ts::PLAN_CAPABILITIES` only defines `free` and `pro`. A `max`
-user resolved through that map falls through to whatever the caller defaults to. Rust
-(`license.rs::Plan`) and `usage.ts` both know `max`. This is a live bug, not a design.
+**Resolved 2026-10-19:** this section used to warn that `plan.ts::PLAN_CAPABILITIES` only
+defined `free` and `pro`, so a `max` user fell through to the caller's default. That bug is
+gone, because the map is gone with the file. The one authority on capabilities is now
+`license.rs::capabilities_for_plan`, which handles `pro` and `max` explicitly and treats
+everything else as free, and `usage.ts` and `license.rs::Plan` both still know `max`.
 
 **[ASSUMPTION]** Pricing, trial length, and billing cadence live in `klipprr-web` +
 Stripe and are not represented in this repo.

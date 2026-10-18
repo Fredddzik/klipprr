@@ -525,6 +525,82 @@ recorded here when found, during a pass scoped to five items, and fixed straight
     not encoded) and that upstream refusals are handled by the yt-dlp retry, not the cap.
     `docs/PIPELINES.md` and `docs/PRODUCT.md` had inherited the 3 and now say 4.
 
+### Found 2026-10-19 while verifying PRODUCT.md's "jobs users hire it for" table
+
+This pass continues the four 2026-10-18 passes above; it ran past midnight, hence the date.
+The table is what the founder reads to decide what to build and what to market, so all six
+rows were checked against source rather than against other docs. Two were wrong, one was
+stale, two were right, and one is not a code claim at all.
+
+29. ~~**PRODUCT.md said audio-only export does not exist.**~~ **Fixed 2026-10-19.** The row
+    read `| "Just the audio" | **Missing** | No audio-only export at all |`. It shipped as
+    FR-5 in 0ea0de4, before 0.1.37: MP3 (libmp3lame, 320k) and WAV (pcm_s24le, 48 kHz) in
+    `download.rs:260`, with `yt_mp3`, `yt_wav` and `local_mp3` cases in
+    `scripts/export-regression.sh`. `FOUNDER-REQUESTS.md` FR-5 correctly says "Built
+    (2026-10-09)"; only PRODUCT.md was stale. **This is the expensive class of doc drift:
+    a shipped, founder-requested feature advertised internally as missing is a feature that
+    does not get marketed and might get built twice.** Also worth knowing: audio export
+    forces `mode = "speed"` regardless of what the UI asked for (`download.rs:232`, because
+    audio has no keyframe problem), and is never watermarked or resolution-capped.
+
+30. ~~**PRODUCT.md said "Original" mode is mislabeled and can emit AV1.**~~
+    **Fixed 2026-10-19.** False on both halves, and it was the stale half of the pair the
+    task flagged against `PIPELINES.md`. The label was fixed in 0.1.34/4722504: the button
+    reads "Original – no re-encode" with the subtitle "Copies the source's own H.264
+    stream" (`ExportPanel.tsx:690`, whose comment explicitly says the old AV1 label
+    described a bug that is gone). The selector asks `avc1` first (`download.rs:392`),
+    `resolve.rs::export_heights` counts only H.264 toward the fast ceiling (unit test
+    `av1_in_mp4_is_never_a_fast_export`), and `can_stream_copy_to_mp4` (`media.rs:107`)
+    copies only when the probed codec is exactly `h264`, so any deeper fallback is
+    re-encoded rather than emitted. **The residual truth:** High Quality mode's
+    `video_mp4_ok` accepts `h264 | av1 | hevc` (`download.rs:1277`), so with "Re-encode to
+    H.264" unchecked an AV1/AAC source *is* remuxed as AV1-in-MP4. That is now the row's
+    gap, and it is a different mode from the one the old row named.
+
+31. **PRODUCT.md's cut-precision row gave only half of warning item 8.** The row said
+    "Cut precision is millisecond, not frame", which is the frame half; it dropped the
+    keyframe half. Warning item 8 **already** records that "stream-copy cuts snap to the
+    nearest keyframe unless the segment is re-encoded", and that is the larger error of the
+    two: a frame is 33 ms at 29.97 fps, while a YouTube GOP is seconds. What this pass adds
+    is the specifics. The paths that pass `-ss` before `-i` with `-c copy` and no
+    `-copyts` are the local-file branch (`download.rs:338`), High Quality without a
+    watermark (`download.rs:1500`), and the Speed path whenever `can_stream_copy_to_mp4`
+    returns true (`media.rs:107`); only the re-encoding paths (watermarked Free, Universal,
+    audio) are millisecond-accurate. And **`scripts/export-regression.sh` asserts duration
+    to within 0.35 s but never checks the start timestamp**, so the drift is inferred from
+    the flags and has never actually been measured — consistent with warning item 9, which
+    lists the frame-accurate cut test as still open. PRODUCT.md row 1 now says the length
+    is exact and the start is not, and points at the untested part.
+
+32. **PRODUCT.md's preview row was stale rather than wrong.** It said `**Weak**` /
+    "Preview load and seek latency — the #1 complaint". Since then FR-7 (ae8148d) made
+    YouTube previews stream from a generated DASH manifest (`http.rs:1325`, `dash.rs`),
+    FR-2 (1b9d05f) gave `/preview-stream` an on-disk byte-range cache, and FR-9 (0a2af6c)
+    removed the DRM flash. The download-first path survives only for TikTok and for
+    DASH-only sources whose index will not probe (`page.tsx:1855`). The "#1 complaint"
+    ranking is user feedback and **cannot be confirmed or refuted from code either way** —
+    the row now describes the remaining fallback and says to re-measure.
+
+33. **PRODUCT.md's "Plans and limits" section cited a file that no longer exists.** It said
+    the plans are "Defined in `cliptool/src/lib/usage.ts` and `plan.ts`", and closed with a
+    "**Known inconsistency** ... this is a live bug" paragraph about
+    `plan.ts::PLAN_CAPABILITIES` only defining `free` and `pro`. **`cliptool/src/lib/plan.ts`
+    was deleted on `main` in 1e9ed06** and `PLAN_CAPABILITIES` appears nowhere in the tree,
+    so the bug died with the file: capabilities now come only from
+    `license.rs::capabilities_for_plan`, which handles `pro` and `max` explicitly. The
+    section also credited enforcement to the web app's RPC callers; it is the agent that
+    reserves (`quota::reserve` in `http.rs:1522`, before any source branch) and the refund
+    now prefers `release_export_reservation` over the legacy `release_clip_exports`. The
+    numbers themselves check out — 10 / 120 / 500 in `usage.ts` and hard-coded again in
+    `20261017120000_export_reservations.sql`, which **ignores `p_plan`** and looks the plan
+    up server-side, so `quota.rs` passing `"p_plan": "free"` is harmless. All corrected.
+    The stale `reserveExportQuota` citation in the local-files subsection went with it.
+
+**Two rows needed no change.** The batch row ("up to 4 concurrent") is correct as of
+74edbd9 and item 28. The UI-polish row ("UI reads as hobbyist") is a founder judgement with
+no code to verify it against, and is now tagged **[ASSUMPTION]** so a later pass does not
+try to settle it from source.
+
 ---
 
 ## Handoff
