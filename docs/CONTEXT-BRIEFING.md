@@ -141,7 +141,8 @@ lib/                           server-analytics 183, analytics 173, og-image 70,
 public/                        blog/ (11 .md posts), llms.txt, llms-full.txt,
                                demo.mp4, BingSiteAuth.xml, IndexNow key file
 scripts/                       check-claims.mjs (prebuild gate), indexnow-submit.mjs (postbuild)
-supabase/migrations/           4 pre-baseline files — see Warnings
+supabase/                      README.md pointer + migrations/ (4 reference-only
+                               pre-baseline files, never applied) — see Warnings 16
 vercel.json                    cron + two blog redirects
 next.config.ts                 security headers, CSP, www/http redirects
 ```
@@ -443,14 +444,14 @@ There are **four preview paths** (streamed DASH via Shaka/MSE, direct stream thr
 12. **The Windows waitlist has no fulfilment.** `waitlist` is never read by the email cron (it has no read policy by design), so the promised "we'll email you when Windows ships" has no implementation — tracked in `docs/legal/open-items.md`.
 13. **`app/page.tsx` duplicates the FAQ between JSON-LD and JSX.** Any FAQ edit has to be made twice, and they have drifted before.
 14. **The duplicated Windows CI job remains** (audit B3/C9); Windows ffmpeg is now pinned but the ~80 lines of duplication are not resolved.
-15. **Audit A5 is mostly closed, with one residue.** Verified on the local build drop: `ffmpeg` and `ffprobe` are `Mach-O 64-bit executable arm64` (arm64 only, correct). **`yt-dlp` is still a universal binary** carrying both `x86_64` and `arm64` — 37 MB where ~19 MB would do, in an app that only runs on Apple Silicon. `scripts/fetch-yt-dlp.sh` downloads whatever yt-dlp publishes for that release; thinning it with `lipo -thin arm64` after the checksum verification would save ~18 MB per download. Low priority, but it is the remaining half of A5.
+15. ~~**Audit A5 is mostly closed, with one residue.**~~ **Closed 2026-10-18 — the residue was a measurement error, not a problem.** `ffmpeg` and `ffprobe` are arm64 only (correct). `yt-dlp` *is* a universal binary, but the second slice is not a second copy of yt-dlp: `yt-dlp_macos` is a PyInstaller one-file build, and `lipo -detailed_info` shows the x86_64 slice is **73,808 bytes** of bootloader stub while the whole ~37 MB Python payload sits inside the arm64 slice (37,047,744 bytes). `lipo -thin arm64` was tested on a copy — it works, and saves **98,304 bytes — 96 KB, 0.26%**, not the ~18 MB this item originally claimed (that figure assumed each arch was half the file). **No lipo step was added to `scripts/fetch-yt-dlp.sh`:** mutating a checksum-verified binary that `release.yml` then codesigns, to save 96 KB, is risk without benefit. A5 is fully closed.
 
 ### Drift I found between the docs and the code (worth fixing)
 
-16. **Supabase migrations live in both repos.** `~/dev/klipprr/supabase/README.md` declares `~/dev/klipprr/supabase/` the source of truth as of 2026-10-17, but `~/dev/klipprr-web/supabase/migrations/` still holds 4 files (`20260430_email_unsubscribes`, `20260919_lock_down_trigger_functions`, `20260919_notify_signup_secret_from_vault`, `20260923_notify_signup_via_pg_net`) that duplicate, under different filenames, entries in `~/dev/klipprr/supabase/history/`. Two directories claiming the same database is how C5 happened in the first place. **Recommend: delete the klipprr-web copies with a pointer in their place, or document them as reference-only.**
-17. **`klipprr/docs/ARCHITECTURE.md` undercounts the API.** It says "11 endpoints" and its table lists 9 — `/export-cancel` and `/yt-dash.mpd` are missing from the table, though both are documented elsewhere. Actual count is 11.
-18. **`klipprr-web/docs/context/architecture.md` route table is missing three live routes**: `/tiktok-video-downloader` (386 lines, a real landing page), `/about` (155), and `/(legal)/open-source` (124).
-19. **`keyring` 3.6.3 is an unused Cargo dependency.** It is declared with `apple-native` and `windows-native` features but appears nowhere in `clipagent/src-tauri/src/` or `build.rs` — `storage.rs` writes to the app data dir instead. It contradicts the stated no-unnecessary-dependencies rule and costs build time. **Recommend: remove it, or wire the session/license into the keychain as presumably intended.**
+16. **Supabase migrations live in both repos.** `~/dev/klipprr/supabase/README.md` declares `~/dev/klipprr/supabase/` the source of truth as of 2026-10-17, but `~/dev/klipprr-web/supabase/migrations/` still holds 4 files (`20260430_email_unsubscribes`, `20260919_lock_down_trigger_functions`, `20260919_notify_signup_secret_from_vault`, `20260923_notify_signup_via_pg_net`) that duplicate, under different filenames, entries in `~/dev/klipprr/supabase/history/`. Two directories claiming the same database is how C5 happened in the first place. **Resolved 2026-10-18 as reference-only, not by deletion.** Diffing all four showed the klipprr-web copies are the *fuller* versions: every one carries why-comments its `history/` counterpart lacks, and `20260919_notify_signup_secret_from_vault.sql` is the only surviving copy of that function body — the `history/` entry is a three-line note with no SQL. Deleting them would have destroyed content. `klipprr-web/supabase/README.md` now names `~/dev/klipprr/supabase/` the source of truth and marks these four never-apply, so only one directory claims the database. **Still open:** port those four why-comments and the vault-era body into `klipprr/supabase/history/`, after which the klipprr-web copies can go.
+17. ~~**`klipprr/docs/ARCHITECTURE.md` undercounts the API.**~~ **Fixed 2026-10-18.** `/yt-dash.mpd` and `/export-cancel` were added to the table, which now lists all 11 paths in the `http.rs` dispatch chain.
+18. ~~**`klipprr-web/docs/context/architecture.md` route table is missing three live routes.**~~ **Fixed 2026-10-18.** `/tiktok-video-downloader`, `/about` and `/(legal)/open-source` were added, all three Static. Every other route under `app/` was checked against the table: the remaining 29 pages and all 10 API routes were already listed, so the table is now complete.
+19. ~~**`keyring` 3.6.3 is an unused Cargo dependency.**~~ **Fixed 2026-10-18 — removed.** A grep of the whole `src-tauri` tree (every `.rs` file including the `cfg`-gated blocks in `main.rs`, plus `build.rs`) found the crate named nowhere but its own `Cargo.toml` line. Removing it dropped 38 net lines from `Cargo.lock`; `cargo build` is green and all 13 tests pass. The keychain was never wired up — `storage.rs` still writes the license, Supabase session and export path to the app data dir, which is the intended behaviour as documented.
 20. **Row counts in `klipprr-web/docs/context/architecture.md` are dated "Sep 2026"** (22 profiles, 8 licenses, 17 usage rows, 3 activation codes, 78 email log rows, 2 waitlist). Treat them as historical. They can be refreshed against the live project through the Supabase connector.
 
 ### Non-obvious operational facts
@@ -460,9 +461,25 @@ There are **four preview paths** (streamed DASH via Shaka/MSE, direct stream thr
 23. **The license signing key is held in two places (Vercel and the `redeem_activation_code` edge function) and both are needed.** Not a mistake.
 24. **The Ed25519 claims object field order must match the Rust struct exactly.** Changing it silently invalidates every license.
 
+### More drift found 2026-10-18, while fixing 16–19
+
+Both are in `klipprr/docs/ARCHITECTURE.md`, in the same section as item 17, and both were
+left in place rather than fixed inside a scoped drift pass. Each is a one-line edit.
+
+25. **The `/preview-stream` row says "No caching." It caches.** `http.rs` answers a ranged
+    request from disk via `preview_cache::lookup()` and `serve_cached_preview()`. Item 7
+    above describes the caching correctly, so the table contradicts both the code and this
+    briefing. The row should say it caches byte ranges per session and that nothing
+    survives a restart.
+26. **The "Concurrency note" under the table is stale.** It says `/download-all` does
+    **not** run under `spawn_blocking` and "blocks a tokio worker for the entire export".
+    It does run under `tokio::task::spawn_blocking` (`http.rs` ~1548) — that is audit C5,
+    which item 6 above already records as fixed. The note should drop the claim and keep
+    only the long-lived-request caveat.
+
 ---
 
 ## Handoff
 
-- **Schema work**: the data model is coherent and RLS is thorough, but items 3 (two plan vocabularies) and 16 (migrations in two repos) are schema-adjacent inconsistencies. If either is in scope, load `architect/schema-design`.
-- **API work**: the agent's 11 endpoints are a hand-rolled chain with three guard layers and no formal contract document; `src/lib/clipagent.ts` is the de facto spec. If the API surface is being extended (or items 17 and the `/download-all` long-request shape are in scope), load `architect/api-design`.
+- **Schema work**: the data model is coherent and RLS is thorough. Item 3 (two plan vocabularies) is still open and schema-adjacent; item 16 (migrations in two repos) is resolved except for porting four comments into `history/`. If either is in scope, load `architect/schema-design`.
+- **API work**: the agent's 11 endpoints are a hand-rolled chain with three guard layers and no formal contract document; `src/lib/clipagent.ts` is the de facto spec. If the API surface is being extended (or the `/download-all` long-request shape, or items 25–26, are in scope), load `architect/api-design`.

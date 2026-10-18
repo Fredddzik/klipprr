@@ -57,7 +57,9 @@ when it ran on klipprr.com; it was removed in 0.1.38.) Three guards, all in http
 | `/local-proxy-status` | GET | Poll for the background 720p proxy of a local file. |
 | `/yt-preview-cache` | GET | Builds a merged local preview with yt-dlp. `q`, `full`, `hq`, `bg`. |
 | `/yt-proxy-status` | GET | Poll for the background high-quality preview of a URL. |
+| `/yt-dash.mpd` | GET | The MPD for the Shaka/MSE DASH path. Probes every rendition, built by `dash.rs`. |
 | `/download-all` | POST | The export. Takes the full clip list; runs to completion. |
+| `/export-cancel` | POST | Cancels one clip of a running export, or all of it when `clipIndex` is absent. |
 
 **Origin policy:** every endpoint except `/ping` checks `origin_is_allowed()`, which
 permits `localhost`, `127.0.0.1`, `tauri.localhost` and the `tauri:` scheme. Requests with
