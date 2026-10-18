@@ -52,13 +52,13 @@ when it ran on klipprr.com; it was removed in 0.1.38.) Three guards, all in http
 | `/ping` | GET | Liveness. The UI's "is the agent up" check. |
 | `/capabilities` | GET | Plan-derived feature flags from the verified license. |
 | `/resolve` | GET | URL → `{id, title, duration, thumbnail, preview, capabilities}`. Runs yt-dlp. |
-| `/preview-stream` | GET/HEAD | Range-forwarding proxy for a remote preview URL. **No caching.** |
+| `/preview-stream` | GET/HEAD | Range-forwarding proxy for a remote preview URL. Caches byte ranges on disk and serves re-seeks locally; wiped each run. |
 | `/local-preview` | GET | Serves a local file with Range support. Optional `pcm_fix=1`. |
 | `/local-proxy-status` | GET | Poll for the background 720p proxy of a local file. |
 | `/yt-preview-cache` | GET | Builds a merged local preview with yt-dlp. `q`, `full`, `hq`, `bg`. |
 | `/yt-proxy-status` | GET | Poll for the background high-quality preview of a URL. |
 | `/yt-dash.mpd` | GET | The MPD for the Shaka/MSE DASH path. Probes every rendition, built by `dash.rs`. |
-| `/download-all` | POST | The export. Takes the full clip list; runs to completion. |
+| `/download-all` | POST | The export. Takes the full clip list and answers 202 once it has started; progress arrives as events. |
 | `/export-cancel` | POST | Cancels one clip of a running export, or all of it when `clipIndex` is absent. |
 
 **Origin policy:** every endpoint except `/ping` checks `origin_is_allowed()`, which
@@ -66,8 +66,13 @@ permits `localhost`, `127.0.0.1`, `tauri.localhost` and the `tauri:` scheme. Req
 no `Origin` header are allowed (non-browser callers). `/preview-stream` additionally
 blocks private/loopback targets to prevent the proxy being used for SSRF.
 
-**Concurrency note:** `/resolve` runs under `spawn_blocking`. `/download-all` does **not**
-— it blocks a tokio worker for the entire export. See AUDIT.
+**Concurrency note:** `/resolve` and the export both run under `spawn_blocking`. An export
+drives yt-dlp and ffmpeg for minutes, and a tokio worker held that long starves `/ping` and
+`/local-preview` — that was audit C5, now fixed. `/download-all` answers 202 as soon as the
+export has started, so no request is held open for it: progress, completion and errors all
+arrive as events. The UI used to hold the request open, and the webview abandoned it on long
+exports. What remains is that an export has **no resumability** — nothing picks it up again
+if the app dies mid-run.
 
 ## The UI (`cliptool/`)
 

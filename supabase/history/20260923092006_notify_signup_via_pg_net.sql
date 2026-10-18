@@ -1,6 +1,13 @@
 -- The signup notification trigger called supabase_functions.http_request(), a schema
 -- created by Supabase's Database Webhooks feature and not present in this project. Every
--- signup therefore hit the exception handler and the founder was never told about any of
--- them. pg_net is the supported way to make an outbound HTTP call from Postgres.
+-- signup hit the exception handler and logged "schema supabase_functions does not exist".
+-- Signups kept working throughout — the founder was simply never told about any of them.
+--
+-- pg_net is the supported way to make an outbound HTTP call from Postgres. net.http_post
+-- queues the request and returns immediately, so a slow or failing edge function can never
+-- delay or block a registration.
+--
+-- Requires: a Vault secret `notify_webhook_secret` matching NOTIFY_WEBHOOK_SECRET on the
+-- edge function, and RESEND_API_KEY set in the edge function's secrets.
 create extension if not exists pg_net;
 -- Function body: see ../schema.sql, handle_new_signup_notification (identical).

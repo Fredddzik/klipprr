@@ -141,8 +141,8 @@ lib/                           server-analytics 183, analytics 173, og-image 70,
 public/                        blog/ (11 .md posts), llms.txt, llms-full.txt,
                                demo.mp4, BingSiteAuth.xml, IndexNow key file
 scripts/                       check-claims.mjs (prebuild gate), indexnow-submit.mjs (postbuild)
-supabase/                      README.md pointer + migrations/ (4 reference-only
-                               pre-baseline files, never applied) — see Warnings 16
+supabase/                      README.md pointer only — the schema of record is in
+                               klipprr/supabase/ (see Warnings 16)
 vercel.json                    cron + two blog redirects
 next.config.ts                 security headers, CSP, www/http redirects
 ```
@@ -432,7 +432,7 @@ There are **four preview paths** (streamed DASH via Shaka/MSE, direct stream thr
 3. **Two plan vocabularies still exist.** `usage.ts` knows `free|pro|max`; `plan.ts::PLAN_CAPABILITIES` knows only `free|pro`; Rust knows all three. **Do not add a fourth.** Still open.
 4. **Dev builds cannot resolve YouTube** (see Infrastructure).
 5. **`page.tsx` (2,243 lines) and `ExportPanel.tsx` (983) are where changes get expensive.** Splitting them is infrastructure work, not cosmetics (audit B1/C7; the rest of the split is parked with FR-4).
-6. **`/download-all` runs the whole export in one request.** It no longer blocks a tokio worker (C5 fixed), but it is still a long-lived request with no resumability.
+6. **An export has no resumability.** Nothing picks it up again if the app dies mid-run. ~~`/download-all` runs the whole export in one request... still a long-lived request~~ — **corrected 2026-10-18:** that was wrong on both counts. It runs under `spawn_blocking` (C5 fixed) *and* answers 202 as soon as the export has started, with progress, completion and errors arriving as events; no request is held open. The UI used to hold one open and the webview abandoned it on long exports, which is why it changed.
 
 ### Known weaknesses in the product itself
 
@@ -448,7 +448,7 @@ There are **four preview paths** (streamed DASH via Shaka/MSE, direct stream thr
 
 ### Drift I found between the docs and the code (worth fixing)
 
-16. **Supabase migrations live in both repos.** `~/dev/klipprr/supabase/README.md` declares `~/dev/klipprr/supabase/` the source of truth as of 2026-10-17, but `~/dev/klipprr-web/supabase/migrations/` still holds 4 files (`20260430_email_unsubscribes`, `20260919_lock_down_trigger_functions`, `20260919_notify_signup_secret_from_vault`, `20260923_notify_signup_via_pg_net`) that duplicate, under different filenames, entries in `~/dev/klipprr/supabase/history/`. Two directories claiming the same database is how C5 happened in the first place. **Resolved 2026-10-18 as reference-only, not by deletion.** Diffing all four showed the klipprr-web copies are the *fuller* versions: every one carries why-comments its `history/` counterpart lacks, and `20260919_notify_signup_secret_from_vault.sql` is the only surviving copy of that function body — the `history/` entry is a three-line note with no SQL. Deleting them would have destroyed content. `klipprr-web/supabase/README.md` now names `~/dev/klipprr/supabase/` the source of truth and marks these four never-apply, so only one directory claims the database. **Still open:** port those four why-comments and the vault-era body into `klipprr/supabase/history/`, after which the klipprr-web copies can go.
+16. ~~**Supabase migrations live in both repos.**~~ `~/dev/klipprr-web/supabase/migrations/` held 4 files (`20260430_email_unsubscribes`, `20260919_lock_down_trigger_functions`, `20260919_notify_signup_secret_from_vault`, `20260923_notify_signup_via_pg_net`) duplicating, under different filenames, entries in `~/dev/klipprr/supabase/history/`, while `klipprr/supabase/README.md` declared `klipprr/supabase/` the source of truth as of 2026-10-17. Two directories claiming the same database is how C5 happened in the first place. **Resolved 2026-10-18 — one directory claims the database again.** Diffing all four showed the klipprr-web copies were the *fuller* versions, so they could not simply be deleted: every one carried why-comments its `history/` counterpart lacked, and `20260919_notify_signup_secret_from_vault.sql` held the only surviving copy of that function body (its `history/` entry was three comment lines with no SQL). Those comments and that body were carried into `klipprr/supabase/history/`, then the four klipprr-web files were deleted; `klipprr-web/supabase/` is now a pointer README and nothing else. The recovered body is marked **never apply** in the file — it called `supabase_functions.http_request()`, which this project does not have, so applying it would re-break signup notifications. `history/README.md` records that those four files are no longer verbatim records of the live migrations.
 17. ~~**`klipprr/docs/ARCHITECTURE.md` undercounts the API.**~~ **Fixed 2026-10-18.** `/yt-dash.mpd` and `/export-cancel` were added to the table, which now lists all 11 paths in the `http.rs` dispatch chain.
 18. ~~**`klipprr-web/docs/context/architecture.md` route table is missing three live routes.**~~ **Fixed 2026-10-18.** `/tiktok-video-downloader`, `/about` and `/(legal)/open-source` were added, all three Static. Every other route under `app/` was checked against the table: the remaining 29 pages and all 10 API routes were already listed, so the table is now complete.
 19. ~~**`keyring` 3.6.3 is an unused Cargo dependency.**~~ **Fixed 2026-10-18 — removed.** A grep of the whole `src-tauri` tree (every `.rs` file including the `cfg`-gated blocks in `main.rs`, plus `build.rs`) found the crate named nowhere but its own `Cargo.toml` line. Removing it dropped 38 net lines from `Cargo.lock`; `cargo build` is green and all 13 tests pass. The keychain was never wired up — `storage.rs` still writes the license, Supabase session and export path to the app data dir, which is the intended behaviour as documented.
@@ -461,25 +461,25 @@ There are **four preview paths** (streamed DASH via Shaka/MSE, direct stream thr
 23. **The license signing key is held in two places (Vercel and the `redeem_activation_code` edge function) and both are needed.** Not a mistake.
 24. **The Ed25519 claims object field order must match the Rust struct exactly.** Changing it silently invalidates every license.
 
-### More drift found 2026-10-18, while fixing 16–19
+### More drift found 2026-10-18, while fixing 16–19 — both now fixed
 
-Both are in `klipprr/docs/ARCHITECTURE.md`, in the same section as item 17, and both were
-left in place rather than fixed inside a scoped drift pass. Each is a one-line edit.
+Both were in `klipprr/docs/ARCHITECTURE.md`, in the same section as item 17. They were
+recorded here when found, during a pass scoped to five items, and fixed straight after.
 
-25. **The `/preview-stream` row says "No caching." It caches.** `http.rs` answers a ranged
-    request from disk via `preview_cache::lookup()` and `serve_cached_preview()`. Item 7
-    above describes the caching correctly, so the table contradicts both the code and this
-    briefing. The row should say it caches byte ranges per session and that nothing
-    survives a restart.
-26. **The "Concurrency note" under the table is stale.** It says `/download-all` does
-    **not** run under `spawn_blocking` and "blocks a tokio worker for the entire export".
-    It does run under `tokio::task::spawn_blocking` (`http.rs` ~1548) — that is audit C5,
-    which item 6 above already records as fixed. The note should drop the claim and keep
-    only the long-lived-request caveat.
+25. ~~**The `/preview-stream` row says "No caching." It caches.**~~ **Fixed 2026-10-18.**
+    The row now says it caches byte ranges on disk and serves re-seeks locally, wiped each
+    run. `preview_cache.rs` is a sparse-file range cache with a 2 GB LRU budget whose
+    coverage map lives only in memory, which is exactly why the directory is wiped on first
+    use in a process — a file from a previous run has no map saying which bytes are real.
+26. ~~**The "Concurrency note" under the table is stale.**~~ **Fixed 2026-10-18, and it was
+    wrong about more than `spawn_blocking`.** The export does run under
+    `tokio::task::spawn_blocking` (`http.rs` ~1548), and `/download-all` also answers 202 as
+    soon as the export starts rather than holding the request open. The note and the
+    `/download-all` table row both say so now, and item 6 above was corrected to match.
 
 ---
 
 ## Handoff
 
-- **Schema work**: the data model is coherent and RLS is thorough. Item 3 (two plan vocabularies) is still open and schema-adjacent; item 16 (migrations in two repos) is resolved except for porting four comments into `history/`. If either is in scope, load `architect/schema-design`.
-- **API work**: the agent's 11 endpoints are a hand-rolled chain with three guard layers and no formal contract document; `src/lib/clipagent.ts` is the de facto spec. If the API surface is being extended (or the `/download-all` long-request shape, or items 25–26, are in scope), load `architect/api-design`.
+- **Schema work**: the data model is coherent and RLS is thorough, and `~/dev/klipprr/supabase/` is now the only place that claims the database (item 16 closed). Item 3 (two plan vocabularies) is the one schema-adjacent inconsistency still open. If it is in scope, load `architect/schema-design`.
+- **API work**: the agent's 11 endpoints are a hand-rolled chain with three guard layers and no formal contract document; `src/lib/clipagent.ts` is the de facto spec. If the API surface is being extended, load `architect/api-design`. The table and its concurrency note were brought back in line with `http.rs` on 2026-10-18 (items 17, 25, 26), so they can be trusted as a starting point; `/download-all`'s lack of resumability (item 6) is the one shape still worth revisiting.
