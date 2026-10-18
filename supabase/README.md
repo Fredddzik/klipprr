@@ -39,5 +39,5 @@ repository), and the repo copy no longer matched the live database.
 
 | Migration | Live? |
 |---|---|
-| 20261017120000_export_reservations | **pending** |
-| 20261017130000_cleanup_pg_net_and_duplicate_constraint | **pending** |
+| 20261017120000_export_reservations | applied 2026-10-18 |
+| 20261017130000_cleanup_pg_net_and_duplicate_constraint | applied 2026-10-18 |
