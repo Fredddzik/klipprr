@@ -781,3 +781,53 @@ it may deserve to go first.
   produced a duplicate clip.
 
 **Status:** quick fixes `done`; overhaul `parked` with FR-4.
+
+---
+
+## FR-16 — Local `.mkv` files (OBS recordings) cannot be loaded
+
+**Asked (2026-10-19):** *"can we make klipprr resolve .mkv local files?"* Found by recording
+in OBS and trying to clip it: the file selects and then fails to load. It opens in Premiere.
+
+**What is actually happening.** Two separate things, and the second is hidden behind the first.
+
+1. **Preview.** `loadLocalFile` (`cliptool/src/app/page.tsx:710`) hands the chosen file
+   **straight to `<video>`** as `/local-preview?path=…`, with `requiresLocalPreview: false`
+   and `localUpgradeHeight: 0`, commented "Local files are served straight from disk;
+   nothing to merge or upgrade." WKWebView cannot decode Matroska, so nothing plays and no
+   proxy is ever built. The picker offers `avi`, `webm` and `mkv` anyway
+   (`page.tsx:718`), so the app advertises three containers it cannot open. `.avi` and most
+   `.webm` fail the same way; Premiere works because it brings its own decoders.
+2. **Export, once preview is fixed.** ffmpeg reads Matroska fine, but the local branch keeps
+   the source container (`out_ext = ext`, `download.rs:329`) and Matroska has **no edit
+   list**, which is what hides the keyframe run-up on MP4. Measured: an 8 s request produced
+   a clip 4.033 s early and 12.233 s long (briefing item 34). Unreachable today only because
+   you cannot get past preview.
+
+**Why it is worth more than it looks.** OBS records `.mkv` by default — it is the safe choice
+against a crash mid-recording. So this is precisely the streamer and gamer segment the Twitch
+landing page is written for, and right now none of them can use the app on their own
+recordings.
+
+**What we should do.** Most of the machinery exists and this load path bypasses it:
+`/yt-preview-cache` already builds a merged local preview, `/local-proxy-status` already
+polls a background proxy for a local file, and `preview_cache.rs` already handles tiering and
+stale locks.
+
+1. **Detect it.** `get_local_video_info` already runs ffprobe for duration and codecs; have
+   it also report whether the container and codecs are something WKWebView can play.
+2. **Proxy the ones it cannot.** Build an MP4 proxy with the bundled ffmpeg and serve that
+   for preview, reusing the existing tiering, lock and status machinery rather than a new
+   path. Remux when the codecs allow it (H.264/AAC in Matroska is common from OBS, and
+   remuxing is near-instant); transcode only when they do not.
+3. **Fix the export container.** Force MP4 out for a non-MP4 source, or re-encode. These are
+   not equivalent: a remux only works for MP4-compatible codecs, and a forced re-encode
+   violates promise 2 unless the UI says so before the user commits.
+4. **Keep the export cutting from the original file**, never from the proxy (pipeline
+   invariant 3).
+
+**Sized M**, mostly reuse. The honest one-line interim, if this stays parked: drop `avi`,
+`webm` and `mkv` from the picker filter so the app stops offering what it cannot open.
+
+**Status:** `parked` — far future, at the founder's request (2026-10-19). The interim picker
+change is not parked and can go in any release.
