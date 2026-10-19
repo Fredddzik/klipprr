@@ -470,7 +470,7 @@ There are **five preview paths**: streamed DASH via Shaka/MSE, direct stream thr
 _The mechanisms here were verified; the dates, incidents and customer anecdotes were not._
 
 7. **Preview delivery is the #1 product complaint and the one weak subsystem.** `/yt-preview-cache` downloads the **entire file** before responding — tens of seconds of spinner on a long source, nothing streams meanwhile. `/preview-stream` caches byte ranges on disk per session, so re-seeking is local, but the first visit to any region waits on the origin CDN and nothing survives a restart. There is no frame-level seek affordance; the timeline seeks by time only.
-8. **"Frame perfect" needs one qualifier, and it is no longer the keyframe snap.** Cuts are seconds with millisecond precision (`-ss {:.3}`), not frames, so they can still be off by up to a frame. Stream-copy cuts do start at the keyframe at or before the mark — but ffmpeg writes an MP4 edit list that starts presentation at the mark, so **what plays begins where the user marked it**: measured 0.000-0.033 s on every path on 2026-10-19 (item 34). The keyframe run-up stays in the file as hidden pre-roll (3.0-5.2 s). The two things marketing must still respect: a tool that ignores `elst` sees that pre-roll (0.9-3.9 s early), and a `.mkv`/`.webm` **local** source has no edit list and really does start early (4.03 s) and run long. So "frame-accurate playback from MP4 sources" is defensible; unqualified "exact" is not, until the Matroska case is fixed.
+8. **"Frame perfect" needs one qualifier, and it is no longer the keyframe snap.** Cuts are seconds with millisecond precision (`-ss {:.3}`), not frames, so they can still be off by up to a frame. Stream-copy cuts do start at the keyframe at or before the mark — but ffmpeg writes an MP4 edit list that starts presentation at the mark, so **what plays begins where the user marked it**: measured 0.000-0.033 s on every path on 2026-10-19 (item 34). The keyframe run-up stays in the file as hidden pre-roll (3.0-5.2 s). The two things marketing must still respect: a tool that ignores `elst` sees that pre-roll (0.9-3.9 s early), and a `.mkv`/`.webm` **local** source has no edit list and really does start early (4.03 s) and run long. **Revised 2026-10-19 (item 35): the end is still off by a frame in copy mode.** The edit list fixes the start; the end timestamp does not, so `original` output runs one frame long while re-encode is exact. So the only claim that survives today is "frame-accurate in re-encode mode"; "frame-accurate playback from MP4 sources" needs item 35 fixed first, and unqualified "exact" also needs the Matroska case (item 36).
 9. **Tests are thin.** 13 Rust unit tests cover pure logic; `export-regression.sh` drives a running app through 11 export paths and now asserts each clip's **start** against the source as well as its duration and codecs (item 34), which closes the frame-accurate cut test (audit A3 item 2) for the 11 cases in the table — a `.mkv`/`.webm` local source is the gap it does not cover. The UI smoke test (audit A3 item 3) remains open. The web repo has **no tests at all**.
 10. **No error monitoring anywhere.** Production failures are visible only in Vercel logs, if someone looks.
 11. **The email cron does not scale.** `app/api/cron/email-sequence/route.ts` loads every user on every run and pages `listUsers` at 1,000. Fine at ~22 users, broken at 5,000. Its excluded-emails list is hard-coded and belongs in the database.
@@ -667,6 +667,47 @@ try to settle it from source.
     code trimmed `actual - desired` = 10.000 s off the front, landing within one frame. That
     is only correct because the padding is all at the front. If yt-dlp ever pads the tail,
     the same arithmetic would overshoot. The new start assertion is what would catch it.
+
+### Found 2026-10-19 by the founder, using the app
+
+Both came from Frederik's own use, not from a measurement pass, and both are things no
+automated check here would have caught: item 35 because every assertion in
+`export-regression.sh` measures the start and the duration to 0.15 s, which one frame at
+29.97 fps sits inside, and item 36 because nothing exercises the local-file load path at all.
+
+35. **In copy mode the clip runs one frame long. Re-encode is exact.** Observed on a
+    YouTube source in Speed mode: `original` output carries one extra frame at the end
+    against the same clip re-encoded. The code explains it exactly. Re-encode passes a
+    **duration** (`-t {:.3}`, `download.rs:835` and `:943`), so the encoder stops on the
+    right frame. `original` passes an **end timestamp** (`-to {:.3}` at `download.rs:339`
+    for local files, `--download-sections *{:.3}-{:.3}` at `:527`, `:631`, `:982` for URLs),
+    and with `-c copy` nothing can be cut mid-frame, so every frame that *starts* before
+    that timestamp is copied whole: a frame beginning at 7.974 s in an 8 s clip is included
+    and presents through 8.007 s. This is the **other half of warning item 8**, the half the
+    2026-10-19 measurement did not cover: the edit list fixed the start, and the end was
+    never checked. **Fix:** snap the end to a frame boundary using the real `fps` from
+    resolve before formatting it, i.e. `end = start + round((end - start) * fps) / fps`.
+    `fps` is not plumbed to that point today. Until then, "frame-accurate" should not be
+    claimed for copy mode even from MP4 sources — re-encode mode is the only exact path.
+
+36. **The file picker offers three containers the app cannot play.** `page.tsx:718` accepts
+    `mp4, mov, avi, webm, mkv, m4v`, but `loadLocalFile` hands the file **straight to
+    `<video>`** (`previewUrl` = `/local-preview?path=…`, with `requiresLocalPreview: false`
+    and `localUpgradeHeight: 0`, commented "Local files are served straight from disk;
+    nothing to merge or upgrade"). WKWebView cannot decode Matroska, so an OBS `.mkv`
+    selects fine and then fails to load, with no proxy ever built — confirmed by the founder
+    on a real OBS recording, which opens in Premiere but not in Klipprr. `.avi` and most
+    `.webm` are the same. **This makes item 34's Matroska export drift unreachable through
+    the UI:** you cannot get past the preview to export at all, so the 4.03 s drift is a
+    latent bug behind a dead end rather than a live one. It also means **OBS users cannot
+    use the app on their own recordings**, which is a larger miss than the drift, since OBS
+    records `.mkv` by default. Two fixes, and they are not the same decision:
+    - **Honest now, one line:** drop `avi`, `webm` and `mkv` from the picker filter, so the
+      app stops offering what it cannot open.
+    - **The actual feature:** build a local proxy for containers WKWebView cannot decode,
+      reusing the `/yt-preview-cache` and `/local-proxy-status` machinery that already
+      exists and that this load path bypasses. That makes item 34's drift reachable, so it
+      would have to be fixed in the same change.
 
 ---
 
