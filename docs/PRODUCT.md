@@ -40,7 +40,7 @@ doc.
 
 | Job | Today | Gap |
 |---|---|---|
-| "Get me this exact 15 seconds" | Works | The length is exact; the start is not. Stream-copy exports begin at the nearest keyframe at or before the mark |
+| "Get me this exact 15 seconds" | Works | Length and start both land on the mark, within one frame (measured 2026-10-19). Stream-copy MP4s keep the keyframe run-up as hidden pre-roll behind an edit list, so a tool that ignores `elst` sees the clip start early; a Matroska local source has no edit list and does start early |
 | "Don't wreck the quality" | Works | High Quality with "Re-encode to H.264" off will stream-copy an AV1 or HEVC source into the MP4 |
 | "Let me find the moment fast" | Works | Latency not re-measured since FR-7. TikTok and sources with an unreadable DASH index still download before the first frame |
 | "Give me a batch of clips" | Works | Parallel export, up to 4 concurrent |
@@ -49,16 +49,32 @@ doc.
 
 **Row 1, cut precision.** Clip length comes from ffmpeg `-t`/`-to` and is accurate: the
 regression suite asserts duration to within 0.35 s (`scripts/export-regression.sh`). The
-*start* is a different matter. Nothing can cut mid-GOP without re-encoding, so wherever the
-clip is stream-copied the output begins at the nearest keyframe at or before the mark —
-which on YouTube can be seconds early. That covers the local-file branch
-(`download.rs:338`), High Quality without a watermark (`download.rs:1500`), and the Speed
-path whenever `can_stream_copy_to_mp4` says yes (`media.rs:107`); in those, `-ss` sits
-before `-i` with `-c copy` and no `-copyts`, and where no `-ss` is passed at all the
-yt-dlp `--download-sections` boundary is keyframe-aligned for the same reason. Only
-re-encoded exports are millisecond-accurate — watermarked Free exports, Universal/H.264,
-and audio. **Nothing in the repo tests start accuracy**, only duration, so the real drift
-has never been measured. Do not market "exact" or "frame-perfect" cuts until it has been.
+start was measured on 2026-10-19 (CONTEXT-BRIEFING finding 34) and **it lands on the mark**:
+every path measured came in between 0.000 s and 0.033 s of the requested timestamp, at most
+one frame. The suite now asserts the start to within 0.15 s on every case, by matching the
+clip's first frame against the source at the mark.
+
+That holds for the stream-copy paths too, which is the part worth understanding before
+marketing it. Nothing can cut mid-GOP without re-encoding, so the local-file branch
+(`download.rs:338`), High Quality without a watermark (`download.rs:1500`) and the Speed
+path when `can_stream_copy_to_mp4` says yes (`media.rs:107`) all copy from the keyframe at
+or before the mark — and then write an MP4 edit list that starts presentation at the mark.
+The keyframe run-up stays in the file as hidden pre-roll (measured 3.0 s to 5.2 s) instead
+of appearing at the front of the clip. Re-encoded exports — watermarked Free exports,
+Universal/H.264, audio — seek exactly and carry no pre-roll.
+
+Two caveats, and they decide what the marketing copy can say:
+
+- **A tool that ignores MP4 edit lists sees the pre-roll.** Strip the edit list from the
+  same clips and they start 0.9 s to 3.9 s early and run long. So the cut is exact in
+  QuickTime, a browser and ffmpeg, and not guaranteed in an NLE that ignores `elst`.
+- **A Matroska local source has no edit list to hide behind.** The local-file branch keeps
+  the source extension, so an `.mkv` or `.webm` input gets neither a trim nor an edit list:
+  an 8 s request produced a clip **4.03 s early and 12.23 s long**. Only `.mp4` sources are
+  safe today.
+
+What is defensible today is "frame-accurate playback from MP4 sources", not an unqualified
+"exact" or "frame-perfect". Fix the Matroska case before dropping the qualifier.
 
 **Row 2, Original mode.** The "mislabeled, can emit AV1" claim that stood here until
 2026-10-19 was false on both halves. The label was fixed in 0.1.34 and the button now reads

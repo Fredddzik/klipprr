@@ -470,8 +470,8 @@ There are **five preview paths**: streamed DASH via Shaka/MSE, direct stream thr
 _The mechanisms here were verified; the dates, incidents and customer anecdotes were not._
 
 7. **Preview delivery is the #1 product complaint and the one weak subsystem.** `/yt-preview-cache` downloads the **entire file** before responding — tens of seconds of spinner on a long source, nothing streams meanwhile. `/preview-stream` caches byte ranges on disk per session, so re-seeking is local, but the first visit to any region waits on the origin CDN and nothing survives a restart. There is no frame-level seek affordance; the timeline seeks by time only.
-8. **"Frame perfect" is not true yet, and marketing must not claim it.** Cuts are seconds with millisecond precision (`-ss {:.3}`), not frames. At 29.97 fps one frame is 33.4 ms, so cuts can be off by up to a frame, and **stream-copy cuts snap to the nearest keyframe** unless the segment is re-encoded. Closing the gap means snapping in/out to frame boundaries using the real `fps` from resolve, passing frame-derived timestamps to ffmpeg, and either accepting keyframe snapping in copy mode or re-encoding a short head segment. **A deliberate, documented gap.**
-9. **Tests are thin.** 13 Rust unit tests cover pure logic; `export-regression.sh` drives a running app through 11 export paths. The frame-accurate cut test and the UI smoke test (audit A3 items 2 and 3) remain open. The web repo has **no tests at all**.
+8. **"Frame perfect" needs one qualifier, and it is no longer the keyframe snap.** Cuts are seconds with millisecond precision (`-ss {:.3}`), not frames, so they can still be off by up to a frame. Stream-copy cuts do start at the keyframe at or before the mark — but ffmpeg writes an MP4 edit list that starts presentation at the mark, so **what plays begins where the user marked it**: measured 0.000-0.033 s on every path on 2026-10-19 (item 34). The keyframe run-up stays in the file as hidden pre-roll (3.0-5.2 s). The two things marketing must still respect: a tool that ignores `elst` sees that pre-roll (0.9-3.9 s early), and a `.mkv`/`.webm` **local** source has no edit list and really does start early (4.03 s) and run long. So "frame-accurate playback from MP4 sources" is defensible; unqualified "exact" is not, until the Matroska case is fixed.
+9. **Tests are thin.** 13 Rust unit tests cover pure logic; `export-regression.sh` drives a running app through 11 export paths and now asserts each clip's **start** against the source as well as its duration and codecs (item 34), which closes the frame-accurate cut test (audit A3 item 2) for the 11 cases in the table — a `.mkv`/`.webm` local source is the gap it does not cover. The UI smoke test (audit A3 item 3) remains open. The web repo has **no tests at all**.
 10. **No error monitoring anywhere.** Production failures are visible only in Vercel logs, if someone looks.
 11. **The email cron does not scale.** `app/api/cron/email-sequence/route.ts` loads every user on every run and pages `listUsers` at 1,000. Fine at ~22 users, broken at 5,000. Its excluded-emails list is hard-coded and belongs in the database.
 12. **The Windows waitlist has no fulfilment.** `waitlist` is never read by the email cron (it has no read policy by design), so the promised "we'll email you when Windows ships" has no implementation — tracked in `docs/legal/open-items.md`.
@@ -600,6 +600,73 @@ stale, two were right, and one is not a code claim at all.
 74edbd9 and item 28. The UI-polish row ("UI reads as hobbyist") is a founder judgement with
 no code to verify it against, and is now tagged **[ASSUMPTION]** so a later pass does not
 try to settle it from source.
+
+### Measured 2026-10-19: where a clip actually starts
+
+34. **The cut lands on the mark. The keyframe snap is real but it is hidden inside the file,
+    not in what plays.** This is the one thing the PRODUCT.md pass (29-33) could not settle
+    from source, and warning item 8 had assumed the worst.
+
+    **Method.** Each path was reproduced with the bundled `ffmpeg`/`ffprobe`/`yt-dlp`
+    (`/Applications/Klipprr.app/Contents/Resources/bin`), invoked exactly as the app invokes
+    it, including the two-stage Speed pipeline (`yt-dlp --download-sections` then the remux)
+    and the `trim_tail_start` arithmetic. Drift was measured by matching the clip's first
+    frame against the source at the requested timestamp (32x18 grayscale thumbnails on a
+    30 Hz grid), or by waveform correlation for audio-only output. **These are not
+    end-to-end app exports:** the agent was running but had no signed-in session, so
+    `/download-all` refused every export with `sign_in_required` (`http.rs:1525`) and the
+    quota path never ran. The ffmpeg invocations and their inputs are the same, so the cut
+    behaviour is measured; the app's orchestration around it is not.
+
+    | Path | Cut by | Requested | Start drift | Hidden pre-roll |
+    |---|---|---|---|---|
+    | Speed, URL, `original` (`media.rs:107` true) | stream copy | 100 → 108 | **0.000 s** | 4.200 s |
+    | Speed, URL, `universal` | re-encode | 110 → 118 | **-0.033 s** | 0.000 s |
+    | Speed, URL, `mp3` | re-encode | 120 → 128 | **0.000 s** | n/a |
+    | High Quality, no watermark (`download.rs:1500`) | stream copy | 3 → 9 | **0.000 s** | 3.000 s |
+    | Local file, `original` (`download.rs:338`) | stream copy | 1 → 4 | **0.000 s** | 5.183 s |
+    | Local file, `mp3` | re-encode | 1 → 4 | **0.000 s** | n/a |
+
+    **Why the copy paths are accurate anyway.** `-ss` before `-i` with `-c copy` starts at
+    the keyframe at or before the mark, as expected — and then ffmpeg writes an MP4 **edit
+    list** (`elst`) that starts presentation at the mark. The run-up stays in the file: the
+    Speed `original` clip above holds 12.23 s of media and presents 8.02 s. Anything that
+    honours edit lists (QuickTime, ffmpeg/ffprobe, browsers) starts at the mark, which is
+    why the drift is zero. The same is true one stage earlier: yt-dlp's
+    `--download-sections` output already carries an edit list, which is why
+    `probe_duration_secs` reads 8.03 s rather than 12.23 s and `trim_tail_start` correctly
+    does **not** fire for that case.
+
+    **Where it does not hold.** Two places, both worth knowing before marketing "exact":
+
+    - **A tool that ignores the edit list.** Re-muxed with `-ignore_editlist 1`, the same
+      clips start 3.900 s (Speed `original`), 2.967 s (High Quality) and 0.867 s
+      (local file) early, and run correspondingly long. Some NLEs do ignore `elst`.
+    - **A local source in a Matroska container — a real bug.** The local-file branch keeps
+      the source extension (`out_ext = ext`, `download.rs:329`), and Matroska has no edit
+      list. `-ss 100 -to 108 -i src.mkv -c copy -y out.mkv` produced a clip **4.033 s early
+      and 12.233 s long** for an 8 s request. Both the start and the length are wrong, so
+      the existing duration assertion would catch it — but `CASES` has no `.mkv`/`.webm`
+      local case, so nothing exercises it. Not fixed here (this pass was scoped to the
+      measurement); fixing it means forcing an MP4 container or a re-encode for non-MP4
+      local sources.
+
+    **What the suite now asserts** (`scripts/export-regression.sh`): every case's start is
+    matched against the source at the mark and must be within `MAX_START_DRIFT` (0.15 s —
+    one frame of a 15 fps source plus the matcher's 33 ms grid), re-encode and copy alike,
+    because the edit list makes both accurate. Hidden pre-roll gets a per-case ceiling
+    instead (`cut` column: `exact` ≤ 0.25 s, `copy` ≤ 12 s) since that is the one quantity
+    that legitimately differs by path; it catches a cut that landed a whole GOP away without
+    making the copy cases permanently red. URL cases get their reference from
+    `yt-dlp -g`, and a case that cannot resolve one reports `start n/a` rather than failing.
+    Verified against a deliberately broken file (edit list stripped): measured 3.900 s and
+    failed, where the correct file measured 0.000 s and passed.
+
+    **One fragility this rests on.** The `universal` case went through `trim_tail_start`:
+    yt-dlp handed back an 18.000 s WebM (av1/opus, no edit list) for an 8 s request, and the
+    code trimmed `actual - desired` = 10.000 s off the front, landing within one frame. That
+    is only correct because the padding is all at the front. If yt-dlp ever pads the tail,
+    the same arithmetic would overshoot. The new start assertion is what would catch it.
 
 ---
 
