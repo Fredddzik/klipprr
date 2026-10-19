@@ -53,7 +53,8 @@ is FR-3 phase 3, sized M–L.
 seconds, continue the full-length download behind it, and show which part of the timeline
 is ready.
 
-**Decision (2026-09-10):** ship Phases 1+2 of FR-3. **Status:** `ready`
+**Decision (2026-09-10):** ship Phases 1+2 of FR-3. **Status:** `done`, superseded by FR-7
+(DASH streaming preview, 0.1.32): founder confirmed seeks under half a second.
 
 ---
 
@@ -158,7 +159,7 @@ marketing, that is its own work item — see `PIPELINES.md`.
 
 **Decision (2026-09-10):** **Phases 1 and 2 now.** Phase 3 (HLS) is deferred, not
 rejected — revisit once we see how phase 2 performs on long sources.
-**Status:** `ready`
+**Status:** `done`, superseded by FR-7 (DASH streaming preview, 0.1.32). HLS proxy not needed.
 
 ---
 

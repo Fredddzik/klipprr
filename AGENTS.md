@@ -63,8 +63,9 @@ docs/                  You are here
   passes `--cookies-from-browser safari`, which macOS blocks, and every resolve returns
   `cookies_not_accessible`. To test the real path, build a bundle or stage one — see
   `docs/PIPELINES.md#testing-resolve-locally`.
-- **Two plan vocabularies exist.** `usage.ts` knows `free|pro|max`; `plan.ts` knows only
-  `free|pro`. Rust knows all three. Do not add a fourth.
+- **Plans are `free|pro|max`** in `usage.ts`, Rust (`license.rs`) and Supabase. The UI's
+  `plan` state starts as "Free" until the licence loads (`accountLoading`): never derive a
+  limit or a refusal from it before then.
 - **Tests are thin.** `cargo test` covers the pure logic (13 tests, run in the Release
   check); `scripts/export-regression.sh` drives a running app through every export path.
   Anything else you change, you verify by running it.

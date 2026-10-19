@@ -38,6 +38,7 @@ import type { Capabilities } from "@/lib/capabilities";
 import {
   getCurrentMonthlyUsage,
   normalizePlan,
+  PLAN_MONTHLY_CLIP_LIMIT,
 } from "@/lib/usage";
 import { track, type AnalyticsBase } from "@/lib/analytics";
 import {
@@ -78,7 +79,18 @@ export default function HomePage() {
     subscribeCtaVariant: "control",
     pricingProCtaVariant: "control",
   });
-  const [usage, setUsage] = useState<{ used: number; limit: number; remaining: number } | null>(null);
+  /** Clips used this month, from Supabase. The limit is not stored with it: it follows the
+   *  current plan, which starts as "Free" until the licence loads. Storing the limit made a
+   *  slow answer from that first moment overwrite the Pro limit with 10 until Sync. */
+  const [usedClips, setUsedClips] = useState<number | null>(null);
+  const usageRequestRef = useRef(0);
+  const usage: { used: number; limit: number; remaining: number } | null =
+    usedClips === null || accountLoading
+      ? null
+      : (() => {
+          const limit = PLAN_MONTHLY_CLIP_LIMIT[normalizePlan(plan)];
+          return { used: usedClips, limit, remaining: Math.max(0, limit - usedClips) };
+        })();
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [exportPanelOpen, setExportPanelOpen] = useState(false);
@@ -530,15 +542,14 @@ function showQuotaRefusal(reason: "sign_in" | "limit") {
 
 /** Answers early what the agent would refuse anyway. The agent makes the actual
  *  reservation when the export starts (quota.rs); this only saves the round trip. */
-async function checkExportAllowed(clipCount: number): Promise<boolean> {
+async function checkExportAllowed(_clipCount: number): Promise<boolean> {
   if (!session?.user?.id) {
     showQuotaRefusal("sign_in");
     return false;
   }
-  if (usage && usage.remaining < clipCount) {
-    showQuotaRefusal("limit");
-    return false;
-  }
+  // No limit check here: the agent reserves against the plan Supabase has on record and
+  // answers 402 when the month is used up. A check against this window's plan could
+  // refuse a Pro user while the licence is still loading.
   return true;
 }
 
@@ -548,17 +559,19 @@ async function currentAccessToken(): Promise<string | null> {
 }
 
 async function refreshUsage() {
+  const request = ++usageRequestRef.current;
   if (!session?.user?.id) {
-    setUsage(null);
+    setUsedClips(null);
     return;
   }
-  const planKey = normalizePlan(plan);
-  const result = await getCurrentMonthlyUsage(planKey, session.user.id);
+  const result = await getCurrentMonthlyUsage(normalizePlan(plan), session.user.id);
+  // An older request answering late must not overwrite a newer one.
+  if (request !== usageRequestRef.current) return;
   if (!result.ok) {
     console.warn("[Usage] failed to fetch usage", result.error);
     return;
   }
-  setUsage(result.result);
+  setUsedClips(result.result.used);
 }
 
   // Load video metadata from ClipAgent

@@ -97,7 +97,10 @@ export default function Timeline({
       onMouseDown={(e) => {
         // Pressing anywhere on the track grabs the playhead: seek now, follow the drag.
         if (e.button !== 0) return;
+        // preventDefault keeps the drag from selecting text, but it also keeps focus
+        // where it was: in the URL field, which then swallowed I, O and Space.
         e.preventDefault();
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         setIsDragging(true);
         seekFromClientX(e.clientX);
       }}
