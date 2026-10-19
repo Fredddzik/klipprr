@@ -310,6 +310,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         };
         let ext = ext.as_str();
         let local_str = local_path.to_string_lossy().to_string();
+        let audio_map = preferred_audio_map(&local_path);
         let base_str = base_dir.display().to_string();
 
         let mut results = vec![];
@@ -346,6 +347,12 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 "-to".into(), format!("{:.3}", end),
                 "-i".into(), local_str.clone(),
             ];
+            // Pick the tracks: left to itself ffmpeg takes the audio with the most channels,
+            // which on an iPhone video is spatial audio (APAC) that almost nothing plays.
+            if audio_format.is_none() {
+                args.extend(["-map".to_string(), "0:v:0".to_string()]);
+            }
+            args.extend(["-map".to_string(), audio_map.clone()]);
             match audio_format {
                 Some((_, codec_args)) => {
                     args.push("-vn".into());

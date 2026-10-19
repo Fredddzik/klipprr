@@ -137,7 +137,7 @@ fn needs_pcm_preview_fix(file_path: &Path) -> bool {
     // The webview plays only MP4/MOV with H.264 (or HEVC on macOS). OBS records to .mkv by
     // default, and .webm/.avi arrive from downloads; the picker offered all three and they
     // failed to load. The same proxy fixes them: it copies H.264 into MP4 and re-encodes the
-    // rest (VP9, MPEG-4 Part 2).
+    // rest (HEVC, VP9, MPEG-4 Part 2).
     !container_is_playable(file_path) || !video_codec_is_playable(file_path)
 }
 
@@ -159,10 +159,12 @@ fn video_codec_is_playable(file_path: &Path) -> bool {
         .arg(file_path)
         .output();
     match out {
-        // No video stream (an audio file) or no answer: nothing for a proxy to fix.
+        // No video stream (an audio file) or no answer: nothing for a proxy to fix. HEVC is
+        // not playable here: a 4K iPhone .MOV (HEVC, AAC plus Apple spatial audio and five
+        // metadata tracks) failed to load, so only H.264 goes to the webview directly.
         Ok(o) => {
             let codec = String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase();
-            codec.is_empty() || codec == "h264" || codec == "hevc"
+            codec.is_empty() || codec == "h264"
         }
         Err(_) => true,
     }
@@ -266,7 +268,7 @@ fn ensure_head_proxy(file_path: &Path) -> Option<PathBuf> {
         "-i".into(), in_str,
         "-t".into(), secs,
         "-map".into(), "0:v:0".into(),
-        "-map".into(), "0:a:0?".into(),
+        "-map".into(), crate::commands::media::preferred_audio_map(file_path),
     ];
     if copy_video {
         // Already H.264 — copying keeps the source resolution and costs well under a second.
@@ -371,13 +373,14 @@ fn start_hq_proxy_bg(file_path: &Path) {
     let ffmpeg = ffmpeg_path();
 
     let copy_video = source_video_is_playable(file_path);
+    let audio_map = crate::commands::media::preferred_audio_map(file_path);
 
     std::thread::spawn(move || {
         let mut args: Vec<&str> = vec![
             "-y",
             "-i", &in_str,
             "-map", "0:v:0",
-            "-map", "0:a:0?",
+            "-map", &audio_map,
         ];
 
         // Re-encoding is only worth it when the webview cannot play the source video at

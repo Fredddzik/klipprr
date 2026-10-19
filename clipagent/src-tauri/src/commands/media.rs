@@ -199,3 +199,20 @@ pub(super) fn move_temp_to_final(temp_path: &Path, final_path: &Path) -> io::Res
         std::fs::remove_file(temp_path)
     })
 }
+
+/// The `-map` target for a local file's audio: its first audio track ffmpeg can decode.
+/// iPhones record AAC plus Apple spatial audio (APAC); ffmpeg cannot decode APAC, and left
+/// to choose, it picks APAC for having more channels. The trailing `?` keeps a silent
+/// source working.
+pub fn preferred_audio_map(path: &Path) -> String {
+    let out = Command::new(ffprobe_path())
+        .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
+        .arg(path)
+        .output();
+    let codecs: Vec<String> = out
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(|l| l.trim().to_ascii_lowercase()).collect())
+        .unwrap_or_default();
+    let undecodable = |c: &str| c == "apple_apac" || c == "apac" || c.is_empty() || c == "unknown";
+    let index = codecs.iter().position(|c| !undecodable(c)).unwrap_or(0);
+    format!("0:a:{index}?")
+}

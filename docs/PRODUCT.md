@@ -138,7 +138,9 @@ quality and streams of the file the user loaded (`download.rs`, local-file branc
 One exception to "same format", since 0.1.40: clips from `.mkv`, `.webm` and `.avi` are written
 as `.mp4` with the same streams copied. Those containers have no edit list, so a copied cut
 started at the keyframe before the IN point (a 4 s clip from an OBS recording came out 6 s).
-MP4 cuts exactly. Their preview goes through the local proxy like unplayable audio does.
+MP4 cuts exactly. Their preview goes through the local proxy like unplayable audio does, as
+does HEVC (iPhone video). Local exports take the first audio track ffmpeg can decode: iPhones
+add Apple spatial audio (APAC), which ffmpeg cannot decode and would otherwise pick.
 
 This is deliberate (founder decision, confirmed 2026-10-09), not a bug:
 - The file is already the user's own media, often their own recording or a client's raw

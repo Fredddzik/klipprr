@@ -743,10 +743,10 @@ async function refreshUsage() {
       // Use backend stream URL so video works on Windows (convertFileSrc is unreliable there)
       const ac = typeof audioCodec === "string" ? audioCodec.toLowerCase() : "";
       const vc = typeof videoCodec === "string" ? videoCodec.toLowerCase() : "";
-      // The webview plays MP4/MOV with H.264 or HEVC only. Anything else (an OBS .mkv, a
-      // .webm, an .avi) goes through the agent's preview proxy, like unplayable audio.
+      // The webview plays MP4/MOV with H.264 only. Anything else (an OBS .mkv, a .webm, an
+      // .avi, an iPhone HEVC .MOV) goes through the agent's preview proxy, like unplayable audio.
       const playableContainer = /\.(mp4|m4v|mov)$/i.test(selected);
-      const playableVideo = vc === "" || vc === "h264" || vc === "hevc";
+      const playableVideo = vc === "" || vc === "h264";
       const needsPcmFix =
         ac.startsWith("pcm") || ac === "lpcm" || ac === "alac" || ac === "flac" ||
         !playableContainer || !playableVideo;
