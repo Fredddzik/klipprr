@@ -735,15 +735,21 @@ async function refreshUsage() {
       setLoading(true);
       setLoadProgress(0);
       setLocalFilePath(selected);
-      const [duration, _codec, audioCodec] = await invoke<[number, string | null, string | null]>("get_local_video_info", {
+      const [duration, videoCodec, audioCodec] = await invoke<[number, string | null, string | null]>("get_local_video_info", {
         path: selected,
       });
       const title = selected.split(/[/\\]/).pop() ?? "Local video";
       const localId = "local-" + selected.replace(/[/\\:]/g, "_").slice(-64);
       // Use backend stream URL so video works on Windows (convertFileSrc is unreliable there)
       const ac = typeof audioCodec === "string" ? audioCodec.toLowerCase() : "";
+      const vc = typeof videoCodec === "string" ? videoCodec.toLowerCase() : "";
+      // The webview plays MP4/MOV with H.264 or HEVC only. Anything else (an OBS .mkv, a
+      // .webm, an .avi) goes through the agent's preview proxy, like unplayable audio.
+      const playableContainer = /\.(mp4|m4v|mov)$/i.test(selected);
+      const playableVideo = vc === "" || vc === "h264" || vc === "hevc";
       const needsPcmFix =
-        ac.startsWith("pcm") || ac === "lpcm" || ac === "alac" || ac === "flac";
+        ac.startsWith("pcm") || ac === "lpcm" || ac === "alac" || ac === "flac" ||
+        !playableContainer || !playableVideo;
       const previewUrlForVideo = `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(selected)}${needsPcmFix ? "&pcm_fix=1" : ""}`;
       const data: ResolvedVideo = {
         id: localId,

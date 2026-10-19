@@ -131,7 +131,41 @@ fn needs_pcm_preview_fix(file_path: &Path) -> bool {
     };
     // PCM variants, Apple Lossless (ALAC), FLAC — none of these are natively playable
     // in a browser <video> element embedded in Tauri's WebView.
-    codec.starts_with("pcm") || codec == "lpcm" || codec == "alac" || codec == "flac"
+    if codec.starts_with("pcm") || codec == "lpcm" || codec == "alac" || codec == "flac" {
+        return true;
+    }
+    // The webview plays only MP4/MOV with H.264 (or HEVC on macOS). OBS records to .mkv by
+    // default, and .webm/.avi arrive from downloads; the picker offered all three and they
+    // failed to load. The same proxy fixes them: it copies H.264 into MP4 and re-encodes the
+    // rest (VP9, MPEG-4 Part 2).
+    !container_is_playable(file_path) || !video_codec_is_playable(file_path)
+}
+
+fn container_is_playable(file_path: &Path) -> bool {
+    matches!(
+        file_path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        Some("mp4") | Some("m4v") | Some("mov")
+    )
+}
+
+fn video_codec_is_playable(file_path: &Path) -> bool {
+    let out = std::process::Command::new(ffprobe_path())
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(file_path)
+        .output();
+    match out {
+        // No video stream (an audio file) or no answer: nothing for a proxy to fix.
+        Ok(o) => {
+            let codec = String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase();
+            codec.is_empty() || codec == "h264" || codec == "hevc"
+        }
+        Err(_) => true,
+    }
 }
 
 /// Compute a stable cache key for `file_path` based on path + size + mtime.

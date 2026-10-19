@@ -133,7 +133,12 @@ ed25519-signed license token.
 
 Clips cut from a file on the user's own Mac are a straight stream-copy trim on **every** plan,
 Free included: **no watermark, no resolution cap, no re-encode**. The output has exactly the
-quality and format of the file the user loaded (`download.rs`, local-file branch).
+quality and streams of the file the user loaded (`download.rs`, local-file branch).
+
+One exception to "same format", since 0.1.40: clips from `.mkv`, `.webm` and `.avi` are written
+as `.mp4` with the same streams copied. Those containers have no edit list, so a copied cut
+started at the keyframe before the IN point (a 4 s clip from an OBS recording came out 6 s).
+MP4 cuts exactly. Their preview goes through the local proxy like unplayable audio does.
 
 This is deliberate (founder decision, confirmed 2026-10-09), not a bug:
 - The file is already the user's own media, often their own recording or a client's raw

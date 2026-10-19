@@ -301,7 +301,14 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         if !local_path.is_file() {
             return r#"{"error":"local_file_not_found"}"#.to_string();
         }
-        let ext = local_path.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
+        // MKV, WebM and AVI have no edit list, so a stream-copied cut starts at the keyframe
+        // before the IN point: a 4 s clip from an OBS recording came out 6 s long. The same
+        // streams copied into MP4 cut exactly, still with no re-encode.
+        let ext = match local_path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()) {
+            Some(e) if matches!(e.as_str(), "mp4" | "m4v" | "mov") => e,
+            _ => "mp4".to_string(),
+        };
+        let ext = ext.as_str();
         let local_str = local_path.to_string_lossy().to_string();
         let base_str = base_dir.display().to_string();
 
