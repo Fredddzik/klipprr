@@ -30,6 +30,9 @@ create policy "Users can read own reservations"
   using ((select auth.uid()) = user_id);
 
 revoke insert, update, delete on public.export_reservations from anon, authenticated;
+-- Explicit, because Supabase stops granting new tables automatically on 2026-10-30.
+grant select on public.export_reservations to authenticated;
+grant select, insert, update, delete on public.export_reservations to service_role;
 
 -- Shared by both refund functions: the plan's limit and how much may still be refunded
 -- this month.

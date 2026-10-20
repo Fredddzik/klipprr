@@ -131,6 +131,24 @@ create policy "service_role_all" on public.email_unsubscribes
 create policy "Anyone can join waitlist" on public.waitlist
   for insert with check (true);
 
+-- ---------------------------------------------------------------- Data API grants
+-- From 2026-10-30 Supabase no longer grants API access to new tables in `public`
+-- automatically, so a database rebuilt from this file needs them spelled out. They match
+-- the policies above: RLS still decides which rows; a grant only opens the table to a role.
+-- (The live tables, created earlier, carry Supabase's old blanket grants; RLS makes the
+-- extra ones inert.)
+
+grant select on public.profiles to authenticated;
+grant select on public.licenses to authenticated;
+grant select on public.clip_usage_monthly to authenticated;
+grant insert on public.waitlist to anon, authenticated;
+
+grant select, insert, update, delete on
+  public.profiles, public.licenses, public.activation_codes, public.clip_usage_monthly,
+  public.email_sequence_log, public.email_unsubscribes, public.waitlist
+  to service_role;
+grant select on public.v_user_licenses to service_role;
+
 -- ---------------------------------------------------------------- signup triggers
 
 create or replace function public.handle_new_user()

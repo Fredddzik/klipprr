@@ -23,6 +23,11 @@ repository), and the repo copy no longer matched the live database.
 - **Keep old app versions working.** Released desktop apps call `reserve_clip_exports` and
   `release_clip_exports` with fixed signatures; change them compatibly or the installed base
   breaks until it updates.
+- **Every new table gets its grants in the same migration** (Supabase stopped granting new
+  `public` tables automatically on 2026-10-30): `select` to `authenticated` only where a
+  policy lets users read their rows, the same for any write a policy allows, and
+  `select, insert, update, delete` to `service_role`. Without them the API answers
+  "permission denied" even when RLS would allow the request.
 - **Secrets never go in a migration.** Use Vault (`vault.decrypted_secrets`) or the edge
   function's environment.
 
