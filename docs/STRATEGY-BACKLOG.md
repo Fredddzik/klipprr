@@ -154,6 +154,30 @@ Twitch/Kick-only, where store policy is not the problem.
 
 ---
 
+### Editor plugin: Klipprr inside Premiere Pro and DaVinci Resolve (founder idea, 2026-10-22)
+**Idea:** a panel inside the editor. Paste a URL, the video plays in the editor's own preview,
+mark clips, and they land directly in the project's media (bin) at source quality, with no
+export-then-import step.
+
+**Why it fits:** it removes the last manual step for the core user (short-form editors who
+already live in Premiere or Resolve), and "clips from a URL straight into your timeline" is a
+claim no downloader site can make. Plugin marketplaces are also a distribution channel.
+
+**What it would take (rough, L):**
+- **Premiere Pro:** a UXP panel (HTML/JS). It can import files into a bin and set in/out on
+  project items. The panel would drive the existing Klipprr agent on `:4000` (resolve,
+  export) and import the finished files; previewing the URL *inside* Premiere's Source monitor
+  is not possible for a stream, so the panel shows its own preview and imports the clips.
+- **DaVinci Resolve:** Resolve's scripting API (Python/Lua) can import media into the Media
+  Pool and works in the free version. Workflow Integration panels (HTML) exist but only in
+  Resolve Studio.
+- The agent's work-endpoint token (`agent_token.rs`) would need a way for a trusted plugin to
+  obtain it.
+
+**Why not now:** two more codebases to keep working across editor updates, and no users yet
+asking for it. **Unlock:** paying users who say the export-then-import step is what slows
+them down, or a marketplace that brings real traffic.
+
 ## Done from the same review (2026-09-29)
 
 - Website no longer says "no account required"; it says a free account is needed to export.
