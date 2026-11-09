@@ -40,6 +40,9 @@ FFPROBE = os.path.join(BIN, "ffprobe")
 FFMPEG = os.path.join(BIN, "ffmpeg")
 LOG_DIR = os.path.expanduser("~/Library/Logs/Klipprr/health")
 EXPORT_SECONDS = 8
+# A newer yt-dlp this old should have reached the app by now. The weekly job releases within
+# about a week; past this, the pipeline is stuck or this Mac has not updated.
+MAX_YT_DLP_BEHIND_DAYS = 14
 
 # yt-dlp messages that mean the test video itself is gone, not that Klipprr is broken.
 GONE = re.compile(
@@ -212,6 +215,17 @@ def latest_yt_dlp():
         return None
 
 
+def days_behind(installed, latest, today=None):
+    """Age in days of a newer yt-dlp the app does not have yet (versions are dates)."""
+    if not installed or not latest or installed == latest:
+        return 0
+    try:
+        released = datetime.date(*(int(x) for x in latest.split(".")[:3]))
+    except (ValueError, TypeError):
+        return 0
+    return max(((today or datetime.date.today()) - released).days, 0)
+
+
 def notify(title, message):
     script = 'display notification "%s" with title "%s" sound name "Basso"' % (
         message.replace('"', "'"), title.replace('"', "'"))
@@ -259,12 +273,14 @@ def main():
     report = "\n".join(lines)
     print(report)
 
+    behind = days_behind(installed, latest)
     os.makedirs(LOG_DIR, exist_ok=True)
     with open(os.path.join(LOG_DIR, started.strftime("%Y-%m-%d") + ".log"), "w") as f:
         f.write(report + "\n")
     with open(os.path.join(LOG_DIR, "latest.json"), "w") as f:
         json.dump({"time": started.isoformat(), "broken": broken, "links_gone": notes,
-                   "yt_dlp": installed, "yt_dlp_latest": latest}, f)
+                   "yt_dlp": installed, "yt_dlp_latest": latest,
+                   "yt_dlp_behind_days": behind}, f)
 
     if not quiet:
         if broken:
@@ -272,6 +288,10 @@ def main():
                    "Resolving or exporting failed. Report in ~/Library/Logs/Klipprr/health/")
         elif notes:
             notify("Klipprr health check", "All platforms work. Some test links are gone: %s" % ", ".join(notes))
+        # Separate from the above: "everything works" hid this for 7 months (docs/RELEASE.md).
+        if behind > MAX_YT_DLP_BEHIND_DAYS:
+            notify("Klipprr: yt-dlp is %d days behind" % behind,
+                   "Update the app. If no update is offered, releases are stuck: check the Update yt-dlp job.")
     return 1 if broken else 0
 
 

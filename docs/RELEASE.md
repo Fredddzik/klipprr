@@ -78,6 +78,10 @@ by that token** (loop protection). So v0.1.25, v0.1.26 and v0.1.27 were tagged a
 nothing — no run, no failure, no signal. v0.1.24 was the last tag pushed by a human, which
 is exactly why it was the last one that shipped.
 
+(The token was only half of it. The job's commit message had carried `[skip ci]` since March
+2026, see below, so the token fix alone could not have made a tag build. From March until 0.1.42
+every yt-dlp version reached users only through a release made by hand.)
+
 Fixed: the tag is pushed with a PAT (`RELEASE_TAG_TOKEN`, falling back to
 `RELEASES_PUBLIC_REPO_TOKEN`), and the job fails loudly if neither secret exists.
 
