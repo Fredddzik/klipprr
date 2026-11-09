@@ -15,6 +15,7 @@ jobs:
   update:
     permissions:
       contents: write
+      actions: read
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -99,6 +100,8 @@ jobs:
           jq --arg v "$NEW_VER" '.version = $v' tauri.conf.json > tauri.conf.json.tmp && mv tauri.conf.json.tmp tauri.conf.json
           # Cargo.toml
           sed -i '' "s/^version = \".*\"$/version = \"$NEW_VER\"/" Cargo.toml
+          # Cargo.lock records the app's own version too; left alone it goes stale.
+          perl -0pi -e "s/(name = \"clipagent\"\nversion = \")[^\"]+/\${1}$NEW_VER/" Cargo.lock
           echo "NEW_VERSION=$NEW_VER" >> $GITHUB_ENV
           echo "Bumped to $NEW_VER"
 
@@ -108,9 +111,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add clipagent/src-tauri/tools.lock \
-            clipagent/src-tauri/tauri.conf.json clipagent/src-tauri/Cargo.toml
+            clipagent/src-tauri/tauri.conf.json clipagent/src-tauri/Cargo.toml \
+            clipagent/src-tauri/Cargo.lock
           git diff --staged --quiet && exit 0 || true
-          git commit -m "chore: update yt-dlp to ${{ steps.ytdlp.outputs.tag_name }} [skip ci]"
+          # No [skip ci] here. GitHub applies it to the tag pushed below as well, since the tag
+          # points at this commit: v0.1.41 and v0.1.42 were tagged and never built, and users
+          # stayed on the August yt-dlp. This push uses GITHUB_TOKEN, which triggers nothing.
+          git commit -m "chore: update yt-dlp to ${{ steps.ytdlp.outputs.tag_name }}"
           git push origin main
 
       # The tag MUST be pushed with a personal access token, not the default GITHUB_TOKEN.
@@ -133,3 +140,22 @@ jobs:
           git tag "v${{ env.NEW_VERSION }}"
           git push "https://x-access-token:${TAG_TOKEN}@github.com/${{ github.repository }}" "v${{ env.NEW_VERSION }}"
           echo "Tagged v${{ env.NEW_VERSION }} — the Release workflow should now be running."
+
+      # Twice now a tag has silently produced no build, each time for a different reason.
+      # Whatever the next reason is, this job goes red instead of green.
+      - name: Check the tag started a release
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ env.NEW_VERSION }}"
+          for _ in $(seq 1 12); do
+            sleep 15
+            COUNT=$(gh run list --repo "${{ github.repository }}" --workflow release.yml --branch "$TAG" --json databaseId --jq length)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "Release is running for $TAG."
+              exit 0
+            fi
+          done
+          echo "::error::$TAG was pushed but no Release run started. Users will not get this update."
+          exit 1

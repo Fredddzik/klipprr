@@ -81,6 +81,12 @@ is exactly why it was the last one that shipped.
 Fixed: the tag is pushed with a PAT (`RELEASE_TAG_TOKEN`, falling back to
 `RELEASES_PUBLIC_REPO_TOKEN`), and the job fails loudly if neither secret exists.
 
+It happened again in a different way: the job's commit message said `[skip ci]`, and GitHub
+applies that to a tag pointing at the commit. v0.1.41 and v0.1.42 were tagged in Oct and Nov
+2026 with no build, while the job stayed green. Fixed in 0.1.42, and the job now waits for a
+Release run to appear for its tag and goes red if none does. **Do not put `[skip ci]` on a
+commit that gets tagged.**
+
 ### 2. Apple's agreement lapsed → notarization 403
 
 ```
