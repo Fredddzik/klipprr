@@ -85,7 +85,8 @@ It happened again in a different way: the job's commit message said `[skip ci]`,
 applies that to a tag pointing at the commit. v0.1.41 and v0.1.42 were tagged in Oct and Nov
 2026 with no build, while the job stayed green. Fixed in 0.1.42, and the job now waits for a
 Release run to appear for its tag and goes red if none does. **Do not put `[skip ci]` on a
-commit that gets tagged.**
+commit that gets tagged**, not even in the body while explaining it: GitHub matches it anywhere
+in the message, which is how the commit fixing this skipped its own Release check.
 
 ### 2. Apple's agreement lapsed → notarization 403
 
