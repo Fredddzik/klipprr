@@ -122,15 +122,28 @@ impl ExportVideoCodec {
             _ => 6,
         };
         let mut args: Vec<String> = Vec::new();
+        // The Mac's media engine (VideoToolbox) on macOS; ffmpeg's software encoders
+        // elsewhere, so the Windows build compiles and exports the same formats.
+        #[cfg(target_os = "macos")]
+        let (h264, hevc, prores): (Vec<String>, Vec<String>, Vec<String>) = (
+            ["-c:v", "h264_videotoolbox"].into_iter().chain(videotoolbox_speed_args()).map(String::from).collect(),
+            vec!["-c:v".into(), "hevc_videotoolbox".into()],
+            vec!["-c:v".into(), "prores_videotoolbox".into()],
+        );
+        #[cfg(not(target_os = "macos"))]
+        let (h264, hevc, prores): (Vec<String>, Vec<String>, Vec<String>) = (
+            ["-c:v", "libx264", "-preset", "veryfast"].map(String::from).to_vec(),
+            ["-c:v", "libx265", "-preset", "fast"].map(String::from).to_vec(),
+            vec!["-c:v".into(), "prores_ks".into()],
+        );
         match self {
             Self::H264 => {
-                args.extend(["-c:v", "h264_videotoolbox"].map(String::from));
-                args.extend(videotoolbox_speed_args().into_iter().map(String::from));
+                args.extend(h264);
                 args.extend(["-pix_fmt".into(), "yuv420p".into(), "-b:v".into(), format!("{}M", h264_mbps)]);
                 args.extend(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"].map(String::from));
             }
             Self::Hevc => {
-                args.extend(["-c:v", "hevc_videotoolbox"].map(String::from));
+                args.extend(hevc);
                 // hvc1 is the tag QuickTime and Apple devices need to play HEVC in an MP4.
                 args.extend(["-tag:v".into(), "hvc1".into(), "-pix_fmt".into(), "yuv420p".into()]);
                 args.extend(["-b:v".into(), format!("{}M", (h264_mbps / 2).max(3))]);
@@ -138,8 +151,8 @@ impl ExportVideoCodec {
             }
             Self::ProRes => {
                 // Profile 2 = ProRes 422. Uncompressed PCM audio, as editors expect in a ProRes .mov.
-                args.extend(["-c:v", "prores_videotoolbox", "-profile:v", "2"].map(String::from));
-                args.extend(["-c:a", "pcm_s16le"].map(String::from));
+                args.extend(prores);
+                args.extend(["-profile:v", "2", "-c:a", "pcm_s16le"].map(String::from));
             }
         }
         args
