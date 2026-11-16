@@ -28,7 +28,7 @@ awareness) points at:
 3. **Occasional users** — one clip for a presentation or a group chat. The free tier.
 
 The founder is himself user type 1 and also uses the app to **pull audio for sound
-effects**, which is why audio-only export matters (`FOUNDER-REQUESTS.md` #5). It shipped as
+effects**, which is why audio-only export matters (`~/dev/klipprr-web/docs/app/FOUNDER-REQUESTS.md` #5). It shipped as
 FR-5 in 0ea0de4: WAV is 48 kHz / 24-bit precisely because that is what the sound-effect use
 needs in an editor.
 

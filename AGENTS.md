@@ -75,19 +75,24 @@ docs/                  You are here
 - Verify claims by executing them. "Should work" is not a result.
 - Match surrounding code style. Comments explain *why*, never *what*.
 - Do not add a dependency to solve something ffmpeg or the standard library already does.
-- Never commit anything to `clipagent/src-tauri/bin/`. Ask first — see `docs/AUDIT-2026-09.md`.
+- Never commit anything to `clipagent/src-tauri/bin/`. Ask first — see `~/dev/klipprr-web/docs/app/AUDIT-2026-09.md`.
 - When you touch preview or export, re-read `docs/PIPELINES.md` invariants first.
 
 ## Index
 
-- `docs/CONTEXT-BRIEFING.md` — both repos in one pass: stack, structure, data model, conventions,
+This repo is public. Business and planning docs (plan, strategy backlog, founder requests,
+audit, context briefing, customer questions) live in the private website repo under
+`~/dev/klipprr-web/docs/app/`. Never add docs with revenue, customer, security-weakness or
+personal details to this repo.
+
+- `~/dev/klipprr-web/docs/app/CONTEXT-BRIEFING.md` — both repos in one pass: stack, structure, data model, conventions,
   integrations, tech debt. Read it when you need the whole picture; read the focused docs below when
   you are changing something. Snapshot of 2026-10-18, so check anything load-bearing against the code
 - `docs/PRODUCT.md` — who this is for, what they are trying to do, plans and limits
 - `docs/ARCHITECTURE.md` — processes, boundaries, data flow, cross-repo changes
 - `docs/PIPELINES.md` — resolve → preview → export in detail, and the accuracy invariants
 - `docs/RELEASE.md` — build, sign, notarize, ship, auto-update
-- `docs/AUDIT-2026-09.md` — known weaknesses and the reform backlog
-- `docs/FOUNDER-REQUESTS.md` — the live request queue with engineering translation
-- `docs/STRATEGY-BACKLOG.md` — parked business decisions (pricing, tiers, audience) and what would unlock each
-- `docs/PLAN-2027-09.md` — the 11-month plan to 28 Sep 2027: gates, triggers and dependency order for the entity, Windows signing, paid marketing and content
+- `~/dev/klipprr-web/docs/app/AUDIT-2026-09.md` — known weaknesses and the reform backlog
+- `~/dev/klipprr-web/docs/app/FOUNDER-REQUESTS.md` — the live request queue with engineering translation
+- `~/dev/klipprr-web/docs/app/STRATEGY-BACKLOG.md` — parked business decisions (pricing, tiers, audience) and what would unlock each
+- `~/dev/klipprr-web/docs/app/PLAN-2027-09.md` — the 11-month plan to 28 Sep 2027: gates, triggers and dependency order for the entity, Windows signing, paid marketing and content

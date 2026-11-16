@@ -38,7 +38,7 @@ X=https://twitter.com/LisPower1/status/1001551623938805763
 # to the same bound, re-encode and stream copy alike: a stream-copied MP4 carries the
 # keyframe run-up as hidden pre-roll and an edit list that starts presentation at the
 # mark, so what a player shows is frame-accurate either way (measured 2026-10-19, see
-# docs/CONTEXT-BRIEFING.md item 34). 0.15 s covers one frame of a 15 fps source plus the
+# ~/dev/klipprr-web/docs/app/CONTEXT-BRIEFING.md item 34). 0.15 s covers one frame of a 15 fps source plus the
 # 33 ms grid the matcher below quantises to; the paths measure 0.000-0.033 s, and a cut
 # that lost its mark would be off by a whole GOP, which is seconds.
 MAX_START_DRIFT=0.15
