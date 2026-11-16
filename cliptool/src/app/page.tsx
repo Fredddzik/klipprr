@@ -850,7 +850,10 @@ async function refreshUsage() {
       // OBS recording loads and scrubs at once. Anything else (an OBS .mkv, a .webm, an
       // .avi, an iPhone video with spatial audio) goes through the agent's preview proxy.
       const playableContainer = /\.(mp4|m4v|mov)$/i.test(selected);
-      const playableVideo = vc === "" || vc === "h264" || vc === "hevc";
+      // WebView2 on Windows can't decode HEVC without a paid extension, so there HEVC
+      // goes through the proxy too.
+      const isWindows = navigator.userAgent.toLowerCase().includes("win");
+      const playableVideo = vc === "" || vc === "h264" || (vc === "hevc" && !isWindows);
       const needsPcmFix =
         ac.startsWith("pcm") || ac === "lpcm" || ac === "alac" || ac === "flac" || ac === "apac" ||
         !playableContainer || !playableVideo;

@@ -199,7 +199,13 @@ fn head_proxy_seconds(copy_video: bool) -> u32 {
 /// proxy only has to fix the audio and can stream-copy the video. H.264 covers camera and
 /// screen-recorder output; ProRes/DNxHD and friends genuinely need a re-encode.
 fn source_video_is_playable(file_path: &Path) -> bool {
-    matches!(source_video_codec(file_path).as_str(), "h264" | "hevc")
+    match source_video_codec(file_path).as_str() {
+        "h264" => true,
+        // WKWebView decodes HEVC. WebView2 on Windows only does with the paid HEVC
+        // extension, so there the preview re-encodes it to H.264 instead.
+        "hevc" => cfg!(target_os = "macos"),
+        _ => false,
+    }
 }
 
 /// Codec name of the first video stream, lower case ("" when unknown).
