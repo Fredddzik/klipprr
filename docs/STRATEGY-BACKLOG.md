@@ -103,6 +103,11 @@ reviews. Revisit once `klipprr-web/docs/seo/roadmap.md` Phase 2 results are in.
 ## Not now
 
 ### Rebrand (graphite / amber, FR-4)
+**Tried 2026-11-15 and paused again:** a graphite + amber homepage felt too plain to the founder, see
+FR-4 in `FOUNDER-REQUESTS.md`. Still parked.
+**Parked 2026-11-03 until customers say so:** no rebrand unless interviews or support emails show
+the current violet and pink look costs sales. The deck and the site keep the current palette. If it
+comes back, the conditions below still apply.
 Do it **after** the preview cache (FR-1, FR-2) ships, together with breaking up
 `cliptool/src/app/page.tsx` as `AUDIT-2026-09.md` plans.
 

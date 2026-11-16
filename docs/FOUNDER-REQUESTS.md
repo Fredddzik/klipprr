@@ -207,7 +207,15 @@ anyway. Extracting state into hooks *during* the rebrand is the cheapest this wi
 
 **Decision (2026-09-10):** **graphite surface + amber/signal-orange accent.** Name stays
 Klipprr. Do the state extraction from `page.tsx` as part of the same work.
-**Status:** `ready`
+**Decision (2026-11-03):** parked. Klipprr keeps its current violet and pink identity until
+customers say the look costs sales. Moved to `STRATEGY-BACKLOG.md` → Not now.
+**Tried and paused (2026-11-15):** a graphite + single amber homepage was built on a branch and the
+founder rejected it: "way too plain compared to the original", and a firm no to a new bracket logo.
+The work is kept in a git stash in `klipprr-web` ("unslop homepage: graphite + amber"), not committed.
+The site keeps its violet and pink look. Lesson for the next attempt: keep colour and energy, fix the
+craft (spacing, hierarchy, consistency) first, and do not change the logo. Focus moved to an audit of
+the app's interface with its current colours.
+**Status:** `parked`
 
 ---
 

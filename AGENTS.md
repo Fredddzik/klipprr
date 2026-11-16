@@ -90,3 +90,4 @@ docs/                  You are here
 - `docs/AUDIT-2026-09.md` — known weaknesses and the reform backlog
 - `docs/FOUNDER-REQUESTS.md` — the live request queue with engineering translation
 - `docs/STRATEGY-BACKLOG.md` — parked business decisions (pricing, tiers, audience) and what would unlock each
+- `docs/PLAN-2027-09.md` — the 11-month plan to 28 Sep 2027: gates, triggers and dependency order for the entity, Windows signing, paid marketing and content
