@@ -131,6 +131,7 @@ export interface ResolveResponse {
     fast_max_height: number;
     true_max_height: number;
     true_max_requires_reencode: boolean;
+    full_video_bytes?: number;
   };
   error?: string;
   details?: any;
@@ -154,6 +155,8 @@ export interface ResolvedVideo {
     fastMaxHeight: number;
     trueMaxHeight: number;
     trueMaxRequiresReencode: boolean;
+    /** Estimated size of "Also save the full video", 0 when unknown. */
+    fullVideoBytes: number;
   } | null;
   raw: ResolveResponse;
 }
@@ -177,6 +180,7 @@ function normalizeResolve(raw: ResolveResponse): ResolvedVideo | null {
         fastMaxHeight: Number(raw.capabilities.fast_max_height ?? 0),
         trueMaxHeight: Number(raw.capabilities.true_max_height ?? 0),
         trueMaxRequiresReencode: Boolean(raw.capabilities.true_max_requires_reencode),
+        fullVideoBytes: Number(raw.capabilities.full_video_bytes ?? 0),
       }
     : null;
 
@@ -277,7 +281,7 @@ export interface DownloadAllPayload {
   has_watermark?: boolean;
   /** Video: "universal" re-encodes to H.264, "original" stream-copies. Audio only (FR-5):
    *  "mp3" (320 kbps) or "wav" (48 kHz, 24-bit). */
-  codec?: "universal" | "original" | "mp3" | "wav";
+  codec?: "universal" | "original" | "hevc" | "prores" | "mp3" | "wav";
 }
 
 export interface DownloadAllResponse {

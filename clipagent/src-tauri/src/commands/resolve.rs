@@ -164,6 +164,29 @@ struct ExportHeights {
     true_max_requires_reencode: bool,
 }
 
+/// Estimated bytes of the full-video download: the tallest H.264 video plus the best m4a
+/// audio, the same pick as the export's full-video format selector.
+fn full_video_bytes(formats: &[Value]) -> i64 {
+    let size = |f: &Value| f["filesize"].as_i64().or_else(|| f["filesize_approx"].as_i64()).unwrap_or(0);
+    let video = formats
+        .iter()
+        .filter(|f| is_h264(f) && f["acodec"].as_str() == Some("none"))
+        .max_by_key(|f| (f["height"].as_i64().unwrap_or(0), size(f)))
+        .map(size)
+        .unwrap_or(0);
+    let audio = formats
+        .iter()
+        .filter(|f| f["vcodec"].as_str() == Some("none") && f["ext"].as_str() == Some("m4a"))
+        .map(size)
+        .max()
+        .unwrap_or(0);
+    if video == 0 {
+        // Progressive-only sources (X, Instagram, TikTok): the largest muxed H.264 file.
+        return formats.iter().filter(|f| is_h264(f)).map(size).max().unwrap_or(0);
+    }
+    video + audio
+}
+
 fn export_heights(formats: &[Value]) -> ExportHeights {
     let max_h264_height = formats
         .iter()
@@ -508,6 +531,8 @@ let parsed: Value = match serde_json::from_str(json_str) {
             "dash": dash
         },
         "capabilities": {
+            // Rough size of "Also save the full video" (best H.264 + m4a), 0 when unknown.
+            "full_video_bytes": full_video_bytes(formats),
             "fast_max_height": fast_max_height,
             "true_max_height": true_max_height,
             "true_max_requires_reencode": true_max_requires_reencode

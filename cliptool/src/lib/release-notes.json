@@ -1,0 +1,9 @@
+{
+  "0.1.43": [
+    "Fixed: clips could start a frame after the one you marked, and some opened on a black frame. Every clip now starts on the exact frame you mark, from YouTube, Twitch, X, Instagram and your own files.",
+    "Fixed: long local recordings, like a 1-hour OBS stream, took a while to load and jumped back to the start when you scrubbed. They now open instantly and scrub smoothly.",
+    "Improved: 4K exports were softer than they should be. They now keep the detail of the original.",
+    "New: choose H.264, HEVC or ProRes 422 when you export, and set your default in Settings.",
+    "Improved: paste a link and it loads by itself, even if you copied a few words along with it."
+  ]
+}

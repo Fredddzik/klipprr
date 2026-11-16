@@ -2,7 +2,8 @@
 
 export type ThemePreference = "light" | "dark" | "system";
 export type ClipSortOption = "timeline" | "created";
-export type DefaultExportFormat = "universal" | "original"; // H.264 re-encode | stream copy (H.264 when available)
+/** Every option is an exact, re-encoded cut. "universal" is H.264 (its value predates HEVC and ProRes). */
+export type DefaultExportFormat = "universal" | "hevc" | "prores";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -27,8 +28,9 @@ const CLIP_SORT_OPTIONS: { value: ClipSortOption; label: string }[] = [
 ];
 
 const EXPORT_FORMAT_OPTIONS: { value: DefaultExportFormat; label: string }[] = [
-  { value: "universal", label: "H.264 – Universal" },
-  { value: "original", label: "Original – no re-encode" },
+  { value: "universal", label: "MP4 · H.264" },
+  { value: "hevc", label: "MP4 · HEVC" },
+  { value: "prores", label: "MOV · ProRes 422" },
 ];
 
 export default function SettingsModal({
@@ -86,7 +88,7 @@ export default function SettingsModal({
                   onClick={() => setTheme(opt.value)}
                   className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
                     theme === opt.value
-                      ? "bg-violet-600 text-white"
+                      ? "bg-zinc-600 text-white"
                       : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
                   }`}
                 >

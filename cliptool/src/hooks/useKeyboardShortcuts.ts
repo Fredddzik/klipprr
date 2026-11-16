@@ -15,6 +15,7 @@ export function useKeyboardShortcuts({
   undo,
   redo,
   showUndoToast,
+  onOpenExport,
 }: {
   videoRef: () => HTMLVideoElement | null;
   onProgrammaticSeek?: (t: number) => void;
@@ -32,6 +33,8 @@ export function useKeyboardShortcuts({
   undo: () => void;
   redo: () => void;
   showUndoToast: (msg: string) => void;
+  /** E: open the export panel. The caller decides whether there is anything to export. */
+  onOpenExport?: () => void;
 }) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -146,6 +149,12 @@ export function useKeyboardShortcuts({
       const plainKey = !e.metaKey && !e.ctrlKey && !e.altKey;
       const openIn = markOut == null ? markIn : null;
 
+      if (!editTarget && plainKey && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        onOpenExport?.();
+        return;
+      }
+
       // I / O: the in and out keys every editor uses. I (re)sets the start, O closes the clip.
       if (!editTarget && plainKey && e.key.toLowerCase() === "i") {
         e.preventDefault();
@@ -235,5 +244,6 @@ if (!editTarget && e.key.toLowerCase() === "m") {
     setEditTarget,
     showUndoToast,
     onProgrammaticSeek,
+    onOpenExport,
   ]);
 }

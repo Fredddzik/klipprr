@@ -20,6 +20,24 @@ use super::ytdlp::*;
 use tauri::Emitter;
 
 /// Returns the default export directory path (e.g. ~/Downloads) for the UI to display.
+/// Text on the clipboard, for the start screen's "Paste a link" button. Read through
+/// pbpaste because the web view's own clipboard API pops up an extra "Paste" confirmation
+/// on macOS.
+#[tauri::command]
+pub fn read_clipboard_text() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("/usr/bin/pbpaste")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        String::new()
+    }
+}
+
 #[tauri::command]
 pub fn get_default_export_dir() -> String {
     dirs::download_dir()
@@ -82,32 +100,54 @@ pub fn get_local_video_info(path: String) -> Result<(f64, Option<String>, Option
         .args([
             "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=codec_name",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-show_entries", "stream=codec_name,codec_tag_string",
+            "-of", "csv=p=0",
             path_str.as_ref(),
         ])
         .output();
+    // HEVC plays in the webview only when tagged hvc1 (OBS, iPhone, Final Cut). An hev1
+    // file is reported as "hevc_hev1" so the UI sends it through the preview proxy, which
+    // retags it.
     let codec_name = out_codec
         .ok()
         .and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() { None } else { Some(s) }
+            let line = String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string();
+            let mut parts = line.split(',');
+            let name = parts.next().unwrap_or("").trim().to_string();
+            let tag = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+            if name.is_empty() {
+                None
+            } else if name == "hevc" && tag != "hvc1" {
+                Some("hevc_hev1".to_string())
+            } else {
+                Some(name)
+            }
         });
 
     let out_audio_codec = Command::new(ffprobe_path())
         .args([
             "-v", "error",
-            "-select_streams", "a:0",
+            "-select_streams", "a",
             "-show_entries", "stream=codec_name",
             "-of", "default=noprint_wrappers=1:nokey=1",
             path_str.as_ref(),
         ])
         .output();
+    // The first audio codec, except that Apple spatial audio (APAC) anywhere in the file
+    // is reported as "apac": the webview cannot play such a file directly.
     let audio_codec_name = out_audio_codec
         .ok()
         .and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() { None } else { Some(s) }
+            let codecs: Vec<String> = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if codecs.iter().any(|c| c == "apac" || c == "apple_apac") {
+                Some("apac".to_string())
+            } else {
+                codecs.into_iter().next()
+            }
         });
 
     Ok((duration, codec_name, audio_codec_name))
@@ -301,14 +341,6 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         if !local_path.is_file() {
             return r#"{"error":"local_file_not_found"}"#.to_string();
         }
-        // MKV, WebM and AVI have no edit list, so a stream-copied cut starts at the keyframe
-        // before the IN point: a 4 s clip from an OBS recording came out 6 s long. The same
-        // streams copied into MP4 cut exactly, still with no re-encode.
-        let ext = match local_path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()) {
-            Some(e) if matches!(e.as_str(), "mp4" | "m4v" | "mov") => e,
-            _ => "mp4".to_string(),
-        };
-        let ext = ext.as_str();
         let local_str = local_path.to_string_lossy().to_string();
         let audio_map = preferred_audio_map(&local_path);
         let base_str = base_dir.display().to_string();
@@ -334,7 +366,8 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 continue;
             }
             let safe: String = name.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect();
-            let out_ext = audio_format.map_or(ext, |(e, _)| e);
+            let local_codec = ExportVideoCodec::from_request(codec);
+            let out_ext = audio_format.map_or(local_codec.ext(), |(e, _)| e);
             let out_path = unique_output_path_with_ext(&base_dir, &safe, out_ext);
             let out_str = out_path.to_string_lossy().to_string();
 
@@ -342,23 +375,42 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 std::env::temp_dir().join(format!("klipprr_export_{}_{}.{}", export_stamp, i, out_ext));
             let temp_str = temp_path.to_string_lossy().to_string();
 
-            let mut args: Vec<String> = vec![
-                "-ss".into(), format!("{:.3}", start),
-                "-to".into(), format!("{:.3}", end),
-                "-i".into(), local_str.clone(),
-            ];
-            // Pick the tracks: left to itself ffmpeg takes the audio with the most channels,
-            // which on an iPhone video is spatial audio (APAC) that almost nothing plays.
-            if audio_format.is_none() {
-                args.extend(["-map".to_string(), "0:v:0".to_string()]);
-            }
-            args.extend(["-map".to_string(), audio_map.clone()]);
+            let mut args: Vec<String> = Vec::new();
             match audio_format {
                 Some((_, codec_args)) => {
-                    args.push("-vn".into());
+                    // Audio has no keyframes, so a plain seek is already sample-accurate.
+                    args.extend(["-ss".into(), format!("{:.3}", start), "-to".into(), format!("{:.3}", end)]);
+                    args.extend(["-i".into(), local_str.clone(), "-map".into(), audio_map.clone(), "-vn".into()]);
                     args.extend(codec_args.iter().map(|a| a.to_string()));
                 }
-                None => args.extend(["-c".to_string(), "copy".to_string()]),
+                None => {
+                    // Exact cut, the same as for links: start from the frame on screen at the
+                    // mark and re-encode. A stream copy can only start on a keyframe, so
+                    // editors showed frames from before the mark.
+                    let fps = probe_fps(&local_path).unwrap_or(30.0);
+                    let (grid_first, _) = frame_span(start, end, fps);
+                    let first = frame_start_at(&[local_str.clone()], start)
+                        .filter(|f| (f - grid_first).abs() < 1.0)
+                        .unwrap_or(grid_first);
+                    let frames = ((end - first) * fps + 1e-6).floor().max(1.0) as i64;
+                    args.extend(["-ss".into(), format!("{:.6}", (first - 0.001).max(0.0)), "-i".into(), local_str.clone()]);
+                    // Pick the tracks: left to itself ffmpeg takes the audio with the most
+                    // channels, which on an iPhone video is spatial audio (APAC) that almost
+                    // nothing plays.
+                    let mut graph = "[0:v:0]setpts=PTS-STARTPTS[v]".to_string();
+                    let audio = preferred_audio_index(&local_path);
+                    if let Some(a) = audio {
+                        graph.push_str(&format!(";[0:a:{a}]asetpts=PTS-STARTPTS[a]"));
+                    }
+                    args.extend(["-filter_complex".into(), graph, "-map".into(), "[v]".into()]);
+                    if audio.is_some() {
+                        args.extend(["-map".into(), "[a]".into()]);
+                    }
+                    args.extend(["-frames:v".into(), frames.to_string(), "-t".into(), format!("{:.6}", frames as f64 / fps)]);
+                    let height = probe_video_dims(&local_path).map(|(_, h)| h).unwrap_or(1080);
+                    args.extend(local_codec.encoder_args(height));
+                    log_to_file(&format!("[EXACT] local i={} mark={:.3} first_frame={:.6} frames={} fps={:.3} codec={:?}", i, start, first, frames, fps, local_codec));
+                }
             }
             args.extend(["-y".to_string(), temp_str.clone()]);
             let ok = Command::new(ffmpeg_path())
@@ -403,7 +455,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         // Compute once so every thread can cheaply clone the resulting String.
         //   Universal (re-encode): allow any bestvideo container/codec; output MP4 via ffmpeg.
         //   Original (stream copy): must stay MP4-compatible, constrain to MP4 video + M4A audio.
-        let format_selector: String = if codec == "universal" || has_watermark {
+        let format_selector: String = if codec != "original" || has_watermark {
             match fast_cap {
                 Some(h) => format!("bv*[height<={}] + ba/best", h),
                 None => "bv*+ba/best".to_string(),
@@ -433,7 +485,9 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     .to_string(),
             }
         };
-        let needs_reencode_branch: bool = has_watermark || codec == "universal";
+        let video_codec = ExportVideoCodec::from_request(codec);
+        // Every format except "original" is an exact, re-encoded cut.
+        let needs_reencode_branch: bool = has_watermark || codec != "original";
 
         // Up to 4 clips run in parallel. Each spawns its own yt-dlp + ffmpeg, so memory
         // and network scale with this number. 4 is deliberate: it is what 0.1.21 shipped
@@ -630,7 +684,30 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                             }
                         }
                     }
-                            } else if needs_reencode {
+                            } else if needs_reencode { 'reencode: {
+                    // Cut on the exact frame straight from the source streams; the section
+                    // download below is the fallback if a site refuses that.
+                    if !export_control::is_cancelled(job) {
+                        let exact_temp = std::env::temp_dir()
+                            .join(format!("klipprr_exact_{}_{}.{}", export_stamp, i, video_codec.ext()));
+                        match url_exact_cut(
+                            &app, job, &url, &format_selector, start, end, video_codec,
+                            watermark_path_buf.as_ref().copied(), &exact_temp, i, total_clips, &client_export_id,
+                        ) {
+                            Ok(_) => {
+                                let final_path = unique_output_path_with_ext(base_dir, &safe, video_codec.ext());
+                                let moved = move_temp_to_final(&exact_temp, &final_path).is_ok();
+                                let path = if moved { final_path } else { exact_temp };
+                                log_to_file(&format!("[EXACT] done i={} -> {}", i, path.display()));
+                                break 'reencode Ok((std::process::ExitStatus::from_raw(0), Some(path.to_string_lossy().into_owned())));
+                            }
+                            Err(e) if export_control::is_cancelled(job) => {
+                                log_to_file(&format!("[EXACT] cancelled i={}: {}", i, e));
+                                break 'reencode Err(std::io::Error::new(std::io::ErrorKind::Other, "cancelled"));
+                            }
+                            Err(e) => log_to_file(&format!("[EXACT] failed i={}, falling back to section download: {}", i, e)),
+                        }
+                    }
                     println!("[FAST] Re-encoding (watermark or universal codec)");
 
                     // Let yt-dlp choose the container/extension. We'll re-encode to MP4 anyway.
@@ -984,7 +1061,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         let _ = std::fs::remove_file(&out_temp);
                         Err(std::io::Error::new(std::io::ErrorKind::Other, "ffmpeg_failed"))
                     }
-                } else {
+                } } else {
                     println!("[FAST] Original codec — stream copy");
 
                     let temp_out = std::env::temp_dir()
@@ -1165,9 +1242,125 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             })))
             .collect();
 
+        // "Also save the full video" (paid plans): after the exact clips, download the whole
+        // video once, in the best quality there is. If that is a codec this Mac cannot play
+        // (AV1 before M3, or VP9, which QuickTime and Premiere do not open), it is then
+        // converted to H.264 so the file always plays.
+        let mut full_video: Option<String> = None;
+        let shared_job = export_control::Job { export_id: client_export_id.as_deref(), clip: export_control::SHARED };
+        if keep_full && audio_format.is_none() && !has_watermark && !export_control::is_cancelled(shared_job) {
+            let _ = app.emit("export-progress", serde_json::json!({
+                "totalClips": total_clips, "phase": "quality_full_video", "globalPercent": 0,
+                "client_export_id": client_export_id,
+            }));
+            let template = base_dir.join("%(title).80B (full video).%(ext)s").to_string_lossy().into_owned();
+            let ffmpeg_str = ffmpeg_path().to_string_lossy().into_owned();
+            let mut args: Vec<&str> = yt_dlp_cookie_args();
+            args.extend(yt_dlp_speed_args());
+            args.extend([
+                "-f", "bv*+ba[ext=m4a]/bv*+ba/best",
+                "--merge-output-format", "mp4",
+                "--ffmpeg-location", &ffmpeg_str,
+                "-o", &template, "--newline", &url,
+            ]);
+            let mut last: i64 = -1;
+            let (ok, err) = run_ytdlp_with_progress(
+                Command::new(yt_dlp_path()).current_dir(&base_dir).args(&args),
+                shared_job,
+                None,
+                |pct| {
+                    let p = pct.round() as i64;
+                    if p > last {
+                        last = p;
+                        let _ = app.emit("export-progress", serde_json::json!({
+                            "totalClips": total_clips, "phase": "quality_full_video", "globalPercent": p,
+                            "client_export_id": client_export_id,
+                        }));
+                    }
+                },
+            );
+            log_to_file(&format!("[EXPORT] full video ok={} {}", ok, err.chars().take(400).collect::<String>()));
+            // --print after_move:filepath puts the saved path on the last stdout line, which
+            // run_ytdlp_with_progress does not keep; find the file by its name instead.
+            let saved = if ok {
+                std::fs::read_dir(&base_dir).ok().and_then(|rd| {
+                    rd.flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.to_string_lossy().contains("(full video)"))
+                        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+                })
+            } else {
+                None
+            };
+            if let Some(path) = saved {
+                let vcodec = probe_codec_name(&path, "v:0").unwrap_or_default();
+                let playable = vcodec == "h264" || vcodec == "hevc" || (vcodec == "av1" && mac_has_av1_decoder());
+                if playable {
+                    full_video = Some(path.to_string_lossy().into_owned());
+                } else {
+                    log_to_file(&format!("[EXPORT] full video is {vcodec}; converting to H.264 for this Mac"));
+                    let total = probe_duration_secs(&path).unwrap_or(0.0).max(0.001);
+                    let height = probe_video_dims(&path).map(|(_, h)| h).unwrap_or(1080);
+                    let converted = path.with_file_name(format!(
+                        "{} (H.264).mp4",
+                        path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+                    ));
+                    let mut ff: Vec<String> = vec!["-i".into(), path.to_string_lossy().into_owned(), "-map".into(), "0:v:0".into(), "-map".into(), "0:a:0?".into()];
+                    let mut enc = ExportVideoCodec::H264.encoder_args(height);
+                    // Keep the downloaded AAC as is; only the picture needs converting.
+                    if let Some(i) = enc.iter().position(|a| a == "-c:a") {
+                        enc[i + 1] = "copy".into();
+                        if enc.get(i + 2).map(String::as_str) == Some("-b:a") {
+                            enc.drain(i + 2..i + 4);
+                        }
+                    }
+                    ff.extend(enc);
+                    ff.extend(["-progress", "pipe:2", "-nostats", "-y"].map(String::from));
+                    ff.push(converted.to_string_lossy().into_owned());
+                    let ok_conv = match export_control::prepare(
+                        Command::new(ffmpeg_path()).args(&ff).stdout(Stdio::piped()).stderr(Stdio::piped()),
+                    )
+                    .spawn()
+                    {
+                        Ok(mut child) => {
+                            export_control::track(shared_job, child.id());
+                            let mut last: i64 = -1;
+                            if let Some(stderr) = child.stderr.take() {
+                                for line in BufReader::new(stderr).lines().flatten() {
+                                    if let Some(ms) = parse_ffmpeg_out_time_ms(&line) {
+                                        let p = (((ms as f64) / 1_000_000.0 / total) * 100.0).clamp(0.0, 100.0).round() as i64;
+                                        if p > last {
+                                            last = p;
+                                            let _ = app.emit("export-progress", serde_json::json!({
+                                                "totalClips": total_clips, "phase": "quality_full_convert", "globalPercent": p,
+                                                "client_export_id": client_export_id,
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+                            let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+                            export_control::untrack(shared_job, child.id());
+                            ok
+                        }
+                        Err(_) => false,
+                    };
+                    if ok_conv {
+                        let _ = std::fs::remove_file(&path);
+                        full_video = Some(converted.to_string_lossy().into_owned());
+                    } else {
+                        // Keep the download: a file that needs a newer Mac beats no file.
+                        let _ = std::fs::remove_file(&converted);
+                        full_video = Some(path.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+
         log_to_file("[EXPORT] fast export-all-done emit");
         let _ = app.emit("export-all-done", serde_json::json!({
             "export_dir": base_str,
+            "full_video_saved": full_video.is_some(),
             "totalClips": total_clips,
             "client_export_id": client_export_id,
         }));
@@ -1564,8 +1757,240 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
     }));
     serde_json::json!({ "ok": true, "results": results, "export_dir": base_str }).to_string()
 }
+
+/// Start time (relative to the stream's start, as ffmpeg's `-ss` counts) of the frame on
+/// screen at `mark`: the last frame that begins at or before it. Read from the stream's own
+/// timestamps, because frames are not always on a clean grid from zero: on a Twitch VOD the
+/// frame shown at 1000.000 began at 999.992, and the fps maths picked the next one.
+/// `input_args` are the request options and input, e.g. headers plus a URL or a path.
+pub(super) fn frame_start_at(input_args: &[String], mark: f64) -> Option<f64> {
+    let probe = |extra: &[&str]| -> Option<String> {
+        let mut a: Vec<String> = vec!["-v".into(), "error".into()];
+        a.extend(input_args[..input_args.len() - 1].iter().cloned());
+        a.extend(extra.iter().map(|s| s.to_string()));
+        a.push(input_args[input_args.len() - 1].clone());
+        Command::new(ffprobe_path()).args(&a).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    };
+    let origin: f64 = probe(&["-show_entries", "format=start_time", "-of", "csv=p=0"])?
+        .trim()
+        .parse()
+        .unwrap_or(0.0);
+    // An absolute end, not "+2 s": ffprobe starts reading at the keyframe before `from`,
+    // so a relative length could stop short of the mark (a ProRes test picked a frame 5
+    // frames early that way).
+    let from = (origin + mark - 1.5).max(origin);
+    let interval = format!("{:.3}%{:.3}", from, origin + mark + 0.5);
+    let frames = probe(&["-select_streams", "v:0", "-read_intervals", &interval, "-show_entries", "frame=pts_time", "-of", "csv=p=0"])?;
+    frames
+        .lines()
+        .filter_map(|l| l.trim().trim_end_matches(',').parse::<f64>().ok())
+        .map(|t| t - origin)
+        .filter(|t| *t <= mark + 0.0005)
+        .fold(None, |best: Option<f64>, t| Some(best.map_or(t, |b| b.max(t))))
+}
+
+/// The frames a clip covers: from the one on screen at `start` (it began at or before the
+/// mark) up to, not including, the one on screen at `end`. Returns the first frame's start
+/// time and the frame count. 1 µs of slack keeps a mark placed exactly on a frame from
+/// rounding down into the frame before it.
+pub(super) fn frame_span(start: f64, end: f64, fps: f64) -> (f64, i64) {
+    let i = (start * fps + 1e-6).floor() as i64;
+    let j = (end * fps + 1e-6).floor() as i64;
+    (i as f64 / fps, (j - i).max(1))
+}
+
+
+/// Frame-exact cut for a link (YouTube, Twitch, X, Instagram, TikTok): ask yt-dlp only for
+/// the direct stream links, then let ffmpeg seek each stream to `start` and decode from
+/// there, so the first frame is the one the user marked and picture and sound both begin
+/// at 0. Some sites only serve their streams with the request headers yt-dlp used, so
+/// those are passed on.
+///
+/// The section download it replaces (`--download-sections`) returns the clip plus several
+/// seconds of keyframe padding; the old code guessed the padding from the length
+/// difference, which started clips a frame or two late, and the copied stream kept a 40 ms
+/// offset that players show as a black first frame. On any failure this returns Err and
+/// the caller falls back to that old path, so an export never fails because of this step.
+#[allow(clippy::too_many_arguments)]
+fn url_exact_cut(
+    app: &AppHandle,
+    job: export_control::Job,
+    url: &str,
+    format_selector: &str,
+    start: f64,
+    end: f64,
+    codec: ExportVideoCodec,
+    watermark: Option<&PathBuf>,
+    temp_out: &PathBuf,
+    clip_index: usize,
+    total_clips: usize,
+    client_export_id: &Option<&str>,
+) -> Result<i64, String> {
+    let mut args: Vec<&str> = yt_dlp_cookie_args();
+    args.extend([
+        "-q", "--no-warnings", "-f", format_selector,
+        "--print", "height", "--print", "fps", "--print", "acodec", "--print", "%(http_headers)j", "--print", "urls", url,
+    ]);
+    let out = Command::new(yt_dlp_path())
+        .args(&args)
+        .output()
+        .map_err(|e| format!("yt-dlp spawn: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("yt-dlp urls failed: {}", String::from_utf8_lossy(&out.stderr).chars().take(300).collect::<String>()));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let height: i64 = lines.next().and_then(|h| h.parse().ok()).unwrap_or(1080);
+    let fps_listed: Option<f64> = lines.next().and_then(|f| f.parse().ok()).filter(|f: &f64| *f > 1.0);
+    // "none" for a video without sound (some Instagram Reels); the filter graph must not
+    // ask for an audio stream that is not there.
+    let has_audio = lines.next().map_or(true, |a| a != "none");
+    let headers: serde_json::Map<String, Value> = lines
+        .next()
+        .and_then(|h| serde_json::from_str::<Value>(h).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let urls: Vec<&str> = lines.filter(|l| l.starts_with("http")).collect();
+    if urls.is_empty() || urls.len() > 2 {
+        return Err(format!("unexpected stream links: {}", urls.len()));
+    }
+    // Request headers for ffmpeg: the user agent on its own option, the rest as one block.
+    let mut http_args: Vec<String> = Vec::new();
+    if let Some(ua) = headers.get("User-Agent").and_then(|v| v.as_str()) {
+        http_args.extend(["-user_agent".to_string(), ua.to_string()]);
+    }
+    let extra: String = headers
+        .iter()
+        .filter(|(k, _)| k.as_str() != "User-Agent")
+        .filter_map(|(k, v)| v.as_str().map(|v| format!("{k}: {v}\r\n")))
+        .collect();
+    if !extra.is_empty() {
+        http_args.extend(["-headers".to_string(), extra]);
+    }
+    // X lists no frame rate; read it from the stream itself.
+    let fps = fps_listed.unwrap_or_else(|| {
+        let mut probe: Vec<String> = vec!["-v".into(), "error".into()];
+        probe.extend(http_args.iter().cloned());
+        probe.extend([
+            "-select_streams".into(), "v:0".into(),
+            "-show_entries".into(), "stream=avg_frame_rate".into(),
+            "-of".into(), "csv=p=0".into(), urls[0].to_string(),
+        ]);
+        Command::new(ffprobe_path())
+            .args(&probe)
+            .output()
+            .ok()
+            .and_then(|o| {
+                let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                let (n, d) = t.split_once('/')?;
+                let (n, d): (f64, f64) = (n.parse().ok()?, d.parse().ok()?);
+                (d > 0.0 && n / d > 1.0).then(|| n / d)
+            })
+            .unwrap_or(30.0)
+    });
+
+    // The preview shows a frame from the moment it starts until the next one does, so a
+    // mark usually lands partway through a frame. Start from the frame on screen at the
+    // mark, not the first one that begins after it: seek 1 ms before that frame's start.
+    // Then both streams are shifted to begin at 0, or players show black until the picture
+    // catches up with the sound (the "black first frame").
+    let (grid_first, _) = frame_span(start, end, fps);
+    let mut probe_input = http_args.clone();
+    probe_input.push(urls[0].to_string());
+    let first = frame_start_at(&probe_input, start).filter(|f| (f - grid_first).abs() < 1.0).unwrap_or(grid_first);
+    let frames = ((end - first) * fps + 1e-6).floor().max(1.0) as i64;
+    let dur = frames as f64 / fps;
+    let video_ss = format!("{:.6}", (first - 0.001).max(0.0));
+    let audio_ss = format!("{:.6}", first);
+    let mut ff: Vec<String> = Vec::new();
+    ff.extend(http_args.iter().cloned());
+    ff.extend(["-ss".to_string(), video_ss, "-i".to_string(), urls[0].to_string()]);
+    if urls.len() == 2 {
+        ff.extend(http_args.iter().cloned());
+        ff.extend(["-ss".to_string(), audio_ss, "-i".to_string(), urls[1].to_string()]);
+    }
+    let audio_input = if urls.len() == 2 { 1 } else { 0 };
+    let has_audio = has_audio || urls.len() == 2;
+    let mut graph = "[0:v]setpts=PTS-STARTPTS[v0]".to_string();
+    if has_audio {
+        graph.push_str(&format!(";[{audio_input}:a]asetpts=PTS-STARTPTS[a]"));
+    }
+    if let Some(wm) = watermark {
+        let wm_input = urls.len();
+        let (vw, vh) = ((height * 16 / 9).max(1), height.max(1));
+        let wm_w = watermark_target_width(vw, vh);
+        ff.extend(["-loop".to_string(), "1".to_string(), "-i".to_string(), wm.to_string_lossy().into_owned()]);
+        graph.push_str(&format!(
+            ";[{wm_input}:v]format=rgba,colorchannelmixer=aa=0.8,scale={wm_w}:-1[wm];\
+[v0][wm]overlay=x='max(0,W-w-32)':y='max(0,H-h-72)'[v]"
+        ));
+    } else {
+        graph.push_str(";[v0]null[v]");
+    }
+    ff.extend(["-filter_complex".to_string(), graph, "-map".to_string(), "[v]".to_string()]);
+    if has_audio {
+        ff.extend(["-map".to_string(), "[a]".to_string()]);
+    }
+    ff.extend(["-frames:v".to_string(), frames.to_string(), "-t".to_string(), format!("{:.6}", dur)]);
+    ff.extend(codec.encoder_args(height));
+    ff.extend(["-progress", "pipe:2", "-nostats", "-y"].map(String::from));
+    ff.push(temp_out.to_string_lossy().into_owned());
+
+    log_to_file(&format!("[EXACT] i={} mark={:.3} first_frame={:.6} (grid {:.6}) frames={} fps={} height={} codec={:?} streams={} audio={}", clip_index, start, first, grid_first, frames, fps, height, codec, urls.len(), has_audio));
+    let mut child = export_control::prepare(
+        Command::new(ffmpeg_path()).args(&ff).stdout(Stdio::piped()).stderr(Stdio::piped()),
+    )
+    .spawn()
+    .map_err(|e| format!("ffmpeg spawn: {e}"))?;
+    export_control::track(job, child.id());
+
+    let mut tail = String::new();
+    let mut last_pct: i64 = 0;
+    if let Some(stderr) = child.stderr.take() {
+        for line in BufReader::new(stderr).lines().flatten() {
+            if let Some(ms) = parse_ffmpeg_out_time_ms(&line) {
+                let frac = ((ms as f64) / 1_000_000.0 / dur).clamp(0.0, 1.0);
+                let pct = (frac * 99.0).round() as i64;
+                if pct > last_pct {
+                    last_pct = pct;
+                    let _ = app.emit("export-progress", serde_json::json!({
+                        "clipIndex": clip_index, "totalClips": total_clips, "phase": "encoding",
+                        "clipPercent": pct, "client_export_id": client_export_id
+                    }));
+                }
+            } else if !line.contains('=') {
+                tail.push_str(&line);
+                tail.push('\n');
+                if tail.len() > 4000 {
+                    tail.drain(..2000);
+                }
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| format!("ffmpeg wait: {e}"))?;
+    export_control::untrack(job, child.id());
+    let size = std::fs::metadata(temp_out).map(|m| m.len()).unwrap_or(0);
+    if !status.success() || size < 1024 {
+        let _ = std::fs::remove_file(temp_out);
+        return Err(format!("ffmpeg failed ({status}): {}", tail.chars().take(600).collect::<String>()));
+    }
+    Ok(height)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frame_span_starts_on_the_frame_shown_at_the_mark() {
+        use super::frame_span;
+        // 25 fps: a mark 12 ms into the frame that began at 2104.720 starts there.
+        let (first, n) = frame_span(2104.732, 2109.732, 25.0);
+        assert!((first - 2104.72).abs() < 1e-9);
+        assert_eq!(n, 125);
+        // A mark exactly on a frame boundary keeps that frame.
+        let (first, _) = frame_span(10.0, 11.0, 25.0);
+        assert!((first - 10.0).abs() < 1e-9);
+    }
+
     use super::*;
 
     #[test]

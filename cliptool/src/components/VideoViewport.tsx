@@ -18,6 +18,8 @@ interface VideoViewportProps {
   /** Every preview source has failed. Without this, a missing `src` means the preview
    *  is still being prepared, and the viewport says so instead of showing an error. */
   unavailable?: boolean;
+  /** Width ÷ height once the video reports its size, so the parent can fit the panel to it. */
+  onAspectRatio?: (ratio: number | null) => void;
 }
 
 /** A DASH manifest from the agent (FR-7) rather than a file the element plays directly. */
@@ -25,7 +27,7 @@ function isDashSource(src: string | null): boolean {
   return !!src && src.includes("/yt-dash.mpd");
 }
 
-export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate, debugInfo, onStreamError, unavailable }: VideoViewportProps) {
+export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate, debugInfo, onStreamError, unavailable, onAspectRatio }: VideoViewportProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const bindVideoRef = (el: HTMLVideoElement | null) => {
     videoRef.current = el;
@@ -45,6 +47,25 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
   const [isMuted, setIsMuted] = useState(false);
   /** Video intrinsic size so we can size the preview to the video (no letterboxing). */
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+  /** The space the frame can use. Measured, because CSS aspect-ratio inside the flex panel
+   *  sometimes laid out before the video reported its size and stayed too small until the
+   *  next re-render (a timeline click). */
+  // A callback ref: the area only exists once the preview has a source (the loading and
+  // error states render something else), so it has to be observed whenever it appears.
+  const frameObserverRef = useRef<ResizeObserver | null>(null);
+  const [frameArea, setFrameArea] = useState<{ w: number; h: number } | null>(null);
+  const frameAreaRef = (el: HTMLDivElement | null) => {
+    frameObserverRef.current?.disconnect();
+    frameObserverRef.current = null;
+    if (!el) return;
+    const update = () => setFrameArea((prev) =>
+      prev && prev.w === el.clientWidth && prev.h === el.clientHeight ? prev : { w: el.clientWidth, h: el.clientHeight }
+    );
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    frameObserverRef.current = ro;
+  };
   const [previewError, setPreviewError] = useState<string | null>(null);
 
   const hideTimer = useRef<number | null>(null);
@@ -118,10 +139,24 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
     };
   }, [src, videoKey]);
 
+  function updateAspect(v: HTMLVideoElement) {
+    const w = v.videoWidth;
+    const h = v.videoHeight;
+    if (w > 0 && h > 0) {
+      const r = w / h;
+      setAspectRatio((prev) => (prev === r ? prev : r));
+      onAspectRatio?.(r);
+    }
+  }
+
   // Reset aspect when video source changes so we recalc on new load
   useEffect(() => {
     setAspectRatio(null);
+    onAspectRatio?.(null);
     setPreviewError(null);
+    // Reset only when the source changes; a new onAspectRatio function on every parent
+    // render must not wipe the size.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src, videoKey]);
 
   // Streamed previews play through Shaka over Media Source Extensions. The element gets no
@@ -231,7 +266,8 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
 
   return (
     <div
-      className="relative w-full h-full min-h-0 flex items-center justify-center bg-zinc-900"
+      ref={frameAreaRef}
+      className="relative w-full h-full min-h-0 flex items-center justify-center"
       onMouseMove={onMouseActivity}
       onMouseLeave={() => {
         clearHideTimer();
@@ -242,11 +278,12 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
       {/* Size the frame to the video's aspect ratio so there are no black bars (works for 16:9, 9:16 Shorts/Reels, etc.) */}
       <div
         className="max-w-full max-h-full flex items-center justify-center"
-        style={
-          aspectRatio != null
-            ? { aspectRatio: `${aspectRatio}`, width: aspectRatio >= 1 ? "100%" : "auto", height: aspectRatio >= 1 ? "auto" : "100%" }
-            : undefined
-        }
+        style={(() => {
+          if (aspectRatio == null || !frameArea || frameArea.w === 0 || frameArea.h === 0) return undefined;
+          // Largest box of the video's shape that fits: width-limited or height-limited.
+          const w = Math.min(frameArea.w, frameArea.h * aspectRatio);
+          return { width: Math.floor(w), height: Math.floor(w / aspectRatio) };
+        })()}
       >
         <video
           ref={bindVideoRef}
@@ -258,6 +295,10 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
             e.stopPropagation();
             togglePlay();
           }}
+          // Streamed (Shaka) previews often know their picture size only after the first
+          // segment, so loadedmetadata can report 0×0. "resize" fires when the real size lands.
+          onResize={(e) => updateAspect(e.currentTarget)}
+          onLoadedData={(e) => updateAspect(e.currentTarget)}
           onTimeUpdate={() => {
             const t = videoRef.current?.currentTime ?? 0;
             if (t > 0) lastTimeRef.current = t;
@@ -266,9 +307,7 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
           onLoadedMetadata={() => {
             const v = videoRef.current;
             if (!v) return;
-            const w = v.videoWidth;
-            const h = v.videoHeight;
-            if (w > 0 && h > 0) setAspectRatio(w / h);
+            updateAspect(v);
             if (pendingSeekRef.current != null) {
               v.currentTime = pendingSeekRef.current;
               pendingSeekRef.current = null;
@@ -307,7 +346,8 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
 
             setPreviewError(base + tail);
           }}
-          className="w-full h-full max-h-full object-contain rounded border border-zinc-700 bg-black cursor-pointer"
+          className="w-full h-full max-h-full object-contain bg-black cursor-pointer"
+          draggable={false}
         />
 
       </div>
@@ -320,10 +360,14 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
               e.stopPropagation();
               togglePlay();
             }}
-            className="px-3 py-1 rounded bg-black/60 border border-gray-700 text-white text-sm hover:bg-black/75"
+            className="w-8 h-8 inline-flex items-center justify-center rounded-md bg-black/60 text-white hover:bg-black/80 transition-colors"
             aria-label={isPlaying ? "Pause" : "Play"}
           >
-            {isPlaying ? "❚❚" : "▶"}
+            {isPlaying ? (
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4" aria-hidden="true"><path d="M8 5.5v13a1 1 0 001.5.86l10.5-6.5a1 1 0 000-1.72L9.5 4.64A1 1 0 008 5.5z" /></svg>
+            )}
           </button>
 
           <div
@@ -345,10 +389,14 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
                 e.stopPropagation();
                 toggleMute();
               }}
-              className="px-3 py-1 rounded bg-black/60 border border-gray-700 text-white text-sm hover:bg-black/75"
+              className="w-8 h-8 inline-flex items-center justify-center rounded-md bg-black/60 text-white hover:bg-black/80 transition-colors"
               aria-label={isMuted ? "Unmute" : "Mute"}
             >
-              {isMuted ? "🔇" : "🔊"}
+              {isMuted ? (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4" aria-hidden="true"><path d="M11 5L6 9H3v6h3l5 4V5z" /><path d="M22 9l-6 6M16 9l6 6" /></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4" aria-hidden="true"><path d="M11 5L6 9H3v6h3l5 4V5z" /><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13" /></svg>
+              )}
             </button>
 
             {showVolume && (

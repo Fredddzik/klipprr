@@ -14,6 +14,8 @@ function formatTimeSimple(t: number) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+const TICK_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400];
+
 interface Clip {
   id: string;
   start: number;
@@ -88,76 +90,67 @@ export default function Timeline({
     };
   }, [isDragging]);
 
+  // Tick spacing: the smallest "round" step that keeps the ruler to about eight labels,
+  // so a 30-second clip and an 8-hour VOD both get a readable scale.
+  const step = TICK_STEPS.find((x) => duration / x <= 8) ?? 28800;
+  const ticks: number[] = [];
+  if (duration > 0) {
+    for (let t = 0; t < duration; t += step) ticks.push(t);
+  }
+  const pct = (t: number) => (duration > 0 ? `${(t / duration) * 100}%` : "0%");
+
   return (
-    <div
-      ref={timelineRef}
-      className={`relative h-5 bg-gray-800 rounded select-none ${
-        isDragging ? "cursor-grabbing" : "cursor-pointer"
-      }`}
-      onMouseDown={(e) => {
-        // Pressing anywhere on the track grabs the playhead: seek now, follow the drag.
-        if (e.button !== 0) return;
-        // preventDefault keeps the drag from selecting text, but it also keeps focus
-        // where it was: in the URL field, which then swallowed I, O and Space.
-        e.preventDefault();
-        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-        setIsDragging(true);
-        seekFromClientX(e.clientX);
-      }}
-    >
-      <div className="relative h-5">
-        {/* PLAYHEAD */}
-        <div
-          className="absolute left-0 flex flex-col items-center pointer-events-none z-10"
-          style={{
-            left: `${(currentTime / duration) * 100}%`,
-            top: 0,
-          }}
-        >
-          {/* line (inside track) */}
-          <div
-            className="absolute top-0 w-0.5 h-5 bg-white shadow-sm pointer-events-none"
-          />
-
-          {/* handle (below track) */}
-          <div
-            ref={playheadRef}
-            className="absolute top-[20px] w-2 h-2 rounded-full bg-white shadow"
-          />
-        </div>
-
-        {/* IN MARKER */}
-        {markIn !== null && (
-          <div
-            className="absolute top-0 w-1 h-5 bg-green-400"
-            style={{
-              left: `${(markIn / duration) * 100}%`,
-            }}
-          />
+    <div className="select-none">
+      {/* RULER */}
+      <div className="relative h-4 mb-2 font-mono text-[10px] tabular-nums text-zinc-500 pointer-events-none">
+        {ticks.map((t) =>
+          // A label this close to the end would run into the total on the right.
+          t / duration > 0.92 ? null : (
+            <span key={t} className="absolute top-0" style={{ left: pct(t) }}>
+              {formatTimeSimple(t)}
+            </span>
+          )
         )}
+        <span className="absolute top-0 right-0">{formatTimeSimple(duration)}</span>
+      </div>
 
-        {/* OUT MARKER */}
-        {markOut !== null && (
+      <div
+        ref={timelineRef}
+        className={`relative h-7 bg-zinc-800 rounded-md ${
+          isDragging ? "cursor-grabbing" : "cursor-pointer"
+        }`}
+        onMouseDown={(e) => {
+          // Pressing anywhere on the track grabs the playhead: seek now, follow the drag.
+          if (e.button !== 0) return;
+          // preventDefault keeps the drag from selecting text, but it also keeps focus
+          // where it was: in the URL field, which then swallowed I, O and Space.
+          e.preventDefault();
+          if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+          setIsDragging(true);
+          seekFromClientX(e.clientX);
+        }}
+      >
+        {/* TICKS */}
+        {ticks.map((t) => (
           <div
-            className="absolute top-0 w-1 h-5 bg-red-400"
-            style={{
-              left: `${(markOut / duration) * 100}%`,
-            }}
+            key={t}
+            className="absolute top-0 h-1.5 w-px bg-zinc-600 pointer-events-none"
+            style={{ left: pct(t) }}
           />
-        )}
+        ))}
 
         {/* ACTIVE RANGE */}
         {markIn !== null && markOut !== null && (
           <div
-            className="absolute top-0 h-5 bg-blue-500/40 rounded"
+            className="absolute inset-y-1 bg-blue-500/25 rounded-[3px]"
             style={{
-              left: `${(markIn / duration) * 100}%`,
-              width: `${((markOut - markIn) / duration) * 100}%`,
+              left: pct(markIn),
+              width: pct(markOut - markIn),
             }}
           />
         )}
 
-        {/* CLIPS */}
+        {/* CLIPS: blue, with a yellow outline on the selected one. */}
         {clips.map((c) => {
           const selected = selectedClipIds.includes(c.id);
           return (
@@ -167,28 +160,48 @@ export default function Timeline({
                 e.stopPropagation();
                 onSelectClip(c.id, e.metaKey || e.ctrlKey);
               }}
-              className={`absolute top-0 h-5 rounded ${
-                selected
-                  ? "bg-blue-400 ring-2 ring-yellow-400"
-                  : "bg-blue-700/60"
+              className={`absolute inset-y-1 rounded-[3px] ${
+                selected ? "bg-blue-400 ring-2 ring-yellow-400 z-[5]" : "bg-blue-600/70 hover:bg-blue-500/80"
               }`}
               style={{
-                left: `${(c.start / duration) * 100}%`,
-                width: `${((c.end - c.start) / duration) * 100}%`,
+                left: pct(c.start),
+                width: pct(c.end - c.start),
+                // A 30-second clip on a multi-hour VOD is under a pixel wide.
+                minWidth: 6,
               }}
             />
           );
         })}
-      </div>
 
-      {/* TIME DISPLAY */}
-      <div className="pointer-events-none absolute bottom-0 right-1 text-[10px] text-gray-300/80">
-        {formatTimeSimple(
-          isDragging && dragTimeRef.current !== null
-            ? dragTimeRef.current
-            : currentTime
-        )}{" "}
-        / {formatTimeSimple(duration)}
+        {/* IN MARKER (open clip: I pressed, O not yet) */}
+        {markIn !== null && markOut === null && (
+          <div className="absolute top-0 w-0.5 h-7 bg-emerald-400" style={{ left: pct(markIn) }} />
+        )}
+
+        {/* PLAYHEAD. The line ignores the mouse so clicks reach the track; the handle on top
+            can be grabbed and dragged without the playhead jumping to the click point. */}
+        <div
+          ref={playheadRef}
+          className="absolute -top-1.5 bottom-0 pointer-events-none z-10"
+          style={{ left: pct(currentTime) }}
+        >
+          <div className="absolute top-0 bottom-0 -ml-px w-0.5 bg-white" />
+          <div
+            className={`absolute -top-1.5 -ml-[9px] h-[18px] w-[18px] flex items-start justify-center pointer-events-auto ${
+              isDragging ? "cursor-grabbing" : "cursor-grab"
+            }`}
+            onMouseDown={(e) => {
+              if (e.button !== 0) return;
+              e.preventDefault();
+              e.stopPropagation();
+              if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+              setIsDragging(true);
+            }}
+            title="Drag to scrub"
+          >
+            <div className="mt-1.5 h-2.5 w-2.5 rounded-[3px] bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.5)]" />
+          </div>
+        </div>
       </div>
     </div>
   );

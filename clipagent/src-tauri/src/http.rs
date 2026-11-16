@@ -199,8 +199,13 @@ fn head_proxy_seconds(copy_video: bool) -> u32 {
 /// proxy only has to fix the audio and can stream-copy the video. H.264 covers camera and
 /// screen-recorder output; ProRes/DNxHD and friends genuinely need a re-encode.
 fn source_video_is_playable(file_path: &Path) -> bool {
+    matches!(source_video_codec(file_path).as_str(), "h264" | "hevc")
+}
+
+/// Codec name of the first video stream, lower case ("" when unknown).
+fn source_video_codec(file_path: &Path) -> String {
     let path_str = file_path.to_string_lossy().to_string();
-    let out = std::process::Command::new(ffprobe_path())
+    std::process::Command::new(ffprobe_path())
         .args([
             "-v", "error",
             "-select_streams", "v:0",
@@ -208,11 +213,21 @@ fn source_video_is_playable(file_path: &Path) -> bool {
             "-of", "default=noprint_wrappers=1:nokey=1",
             path_str.as_str(),
         ])
-        .output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().eq_ignore_ascii_case("h264"),
-        Err(_) => false,
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// Video arguments for a copied preview. HEVC is retagged hvc1, the only tag WebKit plays:
+/// copying a 1-hour OBS HEVC recording takes seconds, where the 720p re-encode it got
+/// before took about 10 minutes, and seeking past the head proxy jumped back to the start
+/// until then.
+fn copy_video_args(file_path: &Path) -> Vec<String> {
+    let mut a = vec!["-c:v".to_string(), "copy".to_string()];
+    if source_video_codec(file_path) == "hevc" {
+        a.extend(["-tag:v".to_string(), "hvc1".to_string()]);
     }
+    a
 }
 
 fn head_proxy_path(file_path: &Path) -> PathBuf {
@@ -271,8 +286,8 @@ fn ensure_head_proxy(file_path: &Path) -> Option<PathBuf> {
         "-map".into(), crate::commands::media::preferred_audio_map(file_path),
     ];
     if copy_video {
-        // Already H.264 — copying keeps the source resolution and costs well under a second.
-        args.extend(["-c:v".to_string(), "copy".to_string()]);
+        // Already H.264 or HEVC: copying keeps the source resolution and costs well under a second.
+        args.extend(copy_video_args(file_path));
     } else {
         #[cfg(target_os = "macos")]
         {
@@ -374,6 +389,7 @@ fn start_hq_proxy_bg(file_path: &Path) {
 
     let copy_video = source_video_is_playable(file_path);
     let audio_map = crate::commands::media::preferred_audio_map(file_path);
+    let copy_args = copy_video_args(file_path);
 
     std::thread::spawn(move || {
         let mut args: Vec<&str> = vec![
@@ -390,7 +406,7 @@ fn start_hq_proxy_bg(file_path: &Path) {
         // what makes a file scrub badly is the codec, not its size.
         #[cfg(target_os = "macos")]
         let vcodec_args: Vec<&str> = if copy_video {
-            vec!["-c:v", "copy"]
+            copy_args.iter().map(String::as_str).collect()
         } else {
             // Built from a capability probe rather than hard-coded: -power_efficient only
             // exists from ffmpeg 6.1, and an unknown option aborts the entire command.
@@ -401,7 +417,7 @@ fn start_hq_proxy_bg(file_path: &Path) {
         };
         #[cfg(not(target_os = "macos"))]
         let vcodec_args: Vec<&str> = if copy_video {
-            vec!["-c:v", "copy"]
+            copy_args.iter().map(String::as_str).collect()
         } else {
             vec!["-vf", "scale=-2:720", "-c:v", "libx264", "-preset", "ultrafast",
                  "-b:v", "4M", "-pix_fmt", "yuv420p"]

@@ -1,4 +1,5 @@
 "use client";
+import type { DefaultExportFormat } from "./SettingsModal";
 
 import { useEffect, useState, useRef } from "react";
 import { downloadAll, cancelExport as cancelExportRequest, type AgentResult } from "../lib/clipagent";
@@ -37,8 +38,10 @@ interface ExportPanelProps {
   qualityReencodeH264: boolean;
   setQualityReencodeH264: (v: boolean) => void;
 
-  exportCodec: "universal" | "original";
-  setExportCodec: (v: "universal" | "original") => void;
+  exportCodec: DefaultExportFormat;
+  setExportCodec: (v: DefaultExportFormat) => void;
+  /** Estimated size of the full-video download, 0 when unknown. */
+  fullVideoBytes: number;
 
   keepWholeVideo: boolean;
   setKeepWholeVideo: (v: boolean) => void;
@@ -100,6 +103,54 @@ function truncatePathEnd(path: string, maxLen: number = 40): string {
   return "..." + path.slice(-(maxLen - 3));
 }
 
+/** One choice out of a few, like macOS segmented controls. */
+function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+}: {
+  value: T;
+  options: { value: T; label: string; locked?: boolean }[];
+  onChange: (v: T) => void;
+  label: string;
+}) {
+  return (
+    <div role="radiogroup" aria-label={label} className="flex rounded-md border border-zinc-800 bg-zinc-950 p-0.5">
+      {options.map((o) => {
+        const on = value === o.value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            onClick={() => onChange(o.value)}
+            className={`flex-1 inline-flex items-center justify-center gap-1.5 rounded px-2 py-1.5 text-[13px] transition-colors ${
+              on ? "bg-zinc-700 text-white" : "text-zinc-400 hover:text-zinc-200"
+            }`}
+          >
+            {o.label}
+            {o.locked && <span className="rounded bg-zinc-800 px-1 text-[10px] text-zinc-400">Pro</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const SELECT =
+  "w-full appearance-none rounded-md bg-zinc-950 border border-zinc-800 text-zinc-200 text-[13px] pl-3 pr-8 py-2 hover:border-zinc-700 focus:border-violet-500 focus:ring-1 focus:ring-violet-500/30 outline-none cursor-pointer transition-colors";
+const CHEVRON = (
+  <svg className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" /></svg>
+);
+function fmtBytes(n: number) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  return `${Math.max(1, Math.round(n / 1e6))} MB`;
+}
+const FIELD_LABEL = "block text-xs text-zinc-500 mb-1.5";
+const HINT = "text-xs text-zinc-500 leading-relaxed mt-1.5";
+
 export default function ExportPanel({
   clips,
   selectedClipIds,
@@ -108,22 +159,16 @@ export default function ExportPanel({
   localFilePath,
   videoData,
   exportHQ,
-  setExportHQ,
   canUseQualityMode,
-  qualityReencodeH264,
-  setQualityReencodeH264,
   exportCodec,
   setExportCodec,
+  fullVideoBytes,
   keepWholeVideo,
   setKeepWholeVideo,
   fastCap,
   setFastCap,
   fastMax,
   trueMax,
-  fastReachesMax,
-  needsReencode,
-  showAdvancedExport,
-  setShowAdvancedExport,
   shouldWarnQuality,
   isExporting,
   setIsExporting,
@@ -421,7 +466,7 @@ export default function ExportPanel({
     failReasonsRef.current = {};
     exportMetaRef.current = [
       `Source: ${localFilePath ? "a local file" : exportUrl}`,
-      `Mode: ${localFilePath ? "local file" : isAudio ? "audio only" : exportHQ ? "High Quality" : "Fast"}, codec ${isAudio ? audioFormat : exportCodec}` +
+      `Mode: ${localFilePath ? "local file" : isAudio ? "audio only" : "exact cut"}, codec ${isAudio ? audioFormat : exportCodec}` +
         `${hasWatermark ? ", free plan (watermark)" : ""}`,
     ].join("\n");
 
@@ -429,21 +474,21 @@ export default function ExportPanel({
       access_token: getAccessToken ? await getAccessToken() : null,
       client_export_id: exportClientIdRef.current,
       source_title: (videoData as any)?.title ? String((videoData as any).title) : null,
-      quality_reencode_h264: !localFilePath && exportHQ ? Boolean(qualityReencodeH264) : undefined,
+      quality_reencode_h264: undefined,
       // Use the resolved URL that produced the current preview, not whatever is currently typed.
       url: localFilePath ? "" : exportUrl,
       local_path: localFilePath ?? undefined,
       clips: chosen,
-      mode: localFilePath || isAudio ? "speed" : exportHQ ? "quality" : "speed",
+      // Always the per-clip path: it cuts on the exact frame. The full video is downloaded
+      // after the clips when keep_full is set (download.rs).
+      mode: "speed",
       // Free exports are capped at 720p max (enforced client + backend).
       fast_max_height: localFilePath
-        ? null
-        : exportHQ
         ? null
         : hasWatermark
         ? Math.min(720, fastCap ?? 720)
         : fastCap,
-      keep_full: keepWholeVideo,
+      keep_full: !localFilePath && !isAudio && canUseQualityMode && keepWholeVideo,
       preview_url: videoData?.preview?.url ?? null,
       video_id: videoData?.id ?? null,
       export_path: sanitizeExportPath(exportPath),
@@ -475,7 +520,7 @@ export default function ExportPanel({
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       {/* WATERMARK BANNER — shown when on Free plan */}
       {hasWatermark && !localFilePath && (
         <div className="rounded-md border border-zinc-700 bg-zinc-900 flex items-center gap-3 px-3 py-2.5">
@@ -494,7 +539,7 @@ export default function ExportPanel({
           <button
             type="button"
             onClick={() => onUpgradeRequested?.("watermark_removal")}
-            className="shrink-0 px-3 py-1.5 rounded btn-brand text-xs"
+            className="shrink-0 px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium text-xs transition-colors"
           >
             Upgrade
           </button>
@@ -503,8 +548,8 @@ export default function ExportPanel({
 
       {/* LOW-CLIP NUDGE — shown when ≤ 3 clips remain this month (used 7+) */}
       {hasWatermark && !isExporting && typeof clipsRemaining === "number" && clipsRemaining <= 3 && clipsRemaining > 0 && (
-        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 flex items-center gap-3 px-3 py-2.5">
-          <p className="flex-1 text-xs text-amber-300 min-w-0 leading-relaxed">
+        <div className="rounded-md border border-zinc-700 bg-zinc-900 flex items-center gap-3 px-3 py-2.5">
+          <p className="flex-1 text-xs text-zinc-300 min-w-0 leading-relaxed">
             {clipsRemaining === 1
               ? <>Only <span className="font-semibold">1 clip</span> left this month</>
               : <><span className="font-semibold">{clipsRemaining} clips</span> left this month</>
@@ -513,7 +558,7 @@ export default function ExportPanel({
           <button
             type="button"
             onClick={() => onUpgradeRequested?.("clip_limit")}
-            className="shrink-0 px-3 py-1.5 rounded btn-brand text-xs"
+            className="shrink-0 px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white font-medium text-xs transition-colors"
           >
             Upgrade
           </button>
@@ -521,93 +566,40 @@ export default function ExportPanel({
       )}
 
       {/* CAPABILITIES */}
-      {!localFilePath && (
-      <div className="text-xs text-zinc-600 dark:text-gray-300/80 space-y-1">
-        <div>
-          Fast max: <span className="text-zinc-900 dark:text-white">{fmtRes(fastMax)}</span>{" "}
-          • Max possible: <span className="text-zinc-900 dark:text-white">{fmtRes(trueMax)}</span>
-        </div>
-
-        {fastMax > 0 && trueMax > 0 && fastMax < trueMax && (
-          <div className="text-yellow-300/90">
-            True max requires Quality mode (slower).
-            {needsReencode
-              ? " True max may require re-encoding (much slower on long 4K)."
-              : ""}
-          </div>
-        )}
-
-        {fastReachesMax && (
-          <div className="text-gray-400">
-            Fast already reaches the highest resolution available.
-          </div>
-        )}
-      </div>
-      )}
-
-      {localFilePath && (
-        <p className="text-xs text-zinc-500">
-          Local exports preserve source quality and format (trim only).
+      {!localFilePath && trueMax > 0 && (
+        <p className="text-xs text-zinc-400 leading-relaxed">
+          This video is available up to <span className="text-zinc-100">{fmtRes(hasWatermark ? Math.min(trueMax, 720) : trueMax)}</span>
+          {hasWatermark && trueMax > 720 ? <> on your plan ({fmtRes(trueMax)} with Pro)</> : null}.
         </p>
       )}
 
-      {/* QUALITY TOGGLE */}
-      <div className="space-y-1">
-        <label className="text-xs text-gray-400">Export as</label>
-        <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setExportKind("video")}
-              className={`flex-1 py-2 rounded text-sm font-medium transition ${
-                exportKind === "video"
-                  ? "btn-brand"
-                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
-              }`}
-            >
-              Video
-            </button>
-            <button
-              type="button"
-              onClick={() => setExportKind("audio")}
-              className={`flex-1 py-2 rounded text-sm font-medium transition ${
-                exportKind === "audio"
-                  ? "btn-brand"
-                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
-              }`}
-            >
-              Audio only
-            </button>
-        </div>
+      {/* EXPORT AS */}
+      <div>
+        <span className={FIELD_LABEL}>Export as</span>
+        <Segmented
+          label="Export as"
+          value={exportKind}
+          onChange={setExportKind}
+          options={[
+            { value: "video", label: "Video" },
+            { value: "audio", label: "Audio only" },
+          ]}
+        />
       </div>
 
       {isAudio && (
-        <div className="space-y-1">
-          <label className="text-xs text-gray-400">Audio format</label>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setAudioFormat("mp3")}
-              className={`flex-1 py-2 rounded text-sm font-medium transition ${
-                audioFormat === "mp3"
-                  ? "btn-brand"
-                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
-              }`}
-            >
-              MP3
-            </button>
-            <button
-              type="button"
-              onClick={() => setAudioFormat("wav")}
-              className={`flex-1 py-2 rounded text-sm font-medium transition ${
-                audioFormat === "wav"
-                  ? "btn-brand"
-                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
-              }`}
-            >
-              WAV
-            </button>
-          </div>
-          <p className="text-xs text-zinc-500 mt-1">
+        <div>
+          <span className={FIELD_LABEL}>Audio format</span>
+          <Segmented
+            label="Audio format"
+            value={audioFormat}
+            onChange={setAudioFormat}
+            options={[
+              { value: "mp3", label: "MP3" },
+              { value: "wav", label: "WAV" },
+            ]}
+          />
+          <p className={HINT}>
             {audioFormat === "mp3"
               ? "MP3, 320 kbps: small files for sharing, voice and podcast cuts."
               : "WAV, 48 kHz / 24-bit: lossless, best for sound effects going into an editor."}
@@ -615,150 +607,94 @@ export default function ExportPanel({
         </div>
       )}
 
-      {!isAudio && !localFilePath && (!fastReachesMax || showAdvancedExport) && (
-        <div className="space-y-2">
-          <label className="flex items-center gap-2 text-sm">
-            <span className={!exportHQ ? "text-zinc-900 dark:text-white" : "text-zinc-500 dark:text-gray-400"}>
-              Fast
-            </span>
-
-            <button
-              type="button"
-              onClick={() => {
-                if (!canUseQualityMode) {
-                  onUpgradeRequested?.("quality_mode");
-                  return;
-                }
-                setExportHQ(!exportHQ);
-              }}
-              className={`relative w-11 h-6 rounded-full ${
-                exportHQ ? "bg-green-500" : "bg-gray-600"
-              } ${!canUseQualityMode ? "opacity-60" : ""}`}
-              aria-disabled={!canUseQualityMode}
-              title={!canUseQualityMode ? "Quality mode is Pro-only" : undefined}
-            >
-              <span
-                className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
-                  exportHQ ? "translate-x-5" : ""
-                }`}
-              />
-            </button>
-
-            <span className={exportHQ ? "text-zinc-900 dark:text-white" : "text-zinc-500 dark:text-gray-400"}>
-              Quality
-            </span>
-          </label>
-
-          {!canUseQualityMode && (
-            <button
-              type="button"
-              className="text-xs text-zinc-500 underline"
-              onClick={() => onUpgradeRequested?.("quality_mode")}
-            >
-              Quality mode is Pro-only
-            </button>
-          )}
-        </div>
-      )}
-
-      {isAudio ? null : !localFilePath && !exportHQ ? (
-        <div className="space-y-1">
-          <label className="text-xs text-gray-400">Video format</label>
-
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setExportCodec("universal")}
-              className={`flex-1 py-2 rounded text-sm font-medium transition ${
-                exportCodec === "universal"
-                  ? "btn-brand"
-                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
-              }`}
-            >
-              H.264 – Universal
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setExportCodec("original")}
-              className={`flex-1 py-2 rounded text-sm font-medium transition ${
-                exportCodec === "original"
-                  ? "btn-brand"
-                  : "bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
-              }`}
-            >
-              Original – no re-encode
-            </button>
-          </div>
-
-          {/* Since 0.1.34 "Original" stream-copies the H.264 rendition when the source has one
-              (download.rs); the old "AV1" label described the bug that fix removed. */}
-          <p className="text-xs text-zinc-500 mt-1">
-            {exportCodec === "original"
-              ? "Copies the source's own H.264 stream: fastest, no quality loss."
-              : "Re-encodes to H.264: plays everywhere, slightly slower."}
-          </p>
-        </div>
-      ) : !localFilePath ? (
-        <div className="space-y-2">
-          <label className="text-xs text-gray-400">Quality mode</label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={qualityReencodeH264}
-              onChange={() => setQualityReencodeH264(!qualityReencodeH264)}
-            />
-            Re-encode to H.264 (slower)
-          </label>
-          <p className="text-xs text-zinc-500">
-            Re-encoding improves compatibility but can be much slower on long/high-res videos.
-          </p>
-        </div>
-      ) : null}
-
-      {!isAudio && !localFilePath && !exportHQ && fastMax > 0 && (
-        <div className="space-y-1">
-          <label className="text-xs text-zinc-400">Resolution</label>
+      {!isAudio && !localFilePath && trueMax > 0 && (
+        <div>
+          <label className={FIELD_LABEL} htmlFor="export-resolution">Resolution</label>
+          <div className="relative">
           <select
+            id="export-resolution"
             value={fastCap ?? "auto"}
             onChange={(e) =>
               setFastCap(e.target.value === "auto" ? null : Number(e.target.value))
             }
-            className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-sm px-3 py-2 focus:border-violet-500 focus:ring-1 focus:ring-violet-500/30 outline-none cursor-pointer"
+            className={SELECT}
           >
             <option value="auto">
-              Auto (up to {fmtRes(hasWatermark ? Math.min(fastMax, 720) : fastMax)})
+              Best available ({fmtRes(hasWatermark ? Math.min(trueMax, 720) : trueMax)})
             </option>
-          {[2160, 1440, 1080, 720, 480, 360]
-            .filter((h) => h <= (hasWatermark ? Math.min(fastMax, 720) : fastMax))
+          {[4320, 2160, 1440, 1080, 720, 480, 360]
+            .filter((h) => h <= (hasWatermark ? Math.min(trueMax, 720) : trueMax))
             .map((h) => (
               <option key={h} value={h}>
                 {h}p
               </option>
             ))}
           </select>
+          {CHEVRON}
+          </div>
         </div>
       )}
 
-      {!isAudio && fastReachesMax && !showAdvancedExport && (
-        <button
-          type="button"
-          onClick={() => setShowAdvancedExport(true)}
-          className="text-xs text-gray-400 underline"
-        >
-          Show advanced export options
-        </button>
+      {!isAudio && (
+        <div>
+          <label className={FIELD_LABEL} htmlFor="export-format">Format</label>
+          <div className="relative">
+            <select
+              id="export-format"
+              value={exportCodec}
+              onChange={(e) => setExportCodec(e.target.value as DefaultExportFormat)}
+              className={SELECT}
+            >
+              <option value="universal">MP4 · H.264</option>
+              <option value="hevc">MP4 · HEVC (H.265)</option>
+              <option value="prores">MOV · ProRes 422</option>
+            </select>
+            {CHEVRON}
+          </div>
+          <p className={HINT}>
+            {exportCodec === "hevc"
+              ? "About half the file size of H.264 at the same quality. Plays on Macs, iPhones and in Premiere; some older Windows PCs need an extra codec."
+              : exportCodec === "prores"
+              ? "For editing: scrubs smoothly in Premiere, Resolve and Final Cut. Very large files, about 3 GB per minute at 4K."
+              : "Plays everywhere. The safe choice for posting and sharing."}
+          </p>
+        </div>
       )}
 
-      {!isAudio && exportHQ && (
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={keepWholeVideo}
-            onChange={() => setKeepWholeVideo(!keepWholeVideo)}
-          />
-          Keep whole downloaded video as well
-        </label>
+      {!isAudio && !localFilePath && (
+        <div>
+          <label className={`flex items-start gap-2.5 text-[13px] ${canUseQualityMode ? "text-zinc-200 cursor-pointer" : "text-zinc-500"}`}>
+            <input
+              type="checkbox"
+              className="mt-0.5 accent-violet-500"
+              checked={canUseQualityMode && keepWholeVideo}
+              onChange={() => {
+                if (!canUseQualityMode) {
+                  onUpgradeRequested?.("quality_mode");
+                  return;
+                }
+                setKeepWholeVideo(!keepWholeVideo);
+              }}
+            />
+            <span>
+              Also save the full video
+              {!canUseQualityMode && <span className="ml-1.5 rounded bg-zinc-800 px-1 text-[10px] text-zinc-400">Pro</span>}
+              {fullVideoBytes > 0 && <span className="ml-1.5 text-zinc-500">about {fmtBytes(fullVideoBytes)}</span>}
+            </span>
+          </label>
+          {canUseQualityMode && keepWholeVideo && (
+            <p className={HINT}>
+              Saved in the best quality there is. If this Mac can&apos;t play that format (AV1 needs an M3 or
+              newer), Klipprr converts it to H.264 afterwards, which adds time.
+              {fullVideoBytes > 1_000_000_000 && (
+                <span className="mt-1.5 block rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-amber-200">
+                  This is a big download. Depending on your connection and your Mac it can take a long time. If you
+                  only need parts of the video, mark them as clips and export just those.
+                </span>
+              )}
+            </p>
+          )}
+        </div>
       )}
 
       {isExporting && rows.length > 0 && (() => {
@@ -805,6 +741,18 @@ export default function ExportPanel({
             </div>
 
             {/* High Quality mode fetches the whole video once before any clip is cut. */}
+            {(qualityGlobal?.phase === "quality_full_video" || qualityGlobal?.phase === "quality_full_convert") && (
+              <div className="mt-3 space-y-1.5">
+                <div className="flex justify-between text-xs text-zinc-400">
+                  <span>{qualityGlobal.phase === "quality_full_convert" ? "Converting the full video for this Mac" : "Saving the full video"}</span>
+                  <span className="tabular-nums">{Math.round(qualityGlobal.percent)}%</span>
+                </div>
+                <div className="h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                  <div className="h-full bg-violet-500 transition-[width] duration-300 ease-linear" style={{ width: `${qualityGlobal.percent}%` }} />
+                </div>
+              </div>
+            )}
+
             {exportHQ && qualityGlobal && !anyClipStarted && (
               <div className="mt-3 space-y-1.5">
                 <div className="flex justify-between text-xs text-zinc-400">
@@ -876,15 +824,11 @@ export default function ExportPanel({
         );
       })()}
 
-      <div className="space-y-1 relative group">
-        <label className="text-xs text-zinc-500 dark:text-gray-400">Export folder</label>
+      <div className="relative group">
+        <span className={FIELD_LABEL}>Export folder</span>
 
         <div
-          className={`flex gap-2 items-center rounded border min-w-0 max-w-full
-            ${canEditExportPath
-              ? "bg-zinc-800 border-zinc-700"
-              : "bg-zinc-900 border-zinc-800"
-            }`}
+          className="flex gap-2 items-center rounded-md border border-zinc-800 bg-zinc-950 p-1 pl-0 min-w-0 max-w-full"
         >
           <span
             className={`flex-1 min-w-0 max-w-[14rem] py-1 px-2 text-xs font-mono block overflow-hidden text-ellipsis whitespace-nowrap
@@ -898,9 +842,9 @@ export default function ExportPanel({
             <button
               type="button"
               onClick={chooseExportFolder}
-              className="shrink-0 py-1 px-2 rounded text-xs bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition"
+              className="shrink-0 py-1 px-2.5 rounded text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors"
             >
-              Browse
+              Change
             </button>
           ) : !canEditExportPath ? (
             <button
@@ -960,14 +904,14 @@ export default function ExportPanel({
 
       {!isExporting && (
         <>
-          <button
-            disabled={selectedClipIds.length === 0}
-            onClick={() => doExport(true)}
-            className="btn-brand-green w-full py-2.5 rounded font-semibold text-white flex items-center justify-center gap-2"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-            Export selected {selectedClipIds.length > 0 && `(${selectedClipIds.length})`}
-          </button>
+          {selectedClipIds.length > 0 && (
+            <button
+              onClick={() => doExport(true)}
+              className="w-full py-2 rounded-md text-[13px] font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-100 flex items-center justify-center gap-2 transition-colors"
+            >
+              Export selected ({selectedClipIds.length})
+            </button>
+          )}
 
           <button
             disabled={clips.length === 0}
@@ -975,7 +919,7 @@ export default function ExportPanel({
             className="btn-brand w-full py-2.5 rounded flex items-center justify-center gap-2"
           >
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-            Export all {clips.length > 0 && `(${clips.length})`}
+            {clips.length === 1 ? "Export 1 clip" : `Export ${clips.length} clips`}
           </button>
         </>
       )}

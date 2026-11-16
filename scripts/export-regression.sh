@@ -50,19 +50,24 @@ MAX_PREROLL_EXACT=0.25
 MAX_PREROLL_COPY=12.0
 
 # name | source (URL, or "local") | mode | codec | start | end | max height | expect | cut
-# expect: v = H.264 video, mp3 / wav = audio codec.
+# expect: v = H.264 video, hevc / prores = that video codec, mp3 / wav = audio codec.
+# Since 16 Nov 2026 the app only sends "universal" (H.264), "hevc" or "prores" for video;
+# "original" (stream copy) is kept here only because the engine still accepts it and the
+# yt_original file is the local source.
 # cut: copy = stream copy (pre-roll allowed), exact = re-encoded from the seek point.
 CASES=(
   "yt_original|$YT|speed|original|100|108|720|v|copy"
   "yt_universal|$YT|speed|universal|110|118|720|v|exact"
+  "yt_hevc|$YT|speed|hevc|140|146|720|hevc|exact"
+  "yt_prores|$YT|speed|prores|150|153|720|prores|exact"
   "yt_mp3|$YT|speed|mp3|120|128|720|mp3|exact"
   "yt_wav|$YT|speed|wav|130|135|720|wav|exact"
   "yt_quality|$YT_SHORT|quality|original|3|9||v|copy"
-  "twitch_clip|$TWITCH_CLIP|speed|original|2|8|720|v|copy"
-  "twitch_vod|$TWITCH_VOD|speed|original|1000|1008|720|v|copy"
-  "instagram|$IG|speed|original|1|5|1080|v|copy"
-  "x|$X|speed|original|1|4|720|v|copy"
-  "local_copy|local|speed|original|1|4||v|copy"
+  "twitch_clip|$TWITCH_CLIP|speed|universal|2|8|720|v|exact"
+  "twitch_vod|$TWITCH_VOD|speed|universal|1000|1008|720|v|exact"
+  "instagram|$IG|speed|universal|1|5|1080|v|exact"
+  "x|$X|speed|universal|1|4|720|v|exact"
+  "local_exact|local|speed|universal|1|4||v|exact"
   "local_mp3|local|speed|mp3|1|4||mp3|exact"
 )
 
@@ -197,6 +202,49 @@ if why:
 print("%.3f" % drift)
 DRIFTPY
 
+# Exact cases: is the clip's first frame the source frame on screen at the mark, or the
+# one after it? The drift check above works on a 30 Hz grid and cannot tell neighbouring
+# frames apart. This reads the source's real frame times (they are not always on a clean
+# grid from zero; a Twitch VOD's are not) and compares the clip's first frame with the frame
+# shown at the mark and with the next one.
+EXACT="$OUT_ROOT/first-frame.py"
+cat > "$EXACT" <<'EXACTPY'
+import os, subprocess, sys
+FFMPEG = os.environ.get("FFMPEG", "ffmpeg"); FFPROBE = os.environ.get("FFPROBE", "ffprobe")
+clip, src, mark = sys.argv[1], sys.argv[2], float(sys.argv[3])
+def out(a): return subprocess.run(a, capture_output=True).stdout.decode()
+def num(x):
+    try: return float(x.strip().rstrip(","))
+    except ValueError: return None
+origin = num(out([FFPROBE, "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", src])) or 0.0
+# Absolute window ending past the mark: a relative "+2" counts from the keyframe ffprobe
+# seeks to and can stop short of it.
+window = "%.3f%%%.3f" % (origin + mark - 1.5, origin + mark + 0.5)
+ts = sorted(t for t in (num(l) for l in out([FFPROBE, "-v", "error", "-select_streams", "v:0", "-read_intervals",
+      window, "-show_entries", "frame=pts_time", "-of", "csv=p=0", src]).splitlines()) if t is not None)
+shown = [t for t in ts if t <= origin + mark + 0.0005]
+after = [t for t in ts if t > origin + mark + 0.0005]
+if not shown or not after:
+    print("n/a no source frames near the mark"); sys.exit(1)
+f0, f1 = shown[-1], after[0]
+# Pick the reference frames by their own timestamps (-copyts keeps them as ffprobe reports
+# them). Seeking straight to a time can land a frame early, which is what made the first
+# version of this check call exact clips late.
+def gray(a, vf=""): return subprocess.run([FFMPEG, "-v", "error", "-nostdin"] + a + ["-vf", vf + "scale=96:54,format=gray",
+      "-fps_mode", "passthrough", "-f", "rawvideo", "-"], capture_output=True).stdout
+pair = gray(["-ss", "%.3f" % max(0.0, f0 - origin - 2.0), "-copyts", "-t", "4", "-i", src, "-an", "-frames:v", "2"],
+            "select='between(t\\,%.6f\\,%.6f)'," % (f0 - 0.0005, f1 + 0.0005))
+first = gray(["-i", clip, "-frames:v", "1"])
+n = 96 * 54
+if len(pair) < 2 * n or len(first) < n:
+    print("n/a could not read frames"); sys.exit(1)
+d0 = sum(abs(a - b) for a, b in zip(first[:n], pair[:n]))
+d1 = sum(abs(a - b) for a, b in zip(first[:n], pair[n:2 * n]))
+if min(d0, d1) > 0.9 * max(d0, d1):
+    print("n/a neighbouring frames too similar to tell apart"); sys.exit(1)
+print("exact" if d0 < d1 else "one frame late (diff %d vs %d)" % (d0, d1))
+EXACTPY
+
 # A reference on the source's own timeline. Local cases already have the file; URL
 # cases get a direct media URL from yt-dlp, which only has to be the same video, not
 # the same rendition the app picked: the thumbnails are scaled before matching.
@@ -289,6 +337,8 @@ PY
     problems="$problems duration ${dur:-none}s (want ${want}s);"
   case $expect in
     v) [ "$vcodec" = h264 ] || problems="$problems video ${vcodec:-none} (want h264);" ;;
+    hevc) [ "$vcodec" = hevc ] || problems="$problems video ${vcodec:-none} (want hevc);" ;;
+    prores) [ "$vcodec" = prores ] || problems="$problems video ${vcodec:-none} (want prores);" ;;
     mp3) [ "$acodec" = mp3 ] && [ -z "$vcodec" ] || problems="$problems audio ${acodec:-none} video ${vcodec:-none};" ;;
     wav) [ "$acodec" = pcm_s24le ] || problems="$problems audio ${acodec:-none} (want pcm_s24le);" ;;
   esac
@@ -313,6 +363,22 @@ PY
     *) python3 -c "import sys; sys.exit(0 if abs($drift) <= $MAX_START_DRIFT else 1)" ||
          problems="$problems starts ${drift}s off the mark (max ${MAX_START_DRIFT}s);" ;;
   esac
+  # Black first frame: the picture must not start after the sound. A 1-frame gap here is
+  # what players showed as a black first frame (fixed 16 Nov 2026).
+  local vstart=""
+  if [ "$kind" = video ] && [ "$cut" = exact ]; then
+    vstart=$("$FFPROBE" -v error -select_streams v:0 -show_entries stream=start_time -of csv=p=0 "$f")
+    python3 -c "import sys; sys.exit(0 if float('${vstart:-0}') <= 0.002 else 1)" ||
+      problems="$problems picture starts ${vstart}s after the sound (black first frame);"
+  fi
+  local frame_check=""
+  if [ "$kind" = video ] && [ "$cut" = exact ] && [ -n "$ref" ]; then
+    frame_check=$(FFMPEG="$FFMPEG" FFPROBE="$FFPROBE" python3 "$EXACT" "$f" "$ref" "$start")
+    case $frame_check in
+      exact|"n/a"*) ;;
+      *) problems="$problems first frame is $frame_check;" ;;
+    esac
+  fi
   if [ "$kind" = video ]; then
     preroll=$(preroll_secs "$f")
     if [ -n "$preroll" ]; then
@@ -325,7 +391,7 @@ PY
     echo "FAIL $name:$problems"
     failed=$((failed + 1))
   else
-    echo "ok   $name  $(( $(date +%s) - t0 ))s  ${vcodec:-} ${acodec:-} ${dur}s  start ${drift_show}${preroll:+  pre-roll ${preroll}s}"
+    echo "ok   $name  $(( $(date +%s) - t0 ))s  ${vcodec:-} ${acodec:-} ${dur}s  start ${drift_show}${preroll:+  pre-roll ${preroll}s}${vstart:+  picture at ${vstart}s}${frame_check:+  first frame: ${frame_check}}"
   fi
   [ "$name" = yt_original ] && LOCAL_SRC=$f
 }

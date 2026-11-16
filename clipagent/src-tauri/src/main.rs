@@ -142,6 +142,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::download::get_default_export_dir,
+            commands::download::read_clipboard_text,
             commands::download::get_export_path,
             commands::download::set_export_path,
             commands::download::clear_export_path,

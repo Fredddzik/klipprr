@@ -127,20 +127,34 @@ Any redesign must preserve the invariants below.
 
 `POST /download-all` → `commands/download.rs::handle_download_all`
 
-Two source kinds and two modes:
+Every video export is an **exact cut** (since 16 Nov 2026, branch `ui/main-and-start-screen`):
+it starts on the frame that is on screen at the In point and is re-encoded in the chosen
+format. A stream copy can only start on a keyframe, so the "Original – no re-encode" option
+and the Fast/Quality switch were removed (both modes downloaded the same stream).
 
-|  | Speed mode | Quality mode |
-|---|---|---|
-| **URL source** | `yt-dlp --download-sections` per clip, stream copy into MP4 | full download, then ffmpeg re-encode |
-| **Local source** | ffmpeg `-ss/-to` stream copy | ffmpeg re-encode |
+| Source | How a clip is cut |
+|---|---|
+| **YouTube** | `youtube_exact_cut`: yt-dlp prints the chosen height, fps and direct stream URLs; ffmpeg seeks each stream to the first frame (`frame_span`, minus 1 ms), `setpts/asetpts=PTS-STARTPTS`, `-frames:v`. Falls back to the section download below on any failure |
+| **Other URLs** | `yt-dlp --download-sections` per clip, then the padding is skipped by length difference. **Not yet frame exact** (todo: check Twitch, Instagram, X, TikTok) |
+| **Local file** | same frame maths as YouTube, fps from `probe_fps` |
 
-Format selectors (speed mode, URL source):
+Formats (`ExportVideoCodec`, media.rs): MP4 · H.264 (`"universal"`), MP4 · HEVC (`"hevc"`),
+MOV · ProRes 422 (`"prores"`), all on VideoToolbox. H.264 bitrate scales with height (6, 12,
+24, 40 Mbps at ≤720p, ≤1080p, ≤1440p, above); HEVC uses half.
+
+Why the frame maths matters: the preview shows a frame from its start until the next one, so
+a mark lands partway through a frame. Seeking to the mark itself drops that frame (the clip
+starts one frame late) and left the video 1 frame after the audio, which players show as a
+black first frame.
+
+"Also save the full video" (paid plans) runs after the clips: best quality (`bv*+ba[ext=m4a]`),
+converted to H.264 only when this Mac cannot play it (VP9, or AV1 before M3:
+`mac_has_av1_decoder`).
+
+Format selectors (other URLs):
 
 ```
-universal / watermarked:  bv*[height<=H] + ba / best      → re-encoded to H.264
-"original" (stream copy): bv*[ext=mp4][height<=H]+ba[ext=m4a]
-                          / bv*[ext=mp4][height<=H]+ba
-                          / best[ext=mp4][height<=H] / best[height<=H]
+bv*[height<=H] + ba / best      → re-encoded in the chosen format
 ```
 
 Up to **4 clips export in parallel**, each spawning its own yt-dlp + ffmpeg. Not all four
@@ -156,8 +170,6 @@ stream URLs. Failures another attempt cannot fix (private, members-only, age-gat
 `ytdlp_failure_is_permanent`. A cancel ends the wait at once. If a clip still fails, the
 export panel keeps it on screen with **Retry** and **Email us** instead of a dialog.
 
-The "Original" option is labelled "Original – no re-encode" and prefers H.264 (fixed in
-0.1.34 and 0.1.37); the selector above is simplified, the real one is in download.rs.
 
 ---
 
@@ -211,6 +223,13 @@ cp bin/yt-dlp bin/ffmpeg bin/ffprobe $APP/Contents/Resources/bin/
 $APP/Contents/MacOS/clipagent &
 curl -s "http://127.0.0.1:4000/resolve?url=$(python3 -c "import urllib.parse;print(urllib.parse.quote('https://www.youtube.com/watch?v=dQw4w9WgXcQ',safe=''))")"
 ```
+
+Start it with a clean environment, as Finder would: `env -i HOME="$HOME" USER="$USER"
+PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$TMPDIR" $APP/Contents/MacOS/clipagent &`. Launched
+from a shell, yt-dlp finds Homebrew's `deno` on `PATH`, extracts YouTube differently, and the
+DASH preview then fails with `audio index unreadable` and spins forever. The shipped app never
+sees that `PATH`, so this is a test-setup artefact, not a product bug (found 2026-11-16).
+The same applies to `cargo tauri dev`, which is why dev builds "never resolve" videos.
 
 The agent logs to `~/Library/Logs/ClipAgent/clipagent.log`. `[RESOLVE]` lines tell you which
 preview decision was made.

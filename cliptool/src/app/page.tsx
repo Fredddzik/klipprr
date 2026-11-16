@@ -27,6 +27,7 @@ import { useAppUpdate } from "@/hooks/useAppUpdate";
 import ClipsPanel from "@/components/ClipsPanel";
 import ExportPanel from "@/components/ExportPanel";
 import LeftSidebar from "@/components/LeftSidebar";
+import WhatsNew from "@/components/WhatsNew";
 import AccessModal from "@/components/AccessModal";
 import WatermarkInterstitial from "@/components/WatermarkInterstitial";
 import SettingsModal, {
@@ -54,6 +55,22 @@ const SETTINGS_KEYS = {
 } as const;
 /** Held refunds the UI owed before the agent took over the quota (0.1.38). Cleared on start. */
 const LEGACY_PENDING_RESERVATION_KEY = "klipprr-pending-export-reservation";
+
+/** The first video link in pasted text, so "watch this https://youtu.be/abc lol" still
+ *  loads. Returns null when there is none; the caller then leaves the text for editing. */
+function extractVideoLink(text: string): string | null {
+  const t = text.trim();
+  const full = t.match(/https?:\/\/[^\s<>"']+/i);
+  if (full) return full[0].replace(/[),.;!?]+$/, "");
+  const bare = t.match(/\b(?:www\.)?(?:youtu\.be|youtube\.com|twitch\.tv|x\.com|twitter\.com|tiktok\.com|vm\.tiktok\.com|instagram\.com)\/[^\s<>"']+/i);
+  if (bare) return bare[0].replace(/[),.;!?]+$/, "");
+  // A bare 11-character YouTube ID, as loadVideo already accepts.
+  return /^[a-zA-Z0-9_-]{11}$/.test(t) ? t : null;
+}
+
+/** Small key label used in shortcut hints. */
+const KEYCAP =
+  "inline-block rounded border border-zinc-700 bg-zinc-900 px-1.5 py-px font-mono text-[10px] text-zinc-300";
 
 export default function HomePage() {
   const [videoUrl, setVideoUrl] = useState("");
@@ -94,6 +111,12 @@ export default function HomePage() {
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [exportPanelOpen, setExportPanelOpen] = useState(false);
+  const [videoAspect, setVideoAspect] = useState<number | null>(null);
+  // Height of the picture area, so the panel hugs the video with no empty bands. Measured
+  // rather than left to CSS aspect-ratio, which laid out too small on first load.
+  const [videoBoxHeight, setVideoBoxHeight] = useState<number | null>(null);
+  const videoCardRef = useRef<HTMLDivElement | null>(null);
+  const videoBoxRef = useRef<HTMLDivElement | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [theme, setThemeState] = useState<ThemePreference>("dark");
   const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("dark");
@@ -311,7 +334,7 @@ useEffect(() => {
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [prevVideoId, setPrevVideoId] = useState<string | null>(null);
   const [exportHQ, setExportHQ] = useState(false);
-  const [exportCodec, setExportCodec] = useState<"universal" | "original">("universal");
+  const [exportCodec, setExportCodec] = useState<DefaultExportFormat>("universal");
   // Load settings from localStorage and sync exportCodec with default format
   useEffect(() => {
     const t = localStorage.getItem(SETTINGS_KEYS.theme) as ThemePreference | null;
@@ -319,7 +342,8 @@ useEffect(() => {
     const s = localStorage.getItem(SETTINGS_KEYS.clipSort) as ClipSortOption | null;
     if (s === "timeline" || s === "created") setClipSortState(s);
     const f = localStorage.getItem(SETTINGS_KEYS.defaultExportFormat) as DefaultExportFormat | null;
-    if (f === "universal" || f === "original") {
+    // "original" (stream copy) was removed: copies start on a keyframe, not the marked frame.
+    if (f === "universal" || f === "hevc" || f === "prores") {
       setDefaultExportFormatState(f);
       setExportCodec(f);
     }
@@ -451,7 +475,83 @@ useEffect(() => {
     undo,
     redo,
     showUndoToast,
-  }); 
+    onOpenExport: () => {
+      if (clips.length > 0) setExportPanelOpen(true);
+    },
+  });
+
+  useEffect(() => {
+    const card = videoCardRef.current;
+    const box = videoBoxRef.current;
+    const area = card?.parentElement;
+    if (!videoAspect || !card || !box || !area) {
+      setVideoBoxHeight(null);
+      return;
+    }
+    const measure = () => {
+      // Below 1200px the panels stack and the video keeps the flexible height.
+      if (!window.matchMedia("(min-width: 1200px)").matches) {
+        setVideoBoxHeight(null);
+        return;
+      }
+      const cs = getComputedStyle(area);
+      const available = area.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+      const chrome = card.offsetHeight - box.offsetHeight; // title, timeline, controls, borders
+      const fit = Math.min(box.clientWidth / videoAspect, available - chrome);
+      setVideoBoxHeight(Math.max(160, Math.floor(fit)));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(area);
+    ro.observe(card);
+    return () => ro.disconnect();
+  }, [videoAspect, videoData, exportPanelOpen]);
+
+  // Puts pasted text in the link field and, when it holds a link, loads it straight away.
+  // Text without a link stays in the field so it can be fixed and loaded by hand.
+  const urlInputRef = useRef<HTMLInputElement | null>(null);
+  const [pasteHint, setPasteHint] = useState<string | null>(null);
+  function pasteAndLoad(text: string) {
+    const link = extractVideoLink(text);
+    setVideoUrl(link ?? text.trim());
+    if (link) {
+      setPasteHint(null);
+      loadVideo(link);
+    } else {
+      setPasteHint("That doesn't look like a video link. Check it in the field above, then press Load.");
+      urlInputRef.current?.focus();
+    }
+  }
+  async function pasteFromClipboard() {
+    let text = "";
+    try {
+      text = isTauri ? await invoke<string>("read_clipboard_text") : await navigator.clipboard.readText();
+    } catch {
+      text = "";
+    }
+    if (!text.trim()) {
+      setPasteHint("Your clipboard is empty. Copy a video link first, then press Paste a link.");
+      urlInputRef.current?.focus();
+      return;
+    }
+    pasteAndLoad(text);
+  }
+
+  // Start screen: ⌘V anywhere loads the link, without clicking into the field first.
+  useEffect(() => {
+    if (videoData || loading) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const el = e.target;
+      if (el instanceof HTMLElement && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+      const text = e.clipboardData?.getData("text")?.trim();
+      if (!text) return;
+      e.preventDefault();
+      pasteAndLoad(text);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoData, loading]);
 
 // Keep analyticsBase ref in sync so event handlers closed over it use current values.
 // eslint-disable-next-line react-hooks/rules-of-hooks
@@ -575,8 +675,10 @@ async function refreshUsage() {
 }
 
   // Load video metadata from ClipAgent
-  async function loadVideo() {
-    // Normalize video URLs (accept many; UI only promises YouTube, Twitch clips, X, Instagram, Vimeo)
+  async function loadVideo(urlOverride?: unknown) {
+    // Called from a click (argument is the event) or with a pasted link.
+    const inputUrl = typeof urlOverride === "string" ? urlOverride : videoUrl;
+    // Normalize video URLs (accept many; the UI only promises YouTube, Twitch, Instagram, X, TikTok and direct links)
     function normalizeVideoUrl(input: string): string | null {
       input = input.trim();
       if (!input) return null;
@@ -622,14 +724,14 @@ async function refreshUsage() {
       return null;
     }
 
-    if (!videoUrl.trim()) {
-      alert("Paste a video URL first.");
+    if (!inputUrl.trim()) {
+      alert("Paste a video link first.");
       return;
     }
 
-    const normalized = normalizeVideoUrl(videoUrl);
+    const normalized = normalizeVideoUrl(inputUrl);
     if (!normalized) {
-      alert("Please enter a valid video link (YouTube, Twitch clips, X, Instagram, Vimeo, or direct video URL).");
+      alert("Enter a valid video link (YouTube, Twitch, Instagram, X, TikTok, or a direct video link).");
       return;
     }
 
@@ -743,12 +845,14 @@ async function refreshUsage() {
       // Use backend stream URL so video works on Windows (convertFileSrc is unreliable there)
       const ac = typeof audioCodec === "string" ? audioCodec.toLowerCase() : "";
       const vc = typeof videoCodec === "string" ? videoCodec.toLowerCase() : "";
-      // The webview plays MP4/MOV with H.264 only. Anything else (an OBS .mkv, a .webm, an
-      // .avi, an iPhone HEVC .MOV) goes through the agent's preview proxy, like unplayable audio.
+      // The webview plays MP4/MOV with H.264, or HEVC tagged hvc1 (the agent reports any
+      // other HEVC as "hevc_hev1"). Those play straight from disk, so even a 16 GB, 1-hour
+      // OBS recording loads and scrubs at once. Anything else (an OBS .mkv, a .webm, an
+      // .avi, an iPhone video with spatial audio) goes through the agent's preview proxy.
       const playableContainer = /\.(mp4|m4v|mov)$/i.test(selected);
-      const playableVideo = vc === "" || vc === "h264";
+      const playableVideo = vc === "" || vc === "h264" || vc === "hevc";
       const needsPcmFix =
-        ac.startsWith("pcm") || ac === "lpcm" || ac === "alac" || ac === "flac" ||
+        ac.startsWith("pcm") || ac === "lpcm" || ac === "alac" || ac === "flac" || ac === "apac" ||
         !playableContainer || !playableVideo;
       const previewUrlForVideo = `${CLIPAGENT_HTTP}/local-preview?path=${encodeURIComponent(selected)}${needsPcmFix ? "&pcm_fix=1" : ""}`;
       const data: ResolvedVideo = {
@@ -765,6 +869,7 @@ async function refreshUsage() {
           fastMaxHeight: 1080,
           trueMaxHeight: 1080,
           trueMaxRequiresReencode: false,
+          fullVideoBytes: 0,
         },
         raw: {
           id: localId,
@@ -1551,7 +1656,9 @@ useEffect(() => {
   } = useAppUpdate(isTauri);
 
   return (
-  <div className="h-screen min-h-dvh flex overflow-hidden bg-zinc-950 text-zinc-200">
+  // select-none: like Premiere or Resolve, dragging across the window never highlights the
+  // interface. Inputs stay selectable (globals.css).
+  <div className="h-screen min-h-dvh flex overflow-hidden bg-zinc-950 text-zinc-200 select-none">
     <LeftSidebar
       onOpenSettings={() => setShowSettings(true)}
       collapsed={sidebarCollapsed}
@@ -1704,6 +1811,7 @@ useEffect(() => {
     return {};
   }}
 />
+    <WhatsNew />
     {undoToast && (
       <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-zinc-900 border border-zinc-800 px-4 py-2 rounded-md text-sm text-zinc-300 animate-toast">
         {undoToast}
@@ -1742,9 +1850,24 @@ useEffect(() => {
           <span className="text-zinc-600 text-sm shrink-0">URL</span>
           <input
             type="text"
-            placeholder="YouTube, Twitch clips, X, Instagram, or video URL…"
+            ref={urlInputRef}
+            placeholder="Paste a YouTube, Twitch, Instagram, X or TikTok link"
             value={videoUrl}
-            onChange={(e) => setVideoUrl(e.target.value)}
+            onChange={(e) => {
+              setVideoUrl(e.target.value);
+              if (pasteHint) setPasteHint(null);
+            }}
+            onPaste={(e) => {
+              // Only when the paste replaces everything in the field (empty, or all selected).
+              // A paste into the middle of a link being edited is left alone.
+              const el = e.currentTarget;
+              const replacesAll =
+                el.value.trim() === "" || (el.selectionStart === 0 && el.selectionEnd === el.value.length);
+              const text = e.clipboardData.getData("text");
+              if (!replacesAll || loading || !extractVideoLink(text)) return;
+              e.preventDefault();
+              pasteAndLoad(text);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
@@ -1792,7 +1915,6 @@ useEffect(() => {
           <p className="text-xs text-zinc-500">Resolving video…</p>
         </div>
       )}
-      <p className="text-[11px] text-zinc-600 mt-1.5">YouTube · Twitch clips · X · Instagram Reels · Vimeo · Direct video URLs</p>
     </div>
 
     {resolveError && (
@@ -1813,6 +1935,52 @@ useEffect(() => {
           >
             Email us
           </button>
+        </div>
+      </div>
+    )}
+
+    {/* Start screen: nothing loaded yet. Says what to do instead of leaving a blank window. */}
+    {!videoData && !loading && (
+      <div className="flex-1 min-h-0 flex items-center justify-center p-6">
+        <div className="w-full max-w-md text-center">
+          <svg className="mx-auto w-6 h-6 text-violet-400" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+          </svg>
+          <h2 className="mt-3 text-base font-medium text-zinc-100">Paste a link or load a video file</h2>
+          <p className="mt-1 text-sm text-zinc-500">Clip any part of it and export just that part.</p>
+          <ul className="mt-4 flex flex-wrap items-center justify-center gap-1.5" aria-label="Supported sources">
+            {["YouTube", "Twitch", "Instagram", "X", "TikTok", "Video files"].map((name) => (
+              <li key={name} className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-xs text-zinc-400">
+                {name}
+              </li>
+            ))}
+          </ul>
+          <div className="mt-5 flex items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={pasteFromClipboard}
+              className="px-4 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white font-semibold text-sm transition"
+            >
+              Paste a link
+            </button>
+            {isTauri && (
+              <button
+                type="button"
+                onClick={loadLocalFile}
+                className="px-4 py-1.5 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 font-medium text-sm transition"
+              >
+                Load local file
+              </button>
+            )}
+          </div>
+          {pasteHint && <p className="mt-3 text-xs text-amber-300">{pasteHint}</p>}
+          <p className="mt-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-[11px] text-zinc-500">
+            <span><kbd className={KEYCAP}>⌘V</kbd> paste and load</span>
+            <span><kbd className={KEYCAP}>I</kbd> mark in</span>
+            <span><kbd className={KEYCAP}>O</kbd> mark out</span>
+            <span><kbd className={KEYCAP}>E</kbd> export</span>
+          </p>
         </div>
       </div>
     )}
@@ -1866,11 +2034,26 @@ useEffect(() => {
         {/* Content area: video + clips; scrolls horizontally when export open and narrow */}
         <div className="flex flex-col min-[1200px]:flex-row gap-4 p-4 flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-hidden min-[1200px]:min-w-0">
           {/* Video + timeline: fills space */}
-          <div className="flex flex-col min-h-[280px] min-[1200px]:min-h-0 min-w-0 flex-1 min-[1200px]:min-w-[300px] rounded-md border border-zinc-800 bg-zinc-950 shrink-0">
-            <h2 className="text-xs font-medium text-zinc-600 px-3 pt-2 truncate shrink-0" title={videoData.title}>
-              {videoData.title}
-            </h2>
-            <div className="relative flex-1 min-h-0 w-full">
+          <div
+            ref={videoCardRef}
+            className={`flex flex-col min-h-[280px] min-[1200px]:min-h-0 min-w-0 flex-1 min-[1200px]:min-w-[300px] rounded-md border border-zinc-800 bg-zinc-950 shrink-0 ${videoBoxHeight ? "self-start" : ""}`}
+          >
+            <div className="flex items-baseline justify-between gap-4 px-3 py-2 shrink-0 min-w-0">
+              <h2 className="text-sm font-medium text-zinc-200 truncate min-w-0" title={videoData.title}>
+                {videoData.title}
+              </h2>
+              <span className="shrink-0 font-mono text-[11px] tabular-nums text-zinc-500">
+                {trueMax > 0 ? `${trueMax}p · ` : ""}
+                {formatTime(videoData.duration)}
+              </span>
+            </div>
+            {/* Once the video's shape is known the frame takes exactly that shape, so there are
+                no empty bands between the title, the picture and the timeline. */}
+            <div
+              ref={videoBoxRef}
+              className={`relative min-h-0 w-full ${videoBoxHeight ? "shrink-0" : "flex-1"}`}
+              style={videoBoxHeight ? { height: videoBoxHeight } : undefined}
+            >
               {/* Spinner only while the preview has nothing to play yet — a TikTok or
                   DASH-only source whose first frame depends on the download finishing. */}
               {ytPreviewLoading && (
@@ -1930,6 +2113,7 @@ useEffect(() => {
                 })()}
                 videoKey={videoData.id}
                 unavailable={previewUnavailable}
+                onAspectRatio={setVideoAspect}
                 onStreamError={(reason) => {
                   console.warn("[stream preview] falling back to download:", reason);
                   setDashFailed(true);
@@ -1946,7 +2130,7 @@ useEffect(() => {
                 }}
               />
             </div>
-            <div className="shrink-0 p-2 border-t border-zinc-800">
+            <div className="shrink-0 px-3 pt-3 pb-2">
               <Timeline
                 duration={videoData.duration}
                 clips={clips}
@@ -1969,7 +2153,7 @@ useEffect(() => {
                 }}
               />
             </div>
-            <div className="shrink-0 p-3 flex flex-wrap gap-2 border-t border-zinc-800">
+            <div className="shrink-0 px-3 pb-3 pt-1 flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   onClick={() => {
@@ -2021,19 +2205,22 @@ useEffect(() => {
                   {editTarget
                     ? `Editing ${editTarget.field.toUpperCase()}`
                     : markIn === null && markOut === null
-                    ? "Mark IN (I)"
+                    ? "Mark In"
                     : markIn !== null && markOut === null
-                    ? "Mark OUT (O)"
-                    : "Mark IN (I)"}
+                    ? "Mark Out"
+                    : "Mark In"}
                 </button>
+                <span className="font-mono text-xs tabular-nums text-zinc-400">
+                  {formatTime(currentTime)} / {formatTime(videoData.duration)}
+                </span>
                 {!editTarget && (
                   <span
                     className="self-center ml-auto text-[11px] text-zinc-500 whitespace-nowrap"
-                    title="M also toggles IN and OUT. Arrow keys jump 5 seconds; with ⌘ they step one frame."
+                    title="M also toggles In and Out. Arrow keys jump 5 seconds; with ⌘ they step one frame. ⌘Z undoes."
                   >
-                    <kbd className="font-sans text-zinc-400">I</kbd> in · <kbd className="font-sans text-zinc-400">O</kbd> out ·{" "}
-                    <kbd className="font-sans text-zinc-400">Space</kbd> play · <kbd className="font-sans text-zinc-400">← →</kbd> 5s ·{" "}
-                    <kbd className="font-sans text-zinc-400">⌘Z</kbd> undo
+                    <kbd className={KEYCAP}>I</kbd> in <kbd className={`${KEYCAP} ml-2`}>O</kbd> out{" "}
+                    <kbd className={`${KEYCAP} ml-2`}>Space</kbd> play <kbd className={`${KEYCAP} ml-2`}>← →</kbd> 5s{" "}
+                    <kbd className={`${KEYCAP} ml-2`}>E</kbd> export
                   </span>
                 )}
                 {editTarget && (
@@ -2145,7 +2332,7 @@ useEffect(() => {
         {exportPanelOpen && (
           <div className="w-96 flex-shrink-0 flex flex-col overflow-hidden rounded-md border border-zinc-800 bg-zinc-900 self-stretch">
             <div className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-zinc-800">
-              <span className="text-sm font-semibold text-zinc-200">Export Settings</span>
+              <span className="text-sm font-medium text-zinc-100">Export</span>
               <button
                 type="button"
                 onClick={() => setExportPanelOpen(false)}
@@ -2173,6 +2360,7 @@ useEffect(() => {
                 keepWholeVideo={keepWholeVideo}
                 setKeepWholeVideo={setKeepWholeVideo}
                 fastCap={fastCap}
+                fullVideoBytes={videoData?.capabilities?.fullVideoBytes ?? 0}
                 setFastCap={setFastCap}
                 fastMax={fastMax}
                 trueMax={trueMax}

@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ClipAgent",
+  title: "Klipprr",
   description: "Clip and export moments from any video",
 };
 

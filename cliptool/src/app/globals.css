@@ -27,6 +27,13 @@ html, body {
   overflow: hidden;
 }
 
+/* The app shell is select-none (page.tsx); fields still have to take a selection. */
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);

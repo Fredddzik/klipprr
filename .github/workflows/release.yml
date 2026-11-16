@@ -199,7 +199,10 @@ jobs:
           SIGNATURE=$(cat "$APP_SIG" | jq -Rs .)
           DOWNLOAD_URL="https://github.com/${PUBLIC_REPO}/releases/download/${TAG}/${APP_TAR_GZ_BASENAME}"
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          echo "{\"version\":\"${VERSION}\",\"notes\":\"\",\"pub_date\":\"${PUB_DATE}\",\"platforms\":{\"darwin-aarch64\":{\"signature\":${SIGNATURE},\"url\":\"${DOWNLOAD_URL}\"}}}" > latest.json
+          # Update toast text: this version's entry in cliptool/src/lib/release-notes.json, the
+          # same notes the in-app "What's new" card shows. Empty when there is no entry.
+          NOTES=$(python3 -c "import json,sys; n=json.load(open('cliptool/src/lib/release-notes.json')).get(sys.argv[1], []); print(json.dumps(chr(10).join('- ' + x for x in n)))" "${VERSION}")
+          printf '%s\n' "{\"version\":\"${VERSION}\",\"notes\":${NOTES},\"pub_date\":\"${PUB_DATE}\",\"platforms\":{\"darwin-aarch64\":{\"signature\":${SIGNATURE},\"url\":\"${DOWNLOAD_URL}\"}}}" > latest.json
           gh release upload "$TAG" --repo "$PUBLIC_REPO" latest.json --clobber
 
       # Upload the .dmg to Vercel Blob as a stable, direct URL for the website

@@ -84,6 +84,68 @@ pub(super) fn h264_encoder_args() -> Vec<&'static str> {
     }
 }
 
+/// Output formats for an exact (re-encoded) cut. All run on the Mac's media engine.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum ExportVideoCodec {
+    /// Plays everywhere. The default.
+    H264,
+    /// About half the size of H.264 at the same quality; older Windows PCs may need a codec.
+    Hevc,
+    /// Apple ProRes 422 in a .mov: large files that scrub smoothly in an editor.
+    ProRes,
+}
+
+impl ExportVideoCodec {
+    /// "universal" is the H.264 option's old name, still sent by older builds of the UI.
+    pub(super) fn from_request(codec: &str) -> Self {
+        match codec {
+            "hevc" => Self::Hevc,
+            "prores" => Self::ProRes,
+            _ => Self::H264,
+        }
+    }
+
+    pub(super) fn ext(self) -> &'static str {
+        match self {
+            Self::ProRes => "mov",
+            _ => "mp4",
+        }
+    }
+
+    /// Video and audio encoder arguments. The bitrate follows the picture size: a flat 6 Mbps
+    /// (what `h264_encoder_args` uses) is fine at 1080p but visibly soft at 4K.
+    pub(super) fn encoder_args(self, height: i64) -> Vec<String> {
+        let h264_mbps = match height {
+            h if h > 1440 => 40,
+            h if h > 1080 => 24,
+            h if h > 720 => 12,
+            _ => 6,
+        };
+        let mut args: Vec<String> = Vec::new();
+        match self {
+            Self::H264 => {
+                args.extend(["-c:v", "h264_videotoolbox"].map(String::from));
+                args.extend(videotoolbox_speed_args().into_iter().map(String::from));
+                args.extend(["-pix_fmt".into(), "yuv420p".into(), "-b:v".into(), format!("{}M", h264_mbps)]);
+                args.extend(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"].map(String::from));
+            }
+            Self::Hevc => {
+                args.extend(["-c:v", "hevc_videotoolbox"].map(String::from));
+                // hvc1 is the tag QuickTime and Apple devices need to play HEVC in an MP4.
+                args.extend(["-tag:v".into(), "hvc1".into(), "-pix_fmt".into(), "yuv420p".into()]);
+                args.extend(["-b:v".into(), format!("{}M", (h264_mbps / 2).max(3))]);
+                args.extend(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"].map(String::from));
+            }
+            Self::ProRes => {
+                // Profile 2 = ProRes 422. Uncompressed PCM audio, as editors expect in a ProRes .mov.
+                args.extend(["-c:v", "prores_videotoolbox", "-profile:v", "2"].map(String::from));
+                args.extend(["-c:a", "pcm_s16le"].map(String::from));
+            }
+        }
+        args
+    }
+}
+
 /// Probe a single codec name (e.g. "h264", "aac", "av1") for the given stream.
 pub(super) fn probe_codec_name(path: &Path, stream: &str) -> Option<String> {
     let path_str = path.to_string_lossy();
@@ -204,6 +266,51 @@ pub(super) fn move_temp_to_final(temp_path: &Path, final_path: &Path) -> io::Res
 /// iPhones record AAC plus Apple spatial audio (APAC); ffmpeg cannot decode APAC, and left
 /// to choose, it picks APAC for having more channels. The trailing `?` keeps a silent
 /// source working.
+/// Whether this Mac decodes AV1 in hardware: Apple M3 and newer. M1 and M2 have no AV1
+/// decoder, so an AV1 file stutters or will not open in QuickTime and most editors.
+pub(super) fn mac_has_av1_decoder() -> bool {
+    let brand = Command::new("/usr/sbin/sysctl")
+        .args(["-n", "machdep.cpu.brand_string"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    // "Apple M3 Pro", "Apple M4". Anything unrecognised is treated as unable, which only
+    // costs a conversion, never a file that does not play.
+    brand
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix('M').and_then(|n| n.parse::<u32>().ok()))
+        .map_or(false, |gen| gen >= 3)
+}
+
+/// Index among the audio streams of the track `preferred_audio_map` picks, or None when
+/// the file has no audio. A filter graph needs a track that exists, not an optional one.
+pub(super) fn preferred_audio_index(path: &Path) -> Option<usize> {
+    let out = Command::new(ffprobe_path())
+        .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let codecs: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(|l| l.trim().to_ascii_lowercase()).collect();
+    if codecs.is_empty() {
+        return None;
+    }
+    let undecodable = |c: &str| c == "apple_apac" || c == "apac" || c.is_empty() || c == "unknown";
+    Some(codecs.iter().position(|c| !undecodable(c)).unwrap_or(0))
+}
+
+/// Frame rate of the first video stream (avg_frame_rate, e.g. "30000/1001").
+pub(super) fn probe_fps(path: &Path) -> Option<f64> {
+    let out = Command::new(ffprobe_path())
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (n, d) = text.trim().split_once('/')?;
+    let (n, d): (f64, f64) = (n.parse().ok()?, d.parse().ok()?);
+    (d > 0.0 && n / d > 1.0).then(|| n / d)
+}
+
 pub fn preferred_audio_map(path: &Path) -> String {
     let out = Command::new(ffprobe_path())
         .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
