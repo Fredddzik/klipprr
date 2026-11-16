@@ -109,11 +109,11 @@ fn kill_tree(pid: u32) {
     #[cfg(unix)]
     {
         // A negative pid addresses the whole process group `prepare` created.
-        let _ = Command::new("kill").args(["-TERM", &format!("-{pid}")]).status();
+        let _ = crate::proc::command("kill").args(["-TERM", &format!("-{pid}")]).status();
     }
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status();
+        let _ = crate::proc::command("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).status();
     }
 }
 

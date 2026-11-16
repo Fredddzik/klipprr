@@ -4,7 +4,6 @@
 //! Nothing is sent by the app: it opens the user's mail client with a draft they can read,
 //! edit or discard (promise 4).
 
-use std::process::Command;
 use tauri::AppHandle;
 use tauri_plugin_shell::ShellExt;
 
@@ -14,7 +13,7 @@ pub const MENU_ID: &str = "contact_support";
 fn os_description() -> String {
     #[cfg(target_os = "macos")]
     {
-        let version = Command::new("sw_vers")
+        let version = crate::proc::command("sw_vers")
             .arg("-productVersion")
             .output()
             .ok()
@@ -31,7 +30,7 @@ fn os_description() -> String {
 }
 
 fn yt_dlp_version() -> String {
-    Command::new(crate::paths::yt_dlp_path())
+    crate::proc::command(crate::paths::yt_dlp_path())
         .arg("--version")
         .output()
         .ok()

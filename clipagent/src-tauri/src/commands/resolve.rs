@@ -1,7 +1,7 @@
 use std::fs::{create_dir_all, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use serde_json::Value;
 use urlencoding::decode;
 
@@ -60,7 +60,7 @@ fn label_unlabelled_formats(formats: &mut [Value]) {
     let Some(url) = formats.iter().find(|f| unlabelled(f)).and_then(|f| f["url"].as_str()).map(String::from) else {
         return;
     };
-    let Ok(out) = Command::new(ffprobe_path())
+    let Ok(out) = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-rw_timeout", "8000000",
@@ -110,7 +110,7 @@ fn label_unlabelled_formats(formats: &mut [Value]) {
 /// The media's own length, read from its container. A few hundred ms: ffprobe only needs
 /// the file's index, not the video.
 fn probe_url_duration(url: &str) -> Option<f64> {
-    let out = Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-rw_timeout", "8000000",
@@ -127,7 +127,7 @@ fn probe_url_duration(url: &str) -> Option<f64> {
 }
 
 fn preview_url_is_playable(url: &str) -> bool {
-    let out = Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             // Give up rather than hang if the CDN stops responding mid-probe.
@@ -258,7 +258,7 @@ pub fn handle_resolve(url: String) -> String {
     log_to_file(&format!("[RESOLVE] yt_dlp_path: {}", yt_dlp_exe_str));
     log_to_file(&format!("[RESOLVE] args: {:?}", args));
 
-    let output = Command::new(&yt_dlp_exe)
+    let output = crate::proc::command(&yt_dlp_exe)
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -116,7 +116,7 @@ fn is_blocked_preview_target(decoded: &str) -> bool {
 
 fn needs_pcm_preview_fix(file_path: &Path) -> bool {
     let path_str = file_path.to_string_lossy().to_string();
-    let out = std::process::Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-select_streams", "a:0",
@@ -149,7 +149,7 @@ fn container_is_playable(file_path: &Path) -> bool {
 }
 
 fn video_codec_is_playable(file_path: &Path) -> bool {
-    let out = std::process::Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-select_streams", "v:0",
@@ -205,7 +205,7 @@ fn source_video_is_playable(file_path: &Path) -> bool {
 /// Codec name of the first video stream, lower case ("" when unknown).
 fn source_video_codec(file_path: &Path) -> String {
     let path_str = file_path.to_string_lossy().to_string();
-    std::process::Command::new(ffprobe_path())
+    crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-select_streams", "v:0",
@@ -312,7 +312,7 @@ fn ensure_head_proxy(file_path: &Path) -> Option<PathBuf> {
         tmp_str,
     ]);
 
-    let ok = std::process::Command::new(ffmpeg_path())
+    let ok = crate::proc::command(ffmpeg_path())
         .args(&args)
         .status()
         .map(|s| s.success())
@@ -430,7 +430,7 @@ fn start_hq_proxy_bg(file_path: &Path) {
             &out_str,
         ]);
 
-        let ok = std::process::Command::new(ffmpeg)
+        let ok = crate::proc::command(ffmpeg)
             .args(&args)
             .status()
             .map(|s| s.success())
@@ -521,7 +521,7 @@ fn run_yt_preview_download(
     // copy failing while the 720p one succeeded), and a second attempt seconds later
     // usually works. Without the retry the preview dead-ends on a DRM message.
     for attempt in 1..=2 {
-        match std::process::Command::new(yt_dlp_path()).args(&args).output() {
+        match crate::proc::command(yt_dlp_path()).args(&args).output() {
             Ok(o) if o.status.success() => return true,
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);

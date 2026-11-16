@@ -1,3 +1,8 @@
+// A windowed app on Windows: without this the release build opens a console next to the
+// window. Debug builds keep the console for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod proc;
 mod paths;
 mod output;
 mod commands;

@@ -1,7 +1,7 @@
 use std::fs::OpenOptions;
 use std::io::{Write, BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
@@ -27,7 +27,7 @@ use tauri::Emitter;
 pub fn read_clipboard_text() -> String {
     #[cfg(target_os = "macos")]
     {
-        Command::new("/usr/bin/pbpaste")
+        crate::proc::command("/usr/bin/pbpaste")
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default()
@@ -82,7 +82,7 @@ pub fn get_local_video_info(path: String) -> Result<(f64, Option<String>, Option
     }
     let path_str = p.to_string_lossy();
 
-    let out_duration = Command::new(ffprobe_path())
+    let out_duration = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-show_entries", "format=duration",
@@ -96,7 +96,7 @@ pub fn get_local_video_info(path: String) -> Result<(f64, Option<String>, Option
         .parse()
         .map_err(|_| "could not parse duration".to_string())?;
 
-    let out_codec = Command::new(ffprobe_path())
+    let out_codec = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-select_streams", "v:0",
@@ -124,7 +124,7 @@ pub fn get_local_video_info(path: String) -> Result<(f64, Option<String>, Option
             }
         });
 
-    let out_audio_codec = Command::new(ffprobe_path())
+    let out_audio_codec = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-select_streams", "a",
@@ -162,17 +162,17 @@ pub fn open_export_folder(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(p).status()
+        crate::proc::command("open").arg(p).status()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer").arg(p).status()
+        crate::proc::command("explorer").arg(p).status()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        std::process::Command::new("xdg-open").arg(p).status()
+        crate::proc::command("xdg-open").arg(p).status()
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -413,7 +413,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 }
             }
             args.extend(["-y".to_string(), temp_str.clone()]);
-            let ok = Command::new(ffmpeg_path())
+            let ok = crate::proc::command(ffmpeg_path())
                 .current_dir(&base_dir)
                 .args(&args)
                 .output()
@@ -609,7 +609,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     ]);
                     let mut last_pct: i64 = -1;
                     let (dl_ok, dl_stderr) = run_ytdlp_with_progress(
-                        Command::new(yt_dlp_path()).current_dir(&base_dir).args(&dl_args),
+                        crate::proc::command(yt_dlp_path()).current_dir(&base_dir).args(&dl_args),
                         job,
                         Some(desired_dur),
                         |pct| {
@@ -656,7 +656,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                             args.extend(audio_args.iter().map(|a| a.to_string()));
                             args.extend(["-y".to_string(), temp_out.to_string_lossy().to_string()]);
                             let encoded = export_control::prepare(
-                                Command::new(ffmpeg_path()).current_dir(base_dir).args(&args)
+                                crate::proc::command(ffmpeg_path()).current_dir(base_dir).args(&args)
                                     .stdout(Stdio::null()).stderr(Stdio::piped()),
                             )
                             .spawn()
@@ -737,7 +737,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     ]);
                     let mut last_dl_pct: i64 = -1;
                     let (dl_success, dl_stderr) = run_ytdlp_with_progress(
-                        Command::new(yt_dlp_path())
+                        crate::proc::command(yt_dlp_path())
                             .current_dir(&base_dir)
                             .args(&dl_args),
                         job,
@@ -810,7 +810,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         ]);
                         let mut last_rdl_pct: i64 = -1;
                         let (rdl_ok, rdl_stderr) = run_ytdlp_with_progress(
-                            Command::new(yt_dlp_path())
+                            crate::proc::command(yt_dlp_path())
                                 .current_dir(base_dir)
                                 .args(&rdl),
                             job,
@@ -948,7 +948,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     // We map encoding time (0..clip_dur) into clipPercent 50..99.
                     let clip_dur = (end - start).max(0.001);
                     let mut child = match export_control::prepare(
-                        Command::new(ffmpeg_path())
+                        crate::proc::command(ffmpeg_path())
                             .current_dir(&base_dir)
                             .args(&ffmpeg_args)
                             .stdout(Stdio::piped())
@@ -1039,7 +1039,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                             "-c:a".to_string(), "aac".to_string(),
                             "-y".to_string(), out_temp_str.clone(),
                         ]);
-                        let fb_status = Command::new(ffmpeg_path())
+                        let fb_status = crate::proc::command(ffmpeg_path())
                             .current_dir(&base_dir)
                             .args(&fb_args)
                             .status();
@@ -1088,7 +1088,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     ]);
                     let mut last_dl_pct: i64 = -1;
                     let (dl_ok, dl_stderr) = run_ytdlp_with_progress(
-                        Command::new(yt_dlp_path())
+                        crate::proc::command(yt_dlp_path())
                             .current_dir(&base_dir)
                             .args(&dl_args),
                         job,
@@ -1135,7 +1135,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                                     export_stamp, i
                                 ));
                                 let trimmed_str = trimmed.to_string_lossy().to_string();
-                                let status = Command::new(ffmpeg_path())
+                                let status = crate::proc::command(ffmpeg_path())
                                     .args([
                                         "-y",
                                         "-ss",
@@ -1265,7 +1265,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             ]);
             let mut last: i64 = -1;
             let (ok, err) = run_ytdlp_with_progress(
-                Command::new(yt_dlp_path()).current_dir(&base_dir).args(&args),
+                crate::proc::command(yt_dlp_path()).current_dir(&base_dir).args(&args),
                 shared_job,
                 None,
                 |pct| {
@@ -1318,7 +1318,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     ff.extend(["-progress", "pipe:2", "-nostats", "-y"].map(String::from));
                     ff.push(converted.to_string_lossy().into_owned());
                     let ok_conv = match export_control::prepare(
-                        Command::new(ffmpeg_path()).args(&ff).stdout(Stdio::piped()).stderr(Stdio::piped()),
+                        crate::proc::command(ffmpeg_path()).args(&ff).stdout(Stdio::piped()).stderr(Stdio::piped()),
                     )
                     .spawn()
                     {
@@ -1407,7 +1407,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
     video_args.extend(["-f", "bestvideo/bv*", "-o", &video_template, "--newline", &url]);
     let mut last_video_pct: i64 = 10;
     run_ytdlp_with_progress(
-        Command::new(yt_dlp_path())
+        crate::proc::command(yt_dlp_path())
             .current_dir(&base_dir)
             .args(&video_args),
         shared_job,
@@ -1438,7 +1438,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
     audio_args.extend(["-f", "bestaudio/ba*", "-o", &audio_template, "--newline", &url]);
     let mut last_audio_pct: i64 = 35;
     run_ytdlp_with_progress(
-        Command::new(yt_dlp_path())
+        crate::proc::command(yt_dlp_path())
             .current_dir(&base_dir)
             .args(&audio_args),
         shared_job,
@@ -1521,7 +1521,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         ]);
 
         let mut child = match export_control::prepare(
-            Command::new(ffmpeg_path())
+            crate::proc::command(ffmpeg_path())
                 .current_dir(&base_dir)
                 .args(&args)
                 .stdout(Stdio::piped())
@@ -1588,7 +1588,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
             "-movflags".to_string(), "+faststart".to_string(),
             "-y".to_string(), full_str.clone(),
         ]);
-        let _ = Command::new(ffmpeg_path())
+        let _ = crate::proc::command(ffmpeg_path())
             .current_dir(&base_dir)
             .args(&fallback_args)
             .status();
@@ -1667,7 +1667,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 "-c:a".to_string(), "aac".to_string(),
                 "-y".to_string(), temp_out_str.clone(),
             ]);
-            let child = Command::new(ffmpeg_path())
+            let child = crate::proc::command(ffmpeg_path())
                 .current_dir(&base_dir)
                 .args(&wm_args)
                 .stdout(Stdio::piped())
@@ -1701,7 +1701,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 }
             }
         } else {
-            Command::new(ffmpeg_path())
+            crate::proc::command(ffmpeg_path())
                 .current_dir(&base_dir)
                 .args([
                     "-ss", &format!("{:.3}", start),
@@ -1769,7 +1769,7 @@ pub(super) fn frame_start_at(input_args: &[String], mark: f64) -> Option<f64> {
         a.extend(input_args[..input_args.len() - 1].iter().cloned());
         a.extend(extra.iter().map(|s| s.to_string()));
         a.push(input_args[input_args.len() - 1].clone());
-        Command::new(ffprobe_path()).args(&a).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        crate::proc::command(ffprobe_path()).args(&a).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string())
     };
     let origin: f64 = probe(&["-show_entries", "format=start_time", "-of", "csv=p=0"])?
         .trim()
@@ -1831,7 +1831,7 @@ fn url_exact_cut(
         "-q", "--no-warnings", "-f", format_selector,
         "--print", "height", "--print", "fps", "--print", "acodec", "--print", "%(http_headers)j", "--print", "urls", url,
     ]);
-    let out = Command::new(yt_dlp_path())
+    let out = crate::proc::command(yt_dlp_path())
         .args(&args)
         .output()
         .map_err(|e| format!("yt-dlp spawn: {e}"))?;
@@ -1876,7 +1876,7 @@ fn url_exact_cut(
             "-show_entries".into(), "stream=avg_frame_rate".into(),
             "-of".into(), "csv=p=0".into(), urls[0].to_string(),
         ]);
-        Command::new(ffprobe_path())
+        crate::proc::command(ffprobe_path())
             .args(&probe)
             .output()
             .ok()
@@ -1938,7 +1938,7 @@ fn url_exact_cut(
 
     log_to_file(&format!("[EXACT] i={} mark={:.3} first_frame={:.6} (grid {:.6}) frames={} fps={} height={} codec={:?} streams={} audio={}", clip_index, start, first, grid_first, frames, fps, height, codec, urls.len(), has_audio));
     let mut child = export_control::prepare(
-        Command::new(ffmpeg_path()).args(&ff).stdout(Stdio::piped()).stderr(Stdio::piped()),
+        crate::proc::command(ffmpeg_path()).args(&ff).stdout(Stdio::piped()).stderr(Stdio::piped()),
     )
     .spawn()
     .map_err(|e| format!("ffmpeg spawn: {e}"))?;

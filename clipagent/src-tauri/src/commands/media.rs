@@ -3,7 +3,6 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use super::download::log_to_file;
 use crate::paths::{ffmpeg_path, ffprobe_path};
@@ -30,7 +29,7 @@ pub(super) fn watermark_path_for_export(export_stamp: u128) -> Result<PathBuf, S
 pub(super) fn videotoolbox_supported_options() -> &'static (bool, bool) {
     static SUPPORTED: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
     SUPPORTED.get_or_init(|| {
-        let help = std::process::Command::new(ffmpeg_path())
+        let help = crate::proc::command(ffmpeg_path())
             .args(["-hide_banner", "-h", "encoder=h264_videotoolbox"])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -162,7 +161,7 @@ impl ExportVideoCodec {
 /// Probe a single codec name (e.g. "h264", "aac", "av1") for the given stream.
 pub(super) fn probe_codec_name(path: &Path, stream: &str) -> Option<String> {
     let path_str = path.to_string_lossy();
-    let out = Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-select_streams", stream,
@@ -224,7 +223,7 @@ pub(super) fn pick_existing_with_ext(base: &Path, exts: &[&str]) -> Option<PathB
 
 pub(super) fn probe_duration_secs(path: &Path) -> Option<f64> {
     let path_str = path.to_string_lossy();
-    let out = Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-show_entries", "format=duration",
@@ -239,7 +238,7 @@ pub(super) fn probe_duration_secs(path: &Path) -> Option<f64> {
 
 pub(super) fn probe_video_dims(path: &Path) -> Option<(i64, i64)> {
     let path_str = path.to_string_lossy();
-    let out = Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args([
             "-v", "error",
             "-select_streams", "v:0",
@@ -282,7 +281,7 @@ pub(super) fn move_temp_to_final(temp_path: &Path, final_path: &Path) -> io::Res
 /// Whether this Mac decodes AV1 in hardware: Apple M3 and newer. M1 and M2 have no AV1
 /// decoder, so an AV1 file stutters or will not open in QuickTime and most editors.
 pub(super) fn mac_has_av1_decoder() -> bool {
-    let brand = Command::new("/usr/sbin/sysctl")
+    let brand = crate::proc::command("/usr/sbin/sysctl")
         .args(["-n", "machdep.cpu.brand_string"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -298,7 +297,7 @@ pub(super) fn mac_has_av1_decoder() -> bool {
 /// Index among the audio streams of the track `preferred_audio_map` picks, or None when
 /// the file has no audio. A filter graph needs a track that exists, not an optional one.
 pub(super) fn preferred_audio_index(path: &Path) -> Option<usize> {
-    let out = Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
         .arg(path)
         .output()
@@ -313,7 +312,7 @@ pub(super) fn preferred_audio_index(path: &Path) -> Option<usize> {
 
 /// Frame rate of the first video stream (avg_frame_rate, e.g. "30000/1001").
 pub(super) fn probe_fps(path: &Path) -> Option<f64> {
-    let out = Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0"])
         .arg(path)
         .output()
@@ -325,7 +324,7 @@ pub(super) fn probe_fps(path: &Path) -> Option<f64> {
 }
 
 pub fn preferred_audio_map(path: &Path) -> String {
-    let out = Command::new(ffprobe_path())
+    let out = crate::proc::command(ffprobe_path())
         .args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
         .arg(path)
         .output();

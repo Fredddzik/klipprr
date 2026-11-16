@@ -331,6 +331,43 @@ jobs:
             echo "Mirrored $($msi.Name) to $env:PUBLIC_REPO"
           }
 
+      # Auto-update on Windows: upload the updater signature Tauri wrote next to the .msi and
+      # add a "windows-x86_64" entry to the latest.json the macOS job published. Without
+      # both, a Windows install never finds an update (true up to 0.1.43).
+      - name: Add Windows to the auto-updater (latest.json)
+        if: vars.RELEASES_PUBLIC_REPO != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PUBLIC_REPO_TOKEN }}
+          PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          MSI=$(ls clipagent/src-tauri/target/release/bundle/msi/*.msi | head -1)
+          SIG="$MSI.sig"
+          [ -f "$SIG" ] || { echo "No updater signature next to $MSI"; exit 1; }
+          gh release upload "$TAG" --repo "$PUBLIC_REPO" "$SIG" --clobber
+          mkdir -p manifest
+          gh release download "$TAG" --repo "$PUBLIC_REPO" --pattern latest.json --dir manifest --clobber || true
+          python - "$TAG" "$PUBLIC_REPO" "$MSI" "$SIG" <<'PY'
+          import json, os, sys, urllib.parse, datetime
+          tag, repo, msi, sig = sys.argv[1:]
+          version = tag.lstrip("v")
+          path = "manifest/latest.json"
+          if os.path.exists(path):
+              m = json.load(open(path))
+          else:
+              notes = json.load(open("cliptool/src/lib/release-notes.json")).get(version, [])
+              m = {"version": version, "notes": "\n".join("- " + n for n in notes),
+                   "pub_date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "platforms": {}}
+          m.setdefault("platforms", {})["windows-x86_64"] = {
+              "signature": open(sig).read().strip(),
+              "url": "https://github.com/%s/releases/download/%s/%s" % (repo, tag, urllib.parse.quote(os.path.basename(msi))),
+          }
+          json.dump(m, open("latest.json", "w"))
+          print("latest.json platforms:", ", ".join(sorted(m["platforms"])))
+          PY
+          gh release upload "$TAG" --repo "$PUBLIC_REPO" latest.json --clobber
+
   # Same as release-windows but no Mac job: for re-running only Windows and attaching to existing release.
   # Builds from default branch (main) so fixes are included; uploads MSI to existing release for the given version.
   release-windows-only:
@@ -403,3 +440,40 @@ jobs:
             gh release upload $tag $msi.FullName --repo $env:PUBLIC_REPO --clobber
             echo "Mirrored $($msi.Name) to $env:PUBLIC_REPO"
           }
+
+      # Auto-update on Windows: upload the updater signature Tauri wrote next to the .msi and
+      # add a "windows-x86_64" entry to the latest.json the macOS job published. Without
+      # both, a Windows install never finds an update (true up to 0.1.43).
+      - name: Add Windows to the auto-updater (latest.json)
+        if: vars.RELEASES_PUBLIC_REPO != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PUBLIC_REPO_TOKEN }}
+          PUBLIC_REPO: ${{ vars.RELEASES_PUBLIC_REPO }}
+          TAG: v${{ github.event.inputs.version }}
+        run: |
+          MSI=$(ls clipagent/src-tauri/target/release/bundle/msi/*.msi | head -1)
+          SIG="$MSI.sig"
+          [ -f "$SIG" ] || { echo "No updater signature next to $MSI"; exit 1; }
+          gh release upload "$TAG" --repo "$PUBLIC_REPO" "$SIG" --clobber
+          mkdir -p manifest
+          gh release download "$TAG" --repo "$PUBLIC_REPO" --pattern latest.json --dir manifest --clobber || true
+          python - "$TAG" "$PUBLIC_REPO" "$MSI" "$SIG" <<'PY'
+          import json, os, sys, urllib.parse, datetime
+          tag, repo, msi, sig = sys.argv[1:]
+          version = tag.lstrip("v")
+          path = "manifest/latest.json"
+          if os.path.exists(path):
+              m = json.load(open(path))
+          else:
+              notes = json.load(open("cliptool/src/lib/release-notes.json")).get(version, [])
+              m = {"version": version, "notes": "\n".join("- " + n for n in notes),
+                   "pub_date": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "platforms": {}}
+          m.setdefault("platforms", {})["windows-x86_64"] = {
+              "signature": open(sig).read().strip(),
+              "url": "https://github.com/%s/releases/download/%s/%s" % (repo, tag, urllib.parse.quote(os.path.basename(msi))),
+          }
+          json.dump(m, open("latest.json", "w"))
+          print("latest.json platforms:", ", ".join(sorted(m["platforms"])))
+          PY
+          gh release upload "$TAG" --repo "$PUBLIC_REPO" latest.json --clobber
