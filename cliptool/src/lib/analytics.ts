@@ -29,7 +29,13 @@ export type AnalyticsConsent = "granted" | "denied" | null;
 export const ANALYTICS_AVAILABLE = POSTHOG_KEY.length > 0;
 
 let started = false;
-let superProps: Record<string, unknown> = {};
+/** One id per launch, so a session's events can be grouped (session length = the
+ *  largest session_seconds seen for a launch_id). */
+const LAUNCH_ID =
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let superProps: Record<string, unknown> = { launch_id: LAUNCH_ID };
 
 export function getAnalyticsConsent(): AnalyticsConsent {
   try {
@@ -108,6 +114,12 @@ export function identifyUser(user: { id: string; email: string | null; plan?: st
 export function track(event: string, props: Record<string, unknown> = {}): void {
   if (!started || !analyticsAllowed()) return;
   posthog.capture(event, props);
+}
+
+/** For an event sent while the window closes: a beacon still goes out as the page unloads. */
+export function trackOnExit(event: string, props: Record<string, unknown> = {}): void {
+  if (!started || !analyticsAllowed()) return;
+  posthog.capture(event, props, { transport: "sendBeacon" });
 }
 
 export type LinkSource = "youtube" | "twitch" | "x" | "instagram" | "tiktok" | "vimeo" | "kick" | "other";

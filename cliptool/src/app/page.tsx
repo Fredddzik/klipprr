@@ -40,7 +40,7 @@ import {
   normalizePlan,
   PLAN_MONTHLY_CLIP_LIMIT,
 } from "@/lib/usage";
-import { track, describeLink, fileExtension, scrubText, setAnalyticsContext, type LinkSource } from "@/lib/analytics";
+import { track, trackOnExit, describeLink, fileExtension, scrubText, setAnalyticsContext, type LinkSource } from "@/lib/analytics";
 import ConsentCard from "@/components/ConsentCard";
 import {
   fetchAppFeatureFlags,
@@ -211,16 +211,37 @@ export default function HomePage() {
   useEffect(() => {
     sessionStartRef.current = Date.now();
 
+    // Session length: every hide (minimise, another Space, closing) reports the time since
+    // launch and the time the window was actually showing, and quitting sends a last one.
+    // A quit can kill the webview before anything goes out, so the session's length is the
+    // largest session_seconds for its launch_id, not the session_ended event alone.
+    let activeMs = 0;
+    let visibleSince: number | null = document.visibilityState === "visible" ? Date.now() : null;
     let ended = false;
+    const timing = () => {
+      const now = Date.now();
+      return {
+        session_seconds: Math.round((now - sessionStartRef.current) / 1000),
+        active_seconds: Math.round((activeMs + (visibleSince !== null ? now - visibleSince : 0)) / 1000),
+      };
+    };
     const handleSessionEnd = () => {
       if (ended) return;
       ended = true;
-      const duration = Math.round((Date.now() - sessionStartRef.current) / 1000);
-      track("session_ended", { session_duration_seconds: duration });
+      trackOnExit("session_ended", timing());
     };
     window.addEventListener("beforeunload", handleSessionEnd);
+    window.addEventListener("pagehide", handleSessionEnd);
     const onVisibility = () => {
-      if (document.visibilityState === "hidden") handleSessionEnd();
+      if (document.visibilityState === "hidden") {
+        if (visibleSince === null) return;
+        const t = timing();
+        activeMs += Date.now() - visibleSince;
+        visibleSince = null;
+        track("app_hidden", t);
+      } else if (visibleSince === null) {
+        visibleSince = Date.now();
+      }
     };
     document.addEventListener("visibilitychange", onVisibility);
 
@@ -236,6 +257,7 @@ export default function HomePage() {
 
     return () => {
       window.removeEventListener("beforeunload", handleSessionEnd);
+      window.removeEventListener("pagehide", handleSessionEnd);
       document.removeEventListener("visibilitychange", onVisibility);
       sub.data.subscription.unsubscribe();
       unlistenPromise.then((unlisten) => unlisten());
@@ -2458,18 +2480,15 @@ useEffect(() => {
                   refreshUsage();
                 }}
                 onExportComplete={(count, exportDir, hadWatermark, totalDurationSeconds) => {
-                  const quality = exportHQ ? "quality" : "speed";
                   trackEvent("clip_exported", {
                     clip_count: count,
                     had_watermark: hadWatermark,
-                    quality,
                     clip_duration_seconds: Math.round(totalDurationSeconds),
                   });
                   if (!localStorage.getItem("klipprr-first-export-done")) {
                     localStorage.setItem("klipprr-first-export-done", "1");
                     trackEvent("first_export", {
                       clip_count: count,
-                      quality,
                       clip_duration_seconds: Math.round(totalDurationSeconds),
                     });
                   }
