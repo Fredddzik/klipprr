@@ -1,6 +1,7 @@
 {
   "0.1.44": [
-    "Fixed: on Windows, some videos from your own files (iPhone clips, HEVC recordings) wouldn't preview. They now open and play."
+    "Fixed: on Windows, some videos from your own files (iPhone clips, HEVC recordings) wouldn't preview. They now open and play.",
+    "New: Klipprr asks once whether you want to share usage data, like which links fail to load. It helps me fix problems before you have to report them. Change it any time in Settings."
   ],
   "0.1.43": [
     "Fixed: clips could start a frame after the one you marked, and some opened on a black frame. Every clip now starts on the exact frame you mark, from YouTube, Twitch, X, Instagram and your own files.",
