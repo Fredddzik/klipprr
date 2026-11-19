@@ -1,5 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import { ANALYTICS_AVAILABLE, getAnalyticsConsent, setAnalyticsConsent } from "@/lib/analytics";
+
 export type ThemePreference = "light" | "dark" | "system";
 export type ClipSortOption = "timeline" | "created";
 /** Every option is an exact, re-encoded cut. "universal" is H.264 (its value predates HEVC and ProRes). */
@@ -43,6 +46,11 @@ export default function SettingsModal({
   defaultExportFormat,
   setDefaultExportFormat,
 }: SettingsModalProps) {
+  const [shareUsage, setShareUsage] = useState(false);
+  useEffect(() => {
+    if (isOpen) setShareUsage(getAnalyticsConsent() === "granted");
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   return (
@@ -143,6 +151,26 @@ export default function SettingsModal({
               ))}
             </div>
           </div>
+
+          {ANALYTICS_AVAILABLE && (
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={shareUsage}
+                onChange={(e) => {
+                  setShareUsage(e.target.checked);
+                  setAnalyticsConsent(e.target.checked ? "granted" : "denied");
+                }}
+                className="mt-0.5 h-4 w-4 accent-violet-600"
+              />
+              <span>
+                <span className="block text-sm font-medium text-zinc-300">Share usage data</span>
+                <span className="block text-xs leading-relaxed text-zinc-500 mt-0.5">
+                  The links you load, timings, exports and errors. Never your videos or file names.
+                </span>
+              </span>
+            </label>
+          )}
         </div>
       </div>
     </div>

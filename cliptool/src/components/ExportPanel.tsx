@@ -1,4 +1,5 @@
 "use client";
+import { track, describeLink, scrubText } from "@/lib/analytics";
 import type { DefaultExportFormat } from "./SettingsModal";
 
 import { useEffect, useState, useRef } from "react";
@@ -203,6 +204,8 @@ export default function ExportPanel({
   const exportDirRef = useRef<string>("");
   const exportHadWatermarkRef = useRef(false);
   const exportTotalDurationRef = useRef(0);
+  /** When the running export started and what it was, for the export_finished event. */
+  const exportTrackRef = useRef<{ startedAt: number; props: Record<string, unknown> } | null>(null);
   const [exportClipNames, setExportClipNames] = useState<string[]>([]);
   /** Export the clips as video, or as audio only (FR-5: sound effects, quotes, podcast cuts). */
   const [exportKind, setExportKind] = useState<"video" | "audio">("video");
@@ -287,6 +290,18 @@ export default function ExportPanel({
       .sort((a, b) => a - b);
     const failedClips = failedIdx.map((i) => exportClipsRef.current[i]);
     const failedNames = failedIdx.map((i) => exportClipsRef.current[i].name?.trim() || `Clip ${i + 1}`);
+    const started = exportTrackRef.current;
+    exportTrackRef.current = null;
+    if (started) {
+      track("export_finished", {
+        ...started.props,
+        export_ms: Math.round(performance.now() - started.startedAt),
+        ok_count: okCount,
+        failed_count: failedCount,
+        cancelled: allCancelled,
+        fail_reasons: Object.values(failReasonsRef.current).slice(0, 3).map((r) => scrubText(String(r))),
+      });
+    }
     onExportReservationComplete?.();
     clearExportingUI();
     // Failed clips stay on screen with a Retry button instead of a dialog: the agent has
@@ -463,6 +478,20 @@ export default function ExportPanel({
     exportTotalDurationRef.current = chosen.reduce((sum, c) => sum + Math.max(0, c.end - c.start), 0);
 
     const exportUrl = resolvedUrl && resolvedUrl.trim().length > 0 ? resolvedUrl : videoUrl.trim();
+    const link = localFilePath ? null : describeLink(exportUrl);
+    const exportProps = {
+      source: localFilePath ? "local" : link?.source,
+      url: link?.url ?? null,
+      clip_count: chosen.length,
+      clips_total_s: Math.round(exportTotalDurationRef.current),
+      kind: exportKind,
+      codec: isAudio ? audioFormat : exportCodec,
+      max_height: localFilePath ? null : hasWatermark ? Math.min(720, fastCap ?? 720) : fastCap,
+      keep_full: !localFilePath && !isAudio && canUseQualityMode && keepWholeVideo,
+      has_watermark: Boolean(hasWatermark),
+    };
+    exportTrackRef.current = { startedAt: performance.now(), props: exportProps };
+    track("export_started", exportProps);
     failReasonsRef.current = {};
     exportMetaRef.current = [
       `Source: ${localFilePath ? "a local file" : exportUrl}`,
@@ -499,6 +528,8 @@ export default function ExportPanel({
     // The agent answers as soon as the export has started, so a failure here means it
     // never started (the agent is unreachable); everything after this comes by event.
     if (!result.ok && exportInProgressRef.current) {
+      track("export_not_started", { ...exportProps, error: scrubText(String(result.error ?? result.status ?? "unknown")) });
+      exportTrackRef.current = null;
       onExportReservationComplete?.();
       clearExportingUI();
       // Refused by the agent's quota check (quota.rs): nothing was charged.

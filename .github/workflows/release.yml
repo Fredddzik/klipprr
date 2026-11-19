@@ -8,6 +8,8 @@
 # Required repo variables (Settings → Secrets and variables → Actions → Variables):
 #   NEXT_PUBLIC_SUPABASE_URL      - Supabase project URL (for frontend build)
 #   NEXT_PUBLIC_SUPABASE_ANON_KEY - Supabase anon key (for frontend build)
+#   NEXT_PUBLIC_POSTHOG_KEY       - PostHog project key (opt-in app analytics; empty = off)
+#   NEXT_PUBLIC_POSTHOG_HOST      - PostHog ingest host
 # Required secrets:
 #   TAURI_SIGNING_PRIVATE_KEY  - base64 of updater private key file (base64 -i ~/.tauri/clipagent.key | tr -d '\n'). (1) Key with password: set TAURI_SIGNING_PRIVATE_KEY_PASSWORD too. (2) Unencrypted: rsign generate -W then base64 the .key file; pubkey in tauri.conf.json.
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD - only if key was generated with a password (leave unset for unencrypted key)
@@ -84,6 +86,8 @@ jobs:
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ vars.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ vars.NEXT_PUBLIC_POSTHOG_HOST }}
         run: |
           cd cliptool && npm ci && npm run build
 
@@ -159,6 +163,8 @@ jobs:
           # So build.rs embeds these when .env.local is missing (CI); desktop sync then has URL/key.
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ vars.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ vars.NEXT_PUBLIC_POSTHOG_HOST }}
           KLIPPRR_LICENSE_ED25519_PUB_B64: ${{ secrets.KLIPPRR_LICENSE_ED25519_PUB_B64 }}
         with:
           projectPath: clipagent
@@ -265,6 +271,8 @@ jobs:
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ vars.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ vars.NEXT_PUBLIC_POSTHOG_HOST }}
         run: |
           cd cliptool && npm ci && npm run build
 
@@ -292,6 +300,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ vars.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ vars.NEXT_PUBLIC_POSTHOG_HOST }}
           KLIPPRR_LICENSE_ED25519_PUB_B64: ${{ secrets.KLIPPRR_LICENSE_ED25519_PUB_B64 }}
         run: |
           cd clipagent/src-tauri
@@ -389,6 +399,8 @@ jobs:
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ vars.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ vars.NEXT_PUBLIC_POSTHOG_HOST }}
         run: |
           cd cliptool && npm ci && npm run build
 
@@ -416,6 +428,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_POSTHOG_KEY: ${{ vars.NEXT_PUBLIC_POSTHOG_KEY }}
+          NEXT_PUBLIC_POSTHOG_HOST: ${{ vars.NEXT_PUBLIC_POSTHOG_HOST }}
         run: |
           cd clipagent/src-tauri
           cargo tauri build --bundles msi

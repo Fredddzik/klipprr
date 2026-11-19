@@ -1,57 +1,67 @@
 "use client";
 
-import posthog from "posthog-js";
-import { PostHogProvider as PHProvider, usePostHog } from "posthog-js/react";
 import { useEffect } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { supabase } from "@/lib/supabase";
-import { APP_ANALYTICS_ENABLED } from "@/lib/analytics";
+import {
+  ANALYTICS_AVAILABLE,
+  analyticsAllowed,
+  identifyUser,
+  onAnalyticsConsentChange,
+  setAnalyticsContext,
+  startAnalytics,
+  track,
+} from "@/lib/analytics";
 
-const POSTHOG_KEY = process.env.NEXT_PUBLIC_POSTHOG_KEY!;
-const POSTHOG_HOST = process.env.NEXT_PUBLIC_POSTHOG_HOST!;
-
-function PostHogInit() {
-  const ph = usePostHog();
-
+/** Starts analytics once the user has opted in, and ties events to the signed-in account. */
+function AnalyticsBridge() {
   useEffect(() => {
-    if (!POSTHOG_KEY) return;
-    posthog.init(POSTHOG_KEY, {
-      api_host: POSTHOG_HOST,
-      person_profiles: "identified_only",
-      capture_pageview: false,
-      // Disable session replay in desktop app — not useful for Tauri windows
-      disable_session_recording: true,
+    if (!ANALYTICS_AVAILABLE) return;
+    let cancelled = false;
+    const platform = navigator.userAgent.toLowerCase().includes("win") ? "windows" : "mac";
+    setAnalyticsContext({ platform });
+
+    const identifyCurrent = () =>
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session?.user) identifyUser({ id: session.user.id, email: session.user.email ?? null });
+      });
+
+    const begin = async () => {
+      if (!analyticsAllowed()) return;
+      try {
+        const version = await getVersion();
+        if (!cancelled) setAnalyticsContext({ app_version: version });
+      } catch {
+        // Not in Tauri (dev in a browser): no version.
+      }
+      startAnalytics();
+      await identifyCurrent();
+    };
+
+    begin().then(() => track("app_opened"));
+    const offConsent = onAnalyticsConsentChange(() => {
+      if (analyticsAllowed()) void begin();
     });
-    // Track app opened
-    posthog.capture("app_opened");
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      identifyUser(session?.user ? { id: session.user.id, email: session.user.email ?? null } : null);
+    });
+    return () => {
+      cancelled = true;
+      offConsent();
+      subscription.unsubscribe();
+    };
   }, []);
-
-  // Identify user from Supabase session
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        ph?.identify(session.user.id, { email: session.user.email });
-      }
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        ph?.identify(session.user.id, { email: session.user.email });
-      } else {
-        ph?.reset();
-      }
-    });
-    return () => subscription.unsubscribe();
-  }, [ph]);
 
   return null;
 }
 
 export function PostHogProvider({ children }: { children: React.ReactNode }) {
-  if (!APP_ANALYTICS_ENABLED || !POSTHOG_KEY) return <>{children}</>;
   return (
-    <PHProvider client={posthog}>
-      <PostHogInit />
+    <>
+      <AnalyticsBridge />
       {children}
-    </PHProvider>
+    </>
   );
 }

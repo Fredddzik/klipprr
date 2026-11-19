@@ -20,6 +20,10 @@ interface VideoViewportProps {
   unavailable?: boolean;
   /** Width ÷ height once the video reports its size, so the parent can fit the panel to it. */
   onAspectRatio?: (ratio: number | null) => void;
+  /** The first frame of this source is on screen. */
+  onReady?: () => void;
+  /** The webview could not play this source (not called for streamed previews). */
+  onPlaybackError?: (details: string | null) => void;
 }
 
 /** A DASH manifest from the agent (FR-7) rather than a file the element plays directly. */
@@ -27,7 +31,7 @@ function isDashSource(src: string | null): boolean {
   return !!src && src.includes("/yt-dash.mpd");
 }
 
-export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate, debugInfo, onStreamError, unavailable, onAspectRatio }: VideoViewportProps) {
+export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate, debugInfo, onStreamError, unavailable, onAspectRatio, onReady, onPlaybackError }: VideoViewportProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const bindVideoRef = (el: HTMLVideoElement | null) => {
     videoRef.current = el;
@@ -298,7 +302,10 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
           // Streamed (Shaka) previews often know their picture size only after the first
           // segment, so loadedmetadata can report 0×0. "resize" fires when the real size lands.
           onResize={(e) => updateAspect(e.currentTarget)}
-          onLoadedData={(e) => updateAspect(e.currentTarget)}
+          onLoadedData={(e) => {
+            updateAspect(e.currentTarget);
+            onReady?.();
+          }}
           onTimeUpdate={() => {
             const t = videoRef.current?.currentTime ?? 0;
             if (t > 0) lastTimeRef.current = t;
@@ -332,6 +339,8 @@ export default function VideoViewport({ src, videoKey, currentTime, onTimeUpdate
                 extra = `fetch_failed: ${String(e)}`;
               }
             }
+
+            onPlaybackError?.(extra);
 
             const base =
               "Preview failed to load in the app.\n\n" +

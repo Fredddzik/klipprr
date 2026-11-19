@@ -1,7 +1,6 @@
  "use client";
 
 import { useEffect, useState, useRef, useMemo } from "react";
-import posthog from "posthog-js";
 import { supabase, getSupabaseConfigForBackend } from "@/lib/supabase";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -41,7 +40,8 @@ import {
   normalizePlan,
   PLAN_MONTHLY_CLIP_LIMIT,
 } from "@/lib/usage";
-import { track, type AnalyticsBase } from "@/lib/analytics";
+import { track, describeLink, fileExtension, scrubText, setAnalyticsContext, type LinkSource } from "@/lib/analytics";
+import ConsentCard from "@/components/ConsentCard";
 import {
   fetchAppFeatureFlags,
   clearAppFeatureFlagsCache,
@@ -209,8 +209,6 @@ export default function HomePage() {
   }
 
   useEffect(() => {
-    const platform = navigator.userAgent.toLowerCase().includes("win") ? "windows" : "mac";
-    track({ externalId: null, email: null, plan: "free" }, "session_started", { platform });
     sessionStartRef.current = Date.now();
 
     let ended = false;
@@ -218,7 +216,7 @@ export default function HomePage() {
       if (ended) return;
       ended = true;
       const duration = Math.round((Date.now() - sessionStartRef.current) / 1000);
-      track(analyticsBaseRef.current, "session_ended", { session_duration_seconds: duration });
+      track("session_ended", { session_duration_seconds: duration });
     };
     window.addEventListener("beforeunload", handleSessionEnd);
     const onVisibility = () => {
@@ -434,7 +432,8 @@ useEffect(() => {
   const [exportToasts, setExportToasts] = useState<{ id: number; clipName: string; exportDir: string }[]>([]);
   const exportToastIdRef = useRef(0);
   const suppressAutoSessionRestoreRef = useRef(false);
-  const analyticsBaseRef = useRef<AnalyticsBase>({ externalId: null, email: null, plan: "free" });
+  /** The video being loaded, for timing events: where it came from and when it started. */
+  const loadInfoRef = useRef<{ source: LinkSource | "local"; url: string | null; startedAt: number; ready: boolean } | null>(null);
   const sessionStartRef = useRef(Date.now());
   const [upgradeFeature, setUpgradeFeature] = useState<string | null>(null);
   const {
@@ -553,18 +552,21 @@ useEffect(() => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoData, loading]);
 
-// Keep analyticsBase ref in sync so event handlers closed over it use current values.
+// Every event carries the current plan.
 // eslint-disable-next-line react-hooks/rules-of-hooks
 useEffect(() => {
-  analyticsBaseRef.current = {
-    externalId: session?.user?.id ?? null,
-    email,
-    plan: plan.toLowerCase() as "free" | "pro" | "max",
-  };
-}, [session, email, plan]);
+  setAnalyticsContext({ plan: plan.toLowerCase() });
+}, [plan]);
 
 function trackEvent(event: string, extra: Record<string, unknown> = {}) {
-  track(analyticsBaseRef.current, event, extra);
+  track(event, extra);
+}
+
+/** The source and its age in ms, attached to load and preview events. */
+function loadContext(): Record<string, unknown> {
+  const info = loadInfoRef.current;
+  if (!info) return {};
+  return { source: info.source, url: info.url, ms_since_load: Math.round(performance.now() - info.startedAt) };
 }
 
 async function fetchCapabilitiesHttp(): Promise<Capabilities | null> {
@@ -735,6 +737,14 @@ async function refreshUsage() {
       return;
     }
 
+    const link = describeLink(normalized);
+    loadInfoRef.current = { source: link.source, url: link.url, startedAt: performance.now(), ready: false };
+    trackEvent("video_load_started", {
+      source: link.source,
+      url: link.url,
+      method: typeof urlOverride === "string" ? "paste" : "typed",
+    });
+
     setLoading(true);
     setLoadProgress(0);
     setShowAdvancedExport(false);
@@ -760,8 +770,15 @@ async function refreshUsage() {
 
       // Ignore stale responses
       if (reqId !== resolveReqRef.current) return;
+      const resolveMs = Math.round(performance.now() - (loadInfoRef.current?.startedAt ?? performance.now()));
       if (!res.ok) {
         const code = res.error || "unknown_error";
+        trackEvent("video_resolve_failed", {
+          source: link.source,
+          url: link.url,
+          resolve_ms: resolveMs,
+          error_code: String(code).slice(0, 80),
+        });
         const details = "details" in res ? (res as { details?: string }).details : undefined;
         const lower = code.toLowerCase();
 
@@ -807,6 +824,18 @@ async function refreshUsage() {
         setResolveError(null);
         setVideoData(res.data);
         setResolvedUrl(normalized);
+        trackEvent("video_resolved", {
+          source: link.source,
+          url: link.url,
+          resolve_ms: resolveMs,
+          video_duration_s: Math.round(res.data.duration || 0),
+          max_height: res.data.capabilities?.trueMaxHeight ?? null,
+          preview_kind: res.data.dashAvailable
+            ? "stream"
+            : res.data.requiresLocalPreview
+            ? "download"
+            : "direct",
+        });
         trackEvent("source_added", { source_type: "url" });
         if (!localStorage.getItem("klipprr-onboarding-import-first-video")) {
           localStorage.setItem("klipprr-onboarding-import-first-video", "1");
@@ -815,6 +844,7 @@ async function refreshUsage() {
       }
     } catch (err) {
       console.error(err);
+      trackEvent("video_resolve_failed", { source: link.source, url: link.url, error_code: "agent_unreachable" });
       alert("Could not reach ClipAgent.");
     }
 
@@ -837,6 +867,7 @@ async function refreshUsage() {
       setLoading(true);
       setLoadProgress(0);
       setLocalFilePath(selected);
+      loadInfoRef.current = { source: "local", url: null, startedAt: performance.now(), ready: false };
       const [duration, videoCodec, audioCodec] = await invoke<[number, string | null, string | null]>("get_local_video_info", {
         path: selected,
       });
@@ -885,6 +916,14 @@ async function refreshUsage() {
         },
       };
       setVideoData(data);
+      trackEvent("local_file_loaded", {
+        ext: fileExtension(selected),
+        video_codec: vc || null,
+        audio_codec: ac || null,
+        video_duration_s: Math.round(Number(duration) || 0),
+        preview_kind: needsPcmFix ? "proxy" : "direct",
+        load_ms: Math.round(performance.now() - (loadInfoRef.current?.startedAt ?? performance.now())),
+      });
       trackEvent("source_added", { source_type: "file" });
       if (!localStorage.getItem("klipprr-onboarding-import-first-video")) {
         localStorage.setItem("klipprr-onboarding-import-first-video", "1");
@@ -892,6 +931,7 @@ async function refreshUsage() {
       }
     } catch (e) {
       console.warn("Load local file failed:", e);
+      trackEvent("local_file_failed", { error: scrubText(String(e)) });
       setResolveError("Could not load the selected file.");
       setVideoData(null);
       setLocalFilePath(null);
@@ -968,6 +1008,7 @@ async function refreshUsage() {
         // TikTok's download is its only preview source.
         setYtPreviewLoading(false);
         setPreviewUnavailable(true);
+        trackEvent("preview_failed", { ...loadContext(), reason: "download_failed" });
       } else {
         // An upgrade failed; the direct stream is still playing.
         setYtPreviewLoading(false);
@@ -1013,6 +1054,7 @@ async function refreshUsage() {
           // Both downloads have failed: nothing else is coming, so show the error.
           setYtPreviewLoading(false);
           setPreviewUnavailable(true);
+          trackEvent("preview_failed", { ...loadContext(), reason: "download_failed" });
           if (intervalId !== null) clearInterval(intervalId);
         }
       } catch {
@@ -1815,6 +1857,7 @@ useEffect(() => {
   }}
 />
     <WhatsNew />
+    <ConsentCard />
     {undoToast && (
       <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-zinc-900 border border-zinc-800 px-4 py-2 rounded-md text-sm text-zinc-300 animate-toast">
         {undoToast}
@@ -2117,6 +2160,20 @@ useEffect(() => {
                 videoKey={videoData.id}
                 unavailable={previewUnavailable}
                 onAspectRatio={setVideoAspect}
+                onReady={() => {
+                  const info = loadInfoRef.current;
+                  if (!info || info.ready) return;
+                  info.ready = true;
+                  trackEvent("preview_ready", loadContext());
+                }}
+                onPlaybackError={(details) => {
+                  trackEvent("preview_failed", {
+                    ...loadContext(),
+                    reason: "playback_error",
+                    audio_codec: (videoData?.raw as { audio_codec?: string } | undefined)?.audio_codec ?? null,
+                    details: details ? scrubText(details) : null,
+                  });
+                }}
                 onStreamError={(reason) => {
                   console.warn("[stream preview] falling back to download:", reason);
                   setDashFailed(true);
@@ -2401,14 +2458,10 @@ useEffect(() => {
                   refreshUsage();
                 }}
                 onExportComplete={(count, exportDir, hadWatermark, totalDurationSeconds) => {
-                  posthog.capture("clip_exported", {
-                    clip_count: count,
-                    had_watermark: hadWatermark,
-                    plan: plan,
-                  });
                   const quality = exportHQ ? "quality" : "speed";
                   trackEvent("clip_exported", {
                     clip_count: count,
+                    had_watermark: hadWatermark,
                     quality,
                     clip_duration_seconds: Math.round(totalDurationSeconds),
                   });

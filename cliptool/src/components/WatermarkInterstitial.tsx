@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import posthog from "posthog-js";
+import { track } from "@/lib/analytics";
 
 interface WatermarkInterstitialProps {
   open: boolean;
@@ -21,7 +21,7 @@ export default function WatermarkInterstitial({
   onClose,
 }: WatermarkInterstitialProps) {
   useEffect(() => {
-    if (open) posthog.capture("watermark_interstitial_shown", { clip_count: count });
+    if (open) track("watermark_interstitial_shown", { clip_count: count });
   }, [open, count]);
 
   if (!open) return null;
@@ -83,7 +83,7 @@ export default function WatermarkInterstitial({
           <div className="mt-4 space-y-2">
             <button
               type="button"
-              onClick={() => { posthog.capture("upgrade_clicked", { source: "watermark_interstitial" }); onUpgrade(); }}
+              onClick={() => { track("upgrade_clicked", { source: "watermark_interstitial" }); onUpgrade(); }}
               className="btn-brand w-full py-2.5 rounded text-sm font-semibold flex items-center justify-center gap-2"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3l14 9-14 9V3z"/></svg>
@@ -91,7 +91,7 @@ export default function WatermarkInterstitial({
             </button>
             <button
               type="button"
-              onClick={() => { posthog.capture("watermark_interstitial_dismissed"); onOpenFolder(); onClose(); }}
+              onClick={() => { track("watermark_interstitial_dismissed"); onOpenFolder(); onClose(); }}
               className="w-full py-2 rounded text-xs text-zinc-500 hover:text-zinc-300 transition"
             >
               Open folder (keep watermark)
