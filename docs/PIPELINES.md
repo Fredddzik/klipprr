@@ -127,16 +127,25 @@ Any redesign must preserve the invariants below.
 
 `POST /download-all` → `commands/download.rs::handle_download_all`
 
-Every video export is an **exact cut** (since 16 Nov 2026, branch `ui/main-and-start-screen`):
-it starts on the frame that is on screen at the In point and is re-encoded in the chosen
-format. A stream copy can only start on a keyframe, so the "Original – no re-encode" option
-and the Fast/Quality switch were removed (both modes downloaded the same stream).
+Every video export is an **exact cut** (since 0.1.43, released 16 Nov 2026): it starts on the
+frame that is on screen at the In point and is re-encoded in the chosen format. A stream copy can
+only start on a keyframe, so the "Original – no re-encode" option and the Fast/Quality switch were
+removed (both modes downloaded the same stream).
 
 | Source | How a clip is cut |
 |---|---|
-| **YouTube** | `youtube_exact_cut`: yt-dlp prints the chosen height, fps and direct stream URLs; ffmpeg seeks each stream to the first frame (`frame_span`, minus 1 ms), `setpts/asetpts=PTS-STARTPTS`, `-frames:v`. Falls back to the section download below on any failure |
-| **Other URLs** | `yt-dlp --download-sections` per clip, then the padding is skipped by length difference. **Not yet frame exact** (todo: check Twitch, Instagram, X, TikTok) |
-| **Local file** | same frame maths as YouTube, fps from `probe_fps` |
+| **Any link** (YouTube, Twitch, X, Instagram, TikTok) | `url_exact_cut`: yt-dlp prints the chosen height, fps, audio codec, request headers and direct stream URLs; `frame_start_at` reads the real start time of the frame on screen at the In point from the stream's own timestamps (ffprobe `-read_intervals` with an absolute end; frames are not always on a clean grid, e.g. a Twitch VOD), with `frame_span` (fps maths) as the fallback; ffmpeg seeks each stream to that frame minus 1 ms, `setpts/asetpts=PTS-STARTPTS`, `-frames:v`. Sources without audio skip the audio filter. Falls back to the section download (below) on any failure |
+| **Local file** | the same frame lookup and cut, on the file |
+| **Fallback** | `yt-dlp --download-sections` per clip, then the padding is skipped by length difference. **Not frame exact** (can start a frame or two late, with a black first frame). Runs only when `url_exact_cut` fails |
+
+Verified exact by `scripts/export-regression.sh` on 16 Nov 2026: YouTube (H.264, HEVC), Twitch
+clip and VOD, X, Instagram. ProRes and local cases were checked by hand (the automatic check
+could not tell neighbouring frames apart). **TikTok and Windows are not in the regression yet.**
+
+For comparison (22 Nov 2026, same YouTube clip 10.3–14 s): a plain `yt-dlp --download-sections`
+copy held 5.02 s of hidden run-up behind its edit list and showed its first frame one frame late;
+with `--force-keyframes-at-cuts` it had no run-up but was still one frame late, and the video
+started 40 ms after the audio.
 
 Formats (`ExportVideoCodec`, media.rs): MP4 · H.264 (`"universal"`), MP4 · HEVC (`"hevc"`),
 MOV · ProRes 422 (`"prores"`), all on VideoToolbox. H.264 bitrate scales with height (6, 12,
@@ -157,9 +166,9 @@ Format selectors (other URLs):
 bv*[height<=H] + ba / best      → re-encoded in the chosen format
 ```
 
-Up to **4 clips export in parallel**, each spawning its own yt-dlp + ffmpeg. Not all four
-re-encode: each clip is probed after download and stream-copied when it is already
-H.264/AAC and unwatermarked, so the hardware encoder usually sees fewer than four. Quota is
+Up to **4 clips export in parallel**, each spawning its own yt-dlp + ffmpeg, and all four
+re-encode. (The stream-copy branch, which copied clips that were already H.264/AAC and
+unwatermarked, only runs for codec `"original"`, which the interface no longer sends.) Quota is
 reserved before the run and refunded on failure.
 
 **Refused downloads are retried.** YouTube refuses section downloads with a 403 now and
