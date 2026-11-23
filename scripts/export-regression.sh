@@ -33,6 +33,10 @@ TWITCH_CLIP=https://www.twitch.tv/sergeynixon/clip/StormyThankfulSproutFutureMan
 TWITCH_VOD=https://www.twitch.tv/videos/6528877
 IG=https://www.instagram.com/reel/Chunk8-jurw/
 X=https://twitter.com/LisPower1/status/1001551623938805763
+# 60 fps HEVC at 1080p, video-only; its sound comes from the H.264 rendition (download.rs).
+TIKTOK=https://www.tiktok.com/@outruncook/video/7690286989635046669
+TIKTOK_ESPN=https://www.tiktok.com/@espn/video/7711144248808148255    # 60 fps, 30 fps preview
+TIKTOK_30=https://www.tiktok.com/@grillflavor0/video/7704311549657156894 # 30 fps throughout
 
 # How close the clip's first frame has to be to the requested mark. Every path is held
 # to the same bound, re-encode and stream copy alike: a stream-copied MP4 carries the
@@ -67,6 +71,10 @@ CASES=(
   "twitch_vod|$TWITCH_VOD|speed|universal|1000|1008|720|v|exact"
   "instagram|$IG|speed|universal|1|5|1080|v|exact"
   "x|$X|speed|universal|1|4|720|v|exact"
+  "tiktok|$TIKTOK|speed|universal|15.381|19.25||v|exact"
+  "tiktok_720|$TIKTOK|speed|universal|20|24|720|v|exact"
+  "tiktok_espn60|$TIKTOK_ESPN|speed|universal|3.21|6.5||v|exact"
+  "tiktok_30fps|$TIKTOK_30|speed|universal|4.1|7.3||v|exact"
   "local_exact|local|speed|universal|1|4||v|exact"
   "local_mp3|local|speed|mp3|1|4||mp3|exact"
 )
@@ -245,6 +253,55 @@ if min(d0, d1) > 0.9 * max(d0, d1):
 print("exact" if d0 < d1 else "one frame late (diff %d vs %d)" % (d0, d1))
 EXACTPY
 
+# The other end: is the clip's last frame the one just before the frame on screen at the
+# Out mark (the Out frame itself is not part of the clip), one frame short, or one long?
+# The first-frame check cannot see this; an export once lost its last frame to rounding.
+LASTF="$OUT_ROOT/last-frame.py"
+cat > "$LASTF" <<'LASTPY'
+import os, subprocess, sys
+FFMPEG = os.environ.get("FFMPEG", "ffmpeg"); FFPROBE = os.environ.get("FFPROBE", "ffprobe")
+clip, src, mark = sys.argv[1], sys.argv[2], float(sys.argv[3])
+def out(a): return subprocess.run(a, capture_output=True).stdout.decode()
+def num(x):
+    try: return float(x.strip().rstrip(","))
+    except ValueError: return None
+origin = num(out([FFPROBE, "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", src])) or 0.0
+window = "%.3f%%%.3f" % (origin + mark - 1.5, origin + mark + 0.5)
+ts = sorted(t for t in (num(l) for l in out([FFPROBE, "-v", "error", "-select_streams", "v:0", "-read_intervals",
+      window, "-show_entries", "frame=pts_time", "-of", "csv=p=0", src]).splitlines()) if t is not None)
+at_out = [t for t in ts if t <= origin + mark + 0.0005]
+if len(at_out) < 3 or not [t for t in ts if t > at_out[-1]]:
+    print("n/a no source frames near the mark"); sys.exit(1)
+short, want, long_ = at_out[-3], at_out[-2], at_out[-1]
+def gray(a, vf=""): return subprocess.run([FFMPEG, "-v", "error", "-nostdin"] + a + ["-vf", vf + "scale=96:54,format=gray",
+      "-fps_mode", "passthrough", "-f", "rawvideo", "-"], capture_output=True).stdout
+trio = gray(["-ss", "%.3f" % max(0.0, short - origin - 2.0), "-copyts", "-t", "4", "-i", src, "-an", "-frames:v", "3"],
+            "select='between(t\\,%.6f\\,%.6f)'," % (short - 0.0005, long_ + 0.0005))
+def fps(p):
+    # First usable line: an HLS source prints one per variant.
+    for l in out([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate",
+                  "-of", "csv=p=0", p]).splitlines():
+        a, _, b = l.strip().rstrip(",").partition("/")
+        try:
+            if float(b) > 0 and float(a) > 0: return float(a) / float(b)
+        except ValueError: pass
+    return 0.0
+tail = gray(["-sseof", "-0.5", "-i", clip])
+n = 96 * 54
+if len(trio) < 3 * n or len(tail) < 2 * n:
+    print("n/a could not read frames"); sys.exit(1)
+# A clip at twice the reference's rate (a 60 fps TikTok against its 30 fps preview) shows two
+# frames for each reference frame: the last reference frame and the in-between frame after
+# it, which the reference never shows. Check the one the reference does show.
+double = abs(fps(clip) - 2 * fps(src)) < 0.1
+last = tail[-2 * n:-n] if double else tail[-n:]
+d = [sum(abs(a - b) for a, b in zip(last, trio[i * n:(i + 1) * n])) for i in range(3)]
+best = min(range(3), key=d.__getitem__)
+if sorted(d)[1] < 1.1 * max(d[best], 1):
+    print("n/a neighbouring frames too similar to tell apart"); sys.exit(1)
+print(["one frame short", "exact", "one frame long"][best])
+LASTPY
+
 # A reference on the source's own timeline. Local cases already have the file; URL
 # cases get a direct media URL from yt-dlp, which only has to be the same video, not
 # the same rendition the app picked: the thumbnails are scaled before matching.
@@ -254,6 +311,20 @@ source_ref() {
     echo "$LOCAL_SRC"
     return
   fi
+  # TikTok: the reference is the app's own preview, the file the user marks on. TikTok's
+  # versions of one post do not all show the same picture at the same timestamp (a 60 fps
+  # version runs one preview frame ahead of a 30 fps preview), so "exact" means "matches
+  # the preview". Fetching it also leaves it in the cache, where the export reads its frame
+  # rate (download.rs, preview_alignment). The TikTok cases mark inside its first 60 s.
+  case $src in
+    *tiktok.com*)
+      local enc
+      enc=$(python3 -c "import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=''))" "$src")
+      curl -s -m 180 -H "X-Klipprr-Token: $TOKEN" "$AGENT/yt-preview-cache?url=$enc" |
+        python3 -c "import sys,json;print(json.load(sys.stdin).get('path',''))" 2>/dev/null
+      return
+      ;;
+  esac
   if [ "$want" = audio ]; then
     sel="ba/b"
   elif [ -n "$height" ]; then
@@ -307,6 +378,9 @@ print(json.dumps(b))
 PY
 )
   local t0 status
+  # TikTok exports line up with the cached preview, so it has to exist first, as it does
+  # in the app (the preview loads before anything can be marked).
+  case $src in *tiktok.com*) source_ref "$src" v "$height" >/dev/null ;; esac
   t0=$(date +%s)
   status=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H 'content-type: application/json' \
     -H "X-Klipprr-Token: $TOKEN" -d "$body" "$AGENT/download-all")
@@ -371,12 +445,17 @@ PY
     python3 -c "import sys; sys.exit(0 if float('${vstart:-0}') <= 0.002 else 1)" ||
       problems="$problems picture starts ${vstart}s after the sound (black first frame);"
   fi
-  local frame_check=""
+  local frame_check="" last_check=""
   if [ "$kind" = video ] && [ "$cut" = exact ] && [ -n "$ref" ]; then
     frame_check=$(FFMPEG="$FFMPEG" FFPROBE="$FFPROBE" python3 "$EXACT" "$f" "$ref" "$start")
     case $frame_check in
       exact|"n/a"*) ;;
       *) problems="$problems first frame is $frame_check;" ;;
+    esac
+    last_check=$(FFMPEG="$FFMPEG" FFPROBE="$FFPROBE" python3 "$LASTF" "$f" "$ref" "$end")
+    case $last_check in
+      exact|"n/a"*) ;;
+      *) problems="$problems last frame is $last_check;" ;;
     esac
   fi
   if [ "$kind" = video ]; then
@@ -391,7 +470,7 @@ PY
     echo "FAIL $name:$problems"
     failed=$((failed + 1))
   else
-    echo "ok   $name  $(( $(date +%s) - t0 ))s  ${vcodec:-} ${acodec:-} ${dur}s  start ${drift_show}${preroll:+  pre-roll ${preroll}s}${vstart:+  picture at ${vstart}s}${frame_check:+  first frame: ${frame_check}}"
+    echo "ok   $name  $(( $(date +%s) - t0 ))s  ${vcodec:-} ${acodec:-} ${dur}s  start ${drift_show}${preroll:+  pre-roll ${preroll}s}${vstart:+  picture at ${vstart}s}${frame_check:+  first frame: ${frame_check}}${last_check:+  last frame: ${last_check}}"
   fi
   [ "$name" = yt_original ] && LOCAL_SRC=$f
 }

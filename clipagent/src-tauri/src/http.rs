@@ -457,7 +457,7 @@ fn start_hq_proxy_bg(file_path: &Path) {
 /// Cache path for a yt-dlp-built preview, keyed on source URL + quality tier.
 /// Tiers are independent files so the fast low-res copy stays playable while the
 /// high-res one is still downloading.
-fn yt_preview_path(url: &str, tier: &str) -> PathBuf {
+pub(crate) fn yt_preview_path(url: &str, tier: &str) -> PathBuf {
     let mut h = DefaultHasher::new();
     url.hash(&mut h);
     let key = h.finish();
@@ -471,10 +471,15 @@ fn yt_preview_lock_path(p: &Path) -> PathBuf {
     p.with_extension("lock")
 }
 
-/// Legacy selector: smallest available muxed/any format. Used by the TikTok path,
-/// which only needs a throwaway 60s preview.
+/// Selector for the TikTok preview (requests without `q`): the smallest version that
+/// carries its own sound, H.264 first so every webview can play it (WebView2 cannot decode
+/// HEVC). Never TikTok's "download" (it has the TikTok watermark burned in and an end card)
+/// or its "audio" MP3 (the post's sound, which on a post using a song can be the song
+/// without the creator's voice). The export reads this file's frame rate to line its cut up
+/// with the picture the user marked on (download.rs, `preview_alignment`).
 const YT_PREVIEW_SELECTOR_WORST: &str =
-    "worstvideo[ext=mp4]+worstaudio[ext=m4a]/worstvideo+worstaudio/worst[ext=mp4]/worst";
+    "worst[vcodec^=h264][acodec!=none][format_id!=download]/worst[acodec!=none][format_id!=download]/\
+     worstvideo[ext=mp4]+worstaudio[ext=m4a]/worstvideo+worstaudio/worst[ext=mp4]/worst";
 
 /// Format selector capped at `max_h` px tall, pinned to H.264 + AAC.
 /// WKWebView cannot decode VP9 or AV1, and YouTube serves those by default at most

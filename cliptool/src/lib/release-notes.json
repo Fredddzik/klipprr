@@ -1,4 +1,9 @@
 {
+  "0.1.45": [
+    "Fixed: TikTok clips started and ended a few frames late, and some lost the creator's voice. They now start and end on the exact frames you mark, in full quality, with the video's own sound.",
+    "Fixed: a clip whose Out point sat exactly on a frame could lose its last frame.",
+    "Fixed: when a site briefly refused a download, HEVC and ProRes exports could come out as H.264. Klipprr now tries again and keeps the format you picked."
+  ],
   "0.1.44": [
     "Fixed: on Windows, some videos from your own files (iPhone clips, HEVC recordings) wouldn't preview. They now open and play.",
     "New: Klipprr asks once whether you want to share usage data, like which links fail to load. It helps me fix problems before you have to report them. Change it any time in Settings."

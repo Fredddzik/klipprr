@@ -392,7 +392,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     let first = frame_start_at(&[local_str.clone()], start)
                         .filter(|f| (f - grid_first).abs() < 1.0)
                         .unwrap_or(grid_first);
-                    let frames = ((end - first) * fps + 1e-6).floor().max(1.0) as i64;
+                    let frames = frames_until(first, end, fps);
                     args.extend(["-ss".into(), format!("{:.6}", (first - 0.001).max(0.0)), "-i".into(), local_str.clone()]);
                     // Pick the tracks: left to itself ffmpeg takes the audio with the most
                     // channels, which on an iPhone video is spatial audio (APAC) that almost
@@ -455,7 +455,29 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         // Compute once so every thread can cheaply clone the resulting String.
         //   Universal (re-encode): allow any bestvideo container/codec; output MP4 via ffmpeg.
         //   Original (stream copy): must stay MP4-compatible, constrain to MP4 video + M4A audio.
-        let format_selector: String = if codec != "original" || has_watermark {
+        // TikTok's best renditions are video-only HEVC, and its "audio" format is the post's
+        // sound as an MP3: on a post that uses a song that can be the song alone, and it sits
+        // about 50 ms off the picture. Both selectors take the sound from a version that
+        // carries the video's own audio track (never the watermarked "download"). The exact
+        // cut pairs the best video with that track (`--video-multistreams`, see
+        // url_exact_cut); the section download cannot write two video streams, so it takes
+        // the best version that has sound.
+        let tiktok = url.contains("tiktok.com");
+        let exact_selector: String = if tiktok {
+            let audio = "ba*[vcodec!=none][acodec!=none][format_id!=download]";
+            match fast_cap {
+                Some(h) => format!("bv*[height<={h}]+{audio}/b[height<={h}][format_id!=download]/b"),
+                None => format!("bv*+{audio}/b[format_id!=download]/b"),
+            }
+        } else {
+            String::new()
+        };
+        let format_selector: String = if (codec != "original" || has_watermark) && tiktok {
+            match fast_cap {
+                Some(h) => format!("b[height<={h}][format_id!=download]/b[format_id!=download]/b"),
+                None => "b[format_id!=download]/b".to_string(),
+            }
+        } else if codec != "original" || has_watermark {
             match fast_cap {
                 Some(h) => format!("bv*[height<={}] + ba/best", h),
                 None => "bv*+ba/best".to_string(),
@@ -494,10 +516,8 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
         // and described ("up to 4 concurrent clips"). The comment that stood here until
         // 2026-10-18 said 3 and "capped at 3 to avoid ISP throttling"; that was a draft
         // leftover rather than a later divergence, since the code has read min(4, ..) ever
-        // since the parallel loop landed. 4 clips is also not 4 hardware encodes:
-        // can_stream_copy_to_mp4 probes each clip after download and skips the re-encode
-        // when the source is already H.264/AAC and unwatermarked, so the M-series encoder
-        // usually sees fewer. Upstream refusals under concurrency are real, but they are
+        // since the parallel loop landed. Every clip re-encodes (exact cut, 0.1.43), so up to 4
+        // hardware encodes run at once. Upstream refusals under concurrency are real, but they are
         // absorbed by run_ytdlp_with_progress's three attempts, not by this cap.
         let max_concurrent: usize = std::cmp::min(4, total_clips.max(1));
         let sem: Arc<(Mutex<usize>, Condvar)> =
@@ -516,6 +536,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                 let base_dir_t = base_dir.clone();
                 let base_str_t = base_str.clone();
                 let format_selector_t = format_selector.clone();
+                let exact_selector_t = exact_selector.clone();
                 let url_t = url.clone();
                 let watermark_path_t = watermark_path_buf.clone();
                 let client_export_id_t = client_export_id.clone();
@@ -537,6 +558,7 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         let base_dir = &base_dir_t;
                         let base_str = base_str_t.as_str();
                         let format_selector = format_selector_t.as_str();
+                        let exact_selector = if exact_selector_t.is_empty() { format_selector } else { exact_selector_t.as_str() };
                         let url = url_t.as_str();
                         let watermark_path_buf = watermark_path_t.as_ref();
                         let client_export_id = client_export_id_t.as_deref();
@@ -565,7 +587,13 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                         }
 
                         let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-                        let out_path = unique_output_path(base_dir, &safe);
+                        // Re-encoded exports keep the chosen format's container (ProRes is a .mov),
+                        // also when they come through the section-download fallback.
+                        let out_path = if needs_reencode_branch {
+                            unique_output_path_with_ext(base_dir, &safe, video_codec.ext())
+                        } else {
+                            unique_output_path(base_dir, &safe)
+                        };
                         let out_str = out_path.to_string_lossy().to_string();
 
                         // Every failure path reports through here. A clip the user cancelled
@@ -690,10 +718,26 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                     if !export_control::is_cancelled(job) {
                         let exact_temp = std::env::temp_dir()
                             .join(format!("klipprr_exact_{}_{}.{}", export_stamp, i, video_codec.ext()));
-                        match url_exact_cut(
-                            &app, job, &url, &format_selector, start, end, video_codec,
+                        // YouTube refuses stream links now and then for 20-30 s (a 403); each
+                        // attempt lists fresh links, as run_ytdlp_with_progress does, before the
+                        // section download takes over.
+                        let mut exact = url_exact_cut(
+                            &app, job, &url, exact_selector, start, end, video_codec,
                             watermark_path_buf.as_ref().copied(), &exact_temp, i, total_clips, &client_export_id,
-                        ) {
+                        );
+                        for wait in [3u64, 10] {
+                            let refused = matches!(&exact, Err(e) if e.contains("403") || e.contains("Forbidden"));
+                            if !refused || !wait_unless_cancelled(job, wait) {
+                                break;
+                            }
+                            log_to_file(&format!("[EXACT] refused i={}, retried after {}s", i, wait));
+                            let _ = std::fs::remove_file(&exact_temp);
+                            exact = url_exact_cut(
+                                &app, job, &url, exact_selector, start, end, video_codec,
+                                watermark_path_buf.as_ref().copied(), &exact_temp, i, total_clips, &client_export_id,
+                            );
+                        }
+                        match exact {
                             Ok(_) => {
                                 let final_path = unique_output_path_with_ext(base_dir, &safe, video_codec.ext());
                                 let moved = move_temp_to_final(&exact_temp, &final_path).is_ok();
@@ -869,13 +913,17 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
 
                     // Write ffmpeg output to temp, then move to final path when done
                     let out_temp = std::env::temp_dir()
-                        .join(format!("klipprr_export_{}_{}.mp4", export_stamp, i));
+                        .join(format!("klipprr_export_{}_{}.{}", export_stamp, i, video_codec.ext()));
                     let out_temp_str = out_temp.to_string_lossy().to_string();
 
                     // Smart auto-skip: if yt-dlp gave us H.264 + AAC (common for YouTube <=720p,
                     // IG Reels, X/Twitter, Twitch Clips), remux into MP4 with -c copy instead
                     // of re-encoding. Cuts ~1-3s off a 10s clip. Forced off when watermarking.
-                    let stream_copy_mode = can_stream_copy_to_mp4(&tmp_path, has_watermark);
+                    // Never on this path any more: it runs only when the exact cut failed, and a
+                    // copy can only start on a keyframe and keeps the download's codec (an HEVC
+                    // or ProRes export came out H.264). Re-encoding from the trim point starts
+                    // closer to the mark and keeps the chosen format.
+                    let stream_copy_mode = false;
                     if stream_copy_mode {
                         log_to_file(&format!(
                             "[FAST] auto stream-copy (H.264/AAC detected, no re-encode) i={}",
@@ -936,8 +984,8 @@ pub fn handle_download_all(app: AppHandle, body: &str) -> String {
                             "-f".to_string(), "mp4".to_string(),
                         ]);
                     } else {
-                        ffmpeg_args.extend(h264_encoder_args().into_iter().map(String::from));
-                        ffmpeg_args.extend(vec!["-c:a".to_string(), "aac".to_string()]);
+                        let (_, src_h) = probe_video_dims(&tmp_path).unwrap_or((1280, 720));
+                        ffmpeg_args.extend(video_codec.encoder_args(src_h as i64));
                     }
                     ffmpeg_args.extend(vec![
                         "-y".to_string(),
@@ -1789,6 +1837,15 @@ pub(super) fn frame_start_at(input_args: &[String], mark: f64) -> Option<f64> {
         .fold(None, |best: Option<f64>, t| Some(best.map_or(t, |b| b.max(t))))
 }
 
+/// How many frames run from the frame that starts at `first` up to, not including, the one
+/// on screen at `end`. `first` comes from ffprobe, rounded to 6 decimals, so an Out point
+/// exactly on a frame boundary gave 232.99998 frames and lost the last frame (a TikTok at
+/// 60 fps, 22 Nov 2026). A thousandth of a frame of slack absorbs that; marks are set in
+/// milliseconds, so a real mark never sits that close below a boundary.
+pub(super) fn frames_until(first: f64, end: f64, fps: f64) -> i64 {
+    ((end - first) * fps + 1e-3).floor().max(1.0) as i64
+}
+
 /// The frames a clip covers: from the one on screen at `start` (it began at or before the
 /// mark) up to, not including, the one on screen at `end`. Returns the first frame's start
 /// time and the frame count. 1 µs of slack keeps a mark placed exactly on a frame from
@@ -1799,6 +1856,124 @@ pub(super) fn frame_span(start: f64, end: f64, fps: f64) -> (f64, i64) {
     (i as f64 / fps, (j - i).max(1))
 }
 
+
+/// The first usable rate in ffprobe's `avg_frame_rate` output ("30000/1001"). An HLS
+/// source (X) lists one line per variant, with blank lines between them.
+pub(super) fn parse_frame_rate(out: &str) -> Option<f64> {
+    out.lines().map(|l| l.trim().trim_end_matches(',')).filter(|l| !l.is_empty()).find_map(|l| {
+        let (n, d) = l.split_once('/')?;
+        let (n, d): (f64, f64) = (n.trim().parse().ok()?, d.trim().parse().ok()?);
+        (d > 0.0 && n / d > 1.0).then(|| n / d)
+    })
+}
+
+/// How the export lines its cut up with the TikTok preview the user marked on, as a shift
+/// for the In and Out points (seconds, added to both) and padding (subtracted from In, added
+/// to Out).
+///
+/// TikTok's versions of one post do not all show the same picture at the same timestamp.
+/// Measured on 10 posts (22 Nov 2026): versions with the preview's frame rate match it
+/// exactly; a 60 fps version made alongside a 30 fps preview shows each picture one preview
+/// frame (33 ms) earlier, on every frame; a variable or odd frame rate gave no clean answer.
+/// So: same rate, nothing; exactly double, snap each mark to the start of the preview frame
+/// the user saw, then move it back one preview frame (each preview frame is every second
+/// frame of the 60 fps version, so a mark moved without snapping can land between the two
+/// and keep one frame too many at the end); anything else, keep the quality and pad one
+/// preview frame on each side. A few frames too many is better than cutting off what the
+/// user marked. Returns the marks to cut at and a note for the log.
+fn preview_alignment(url: &str, export_fps: f64, start: f64, end: f64) -> (f64, f64, &'static str) {
+    if !url.contains("tiktok.com") {
+        return (start, end, "none");
+    }
+    let preview = crate::http::yt_preview_path(url, "lq");
+    let preview_fps: Option<f64> = preview.is_file().then(|| {
+        crate::proc::command(ffprobe_path())
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0"])
+            .arg(&preview)
+            .output()
+            .ok()
+            .and_then(|o| parse_frame_rate(&String::from_utf8_lossy(&o.stdout)))
+    }).flatten();
+    let snap = |t: f64, p: f64| (t * p + 1e-6).floor() / p;
+    match preview_fps {
+        Some(p) if (export_fps - p).abs() < 0.05 => (start, end, "same rate"),
+        Some(p) if (export_fps - 2.0 * p).abs() < 0.1 => (
+            (snap(start, p) - 1.0 / p).max(0.0),
+            snap(end, p) - 1.0 / p,
+            "double rate: snapped and moved back one preview frame",
+        ),
+        Some(p) => ((start - 1.0 / p).max(0.0), end + 1.0 / p, "other rate: padded one preview frame"),
+        // No preview file to compare with (cache cleared): a 30 fps export or slower is the
+        // preview's family on every post measured; anything faster gets the padding.
+        None if export_fps <= 31.0 => (start, end, "no preview, same family assumed"),
+        None => ((start - 1.0 / 30.0).max(0.0), end + 1.0 / 30.0, "no preview: padded one frame"),
+    }
+}
+
+/// One stream of an exact cut: its direct link and the request options ffmpeg needs for it.
+struct ExactStream {
+    url: String,
+    fps: Option<f64>,
+    http_args: Vec<String>,
+}
+
+/// The streams yt-dlp chose, video first: `requested_formats` when it merges a video and an
+/// audio format, otherwise the single format itself. Headers and cookies are taken per
+/// stream, because yt-dlp keeps them there; the merged entry has neither. TikTok refuses a
+/// stream (403) without the cookies of the session that listed it.
+fn exact_cut_streams(info: &Value) -> Vec<ExactStream> {
+    let one = |f: &Value| -> Option<ExactStream> {
+        let url = f.get("url")?.as_str()?.to_string();
+        if !url.starts_with("http") {
+            return None;
+        }
+        let headers = f.get("http_headers").and_then(Value::as_object).cloned().unwrap_or_default();
+        let cookies = f.get("cookies").and_then(Value::as_str).unwrap_or("");
+        Some(ExactStream { url, fps: f.get("fps").and_then(Value::as_f64), http_args: ffmpeg_http_args(&headers, cookies) })
+    };
+    match info.get("requested_formats").and_then(Value::as_array) {
+        Some(list) => list.iter().filter_map(one).collect(),
+        None => one(info).into_iter().collect(),
+    }
+}
+
+/// ffmpeg request options for a stream: the user agent on its own option, the other headers
+/// as one block, and yt-dlp's cookies in ffmpeg's `-cookies` form (one cookie per line, with
+/// its domain and path). yt-dlp's cookie string looks like `a=1; Domain=.x.com; Path=/;
+/// Secure; Expires=…; b="2=="; Domain=…`: a value with `=` in it comes quoted, and TikTok
+/// refuses the quoted form.
+pub(super) fn ffmpeg_http_args(headers: &serde_json::Map<String, Value>, cookies: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    if let Some(ua) = headers.get("User-Agent").and_then(|v| v.as_str()) {
+        args.extend(["-user_agent".to_string(), ua.to_string()]);
+    }
+    let extra: String = headers
+        .iter()
+        .filter(|(k, _)| k.as_str() != "User-Agent")
+        .filter_map(|(k, v)| v.as_str().map(|v| format!("{k}: {v}\r\n")))
+        .collect();
+    if !extra.is_empty() {
+        args.extend(["-headers".to_string(), extra]);
+    }
+    let mut jar: Vec<(String, String, String, String)> = Vec::new();
+    for tok in cookies.split(';').map(str::trim).filter(|t| !t.is_empty()) {
+        let (k, v) = tok.split_once('=').unwrap_or((tok, ""));
+        match k.to_ascii_lowercase().as_str() {
+            "domain" => { if let Some(c) = jar.last_mut() { c.2 = v.to_string(); } }
+            "path" => { if let Some(c) = jar.last_mut() { c.3 = v.to_string(); } }
+            "expires" | "max-age" | "samesite" | "secure" | "httponly" | "priority" | "partitioned" => {}
+            _ => jar.push((k.to_string(), v.trim_matches('"').to_string(), String::new(), "/".to_string())),
+        }
+    }
+    let lines: String = jar
+        .iter()
+        .map(|(k, v, d, p)| if d.is_empty() { format!("{k}={v}; path={p};\n") } else { format!("{k}={v}; path={p}; domain={d};\n") })
+        .collect();
+    if !lines.is_empty() {
+        args.extend(["-cookies".to_string(), lines]);
+    }
+    args
+}
 
 /// Frame-exact cut for a link (YouTube, Twitch, X, Instagram, TikTok): ask yt-dlp only for
 /// the direct stream links, then let ffmpeg seek each stream to `start` and decode from
@@ -1829,8 +2004,13 @@ fn url_exact_cut(
     let mut args: Vec<&str> = yt_dlp_cookie_args();
     args.extend([
         "-q", "--no-warnings", "-f", format_selector,
-        "--print", "height", "--print", "fps", "--print", "acodec", "--print", "%(http_headers)j", "--print", "urls", url,
+        "--print", "%(.{height,fps,acodec,url,http_headers,cookies,requested_formats})j", url,
     ]);
+    // TikTok's selector pairs a video-only rendition with the audio of a version that also
+    // has video; yt-dlp only allows that pairing with this flag. Only the audio is used.
+    if url.contains("tiktok.com") {
+        args.push("--video-multistreams");
+    }
     let out = crate::proc::command(yt_dlp_path())
         .args(&args)
         .output()
@@ -1839,55 +2019,43 @@ fn url_exact_cut(
         return Err(format!("yt-dlp urls failed: {}", String::from_utf8_lossy(&out.stderr).chars().take(300).collect::<String>()));
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
-    let height: i64 = lines.next().and_then(|h| h.parse().ok()).unwrap_or(1080);
-    let fps_listed: Option<f64> = lines.next().and_then(|f| f.parse().ok()).filter(|f: &f64| *f > 1.0);
+    let info: Value = text
+        .lines()
+        .rev()
+        .find_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+        .ok_or("yt-dlp printed no format info")?;
+    let streams = exact_cut_streams(&info);
+    if streams.is_empty() || streams.len() > 2 {
+        return Err(format!("unexpected stream links: {}", streams.len()));
+    }
+    let height: i64 = info.get("height").and_then(Value::as_i64).unwrap_or(1080);
     // "none" for a video without sound (some Instagram Reels); the filter graph must not
     // ask for an audio stream that is not there.
-    let has_audio = lines.next().map_or(true, |a| a != "none");
-    let headers: serde_json::Map<String, Value> = lines
-        .next()
-        .and_then(|h| serde_json::from_str::<Value>(h).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-    let urls: Vec<&str> = lines.filter(|l| l.starts_with("http")).collect();
-    if urls.is_empty() || urls.len() > 2 {
-        return Err(format!("unexpected stream links: {}", urls.len()));
-    }
-    // Request headers for ffmpeg: the user agent on its own option, the rest as one block.
-    let mut http_args: Vec<String> = Vec::new();
-    if let Some(ua) = headers.get("User-Agent").and_then(|v| v.as_str()) {
-        http_args.extend(["-user_agent".to_string(), ua.to_string()]);
-    }
-    let extra: String = headers
-        .iter()
-        .filter(|(k, _)| k.as_str() != "User-Agent")
-        .filter_map(|(k, v)| v.as_str().map(|v| format!("{k}: {v}\r\n")))
-        .collect();
-    if !extra.is_empty() {
-        http_args.extend(["-headers".to_string(), extra]);
-    }
-    // X lists no frame rate; read it from the stream itself.
-    let fps = fps_listed.unwrap_or_else(|| {
-        let mut probe: Vec<String> = vec!["-v".into(), "error".into()];
-        probe.extend(http_args.iter().cloned());
-        probe.extend([
-            "-select_streams".into(), "v:0".into(),
-            "-show_entries".into(), "stream=avg_frame_rate".into(),
-            "-of".into(), "csv=p=0".into(), urls[0].to_string(),
-        ]);
-        crate::proc::command(ffprobe_path())
-            .args(&probe)
-            .output()
-            .ok()
-            .and_then(|o| {
-                let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                let (n, d) = t.split_once('/')?;
-                let (n, d): (f64, f64) = (n.parse().ok()?, d.parse().ok()?);
-                (d > 0.0 && n / d > 1.0).then(|| n / d)
-            })
-            .unwrap_or(30.0)
-    });
+    let has_audio = streams.len() == 2 || info.get("acodec").and_then(Value::as_str).map_or(true, |a| a != "none");
+    let urls: Vec<&str> = streams.iter().map(|s| s.url.as_str()).collect();
+    let http_args = streams[0].http_args.clone();
+    // X and TikTok's HEVC renditions list no frame rate; read it from the stream itself. A
+    // guess would set the frame count wrong (a 60 fps TikTok came out at half its length).
+    let fps = match streams[0].fps.filter(|f| *f > 1.0) {
+        Some(f) => f,
+        None => {
+            let mut probe: Vec<String> = vec!["-v".into(), "error".into()];
+            probe.extend(http_args.iter().cloned());
+            probe.extend([
+                "-select_streams".into(), "v:0".into(),
+                "-show_entries".into(), "stream=avg_frame_rate".into(),
+                "-of".into(), "csv=p=0".into(), urls[0].to_string(),
+            ]);
+            crate::proc::command(ffprobe_path())
+                .args(&probe)
+                .output()
+                .ok()
+                .and_then(|o| parse_frame_rate(&String::from_utf8_lossy(&o.stdout)))
+                .ok_or("could not read the frame rate")?
+        }
+    };
+
+    let (start, end, alignment) = preview_alignment(url, fps, start, end);
 
     // The preview shows a frame from the moment it starts until the next one does, so a
     // mark usually lands partway through a frame. Start from the frame on screen at the
@@ -1898,7 +2066,7 @@ fn url_exact_cut(
     let mut probe_input = http_args.clone();
     probe_input.push(urls[0].to_string());
     let first = frame_start_at(&probe_input, start).filter(|f| (f - grid_first).abs() < 1.0).unwrap_or(grid_first);
-    let frames = ((end - first) * fps + 1e-6).floor().max(1.0) as i64;
+    let frames = frames_until(first, end, fps);
     let dur = frames as f64 / fps;
     let video_ss = format!("{:.6}", (first - 0.001).max(0.0));
     let audio_ss = format!("{:.6}", first);
@@ -1906,7 +2074,7 @@ fn url_exact_cut(
     ff.extend(http_args.iter().cloned());
     ff.extend(["-ss".to_string(), video_ss, "-i".to_string(), urls[0].to_string()]);
     if urls.len() == 2 {
-        ff.extend(http_args.iter().cloned());
+        ff.extend(streams[1].http_args.iter().cloned());
         ff.extend(["-ss".to_string(), audio_ss, "-i".to_string(), urls[1].to_string()]);
     }
     let audio_input = if urls.len() == 2 { 1 } else { 0 };
@@ -1936,7 +2104,7 @@ fn url_exact_cut(
     ff.extend(["-progress", "pipe:2", "-nostats", "-y"].map(String::from));
     ff.push(temp_out.to_string_lossy().into_owned());
 
-    log_to_file(&format!("[EXACT] i={} mark={:.3} first_frame={:.6} (grid {:.6}) frames={} fps={} height={} codec={:?} streams={} audio={}", clip_index, start, first, grid_first, frames, fps, height, codec, urls.len(), has_audio));
+    log_to_file(&format!("[EXACT] i={} mark={:.3} first_frame={:.6} (grid {:.6}) frames={} fps={} height={} codec={:?} streams={} audio={} preview={}", clip_index, start, first, grid_first, frames, fps, height, codec, urls.len(), has_audio, alignment));
     let mut child = export_control::prepare(
         crate::proc::command(ffmpeg_path()).args(&ff).stdout(Stdio::piped()).stderr(Stdio::piped()),
     )
@@ -1979,6 +2147,43 @@ fn url_exact_cut(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_frame_rate_takes_the_first_variant() {
+        assert_eq!(parse_frame_rate("30000/1001\n\n30000/1001\n"), Some(30000.0 / 1001.0));
+        assert_eq!(parse_frame_rate("60/1"), Some(60.0));
+        assert_eq!(parse_frame_rate("0/0\n25/1"), Some(25.0));
+        assert_eq!(parse_frame_rate(""), None);
+    }
+
+    #[test]
+    fn frames_until_keeps_the_last_frame_on_a_boundary() {
+        // Out at 19.25 s is exactly where frame 1155 starts; the clip runs 922..=1154.
+        assert_eq!(frames_until(15.366667, 19.25, 60.0), 233);
+        // Out partway through frame 1155: 1155 is on screen at the Out point, so it is excluded.
+        assert_eq!(frames_until(15.366667, 19.26, 60.0), 233);
+        assert_eq!(frames_until(20.0, 24.0, 30.0), 120);
+        assert_eq!(frames_until(1.0, 1.0, 30.0), 1);
+    }
+
+    #[test]
+    fn ffmpeg_http_args_unquotes_cookies_and_keeps_domain() {
+        let mut h = serde_json::Map::new();
+        h.insert("User-Agent".into(), Value::from("UA/1"));
+        h.insert("Referer".into(), Value::from("https://www.tiktok.com/"));
+        let cookies = "ttwid=1%7Cabc; Domain=.tiktok.com; Path=/; Secure; Expires=1795383432; \
+                       tt_chain_token=\"x8E+q==\"; Domain=.tiktok.com; Path=/; Secure";
+        let a = ffmpeg_http_args(&h, cookies);
+        assert_eq!(a[0..2], ["-user_agent".to_string(), "UA/1".to_string()]);
+        assert_eq!(a[2..4], ["-headers".to_string(), "Referer: https://www.tiktok.com/\r\n".to_string()]);
+        assert_eq!(a[4], "-cookies");
+        assert_eq!(
+            a[5],
+            "ttwid=1%7Cabc; path=/; domain=.tiktok.com;\ntt_chain_token=x8E+q==; path=/; domain=.tiktok.com;\n"
+        );
+        // No cookies, no -cookies option.
+        assert_eq!(ffmpeg_http_args(&h, "").len(), 4);
+    }
+
     #[test]
     fn frame_span_starts_on_the_frame_shown_at_the_mark() {
         use super::frame_span;

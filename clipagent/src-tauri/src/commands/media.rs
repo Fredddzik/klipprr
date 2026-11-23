@@ -175,17 +175,6 @@ pub(super) fn probe_codec_name(path: &Path, stream: &str) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// Conservative check: can we stream-copy this file into an MP4 container and get a
-/// video that plays everywhere (QuickTime, Windows Media, browsers)?
-/// Only H.264 + AAC qualifies. Watermarking requires a filter graph, so forces re-encode.
-pub(super) fn can_stream_copy_to_mp4(path: &Path, has_watermark: bool) -> bool {
-    if has_watermark {
-        return false;
-    }
-    let vcodec = probe_codec_name(path, "v:0");
-    let acodec = probe_codec_name(path, "a:0");
-    matches!(vcodec.as_deref(), Some("h264")) && matches!(acodec.as_deref(), Some("aac"))
-}
 
 pub(super) fn parse_ffmpeg_out_time_ms(line: &str) -> Option<i64> {
     // When using `-progress pipe:2`, ffmpeg prints lines like:
@@ -317,10 +306,7 @@ pub(super) fn probe_fps(path: &Path) -> Option<f64> {
         .arg(path)
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (n, d) = text.trim().split_once('/')?;
-    let (n, d): (f64, f64) = (n.parse().ok()?, d.parse().ok()?);
-    (d > 0.0 && n / d > 1.0).then(|| n / d)
+    super::download::parse_frame_rate(&String::from_utf8_lossy(&out.stdout))
 }
 
 pub fn preferred_audio_map(path: &Path) -> String {

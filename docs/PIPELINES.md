@@ -134,13 +134,17 @@ removed (both modes downloaded the same stream).
 
 | Source | How a clip is cut |
 |---|---|
-| **Any link** (YouTube, Twitch, X, Instagram, TikTok) | `url_exact_cut`: yt-dlp prints the chosen height, fps, audio codec, request headers and direct stream URLs; `frame_start_at` reads the real start time of the frame on screen at the In point from the stream's own timestamps (ffprobe `-read_intervals` with an absolute end; frames are not always on a clean grid, e.g. a Twitch VOD), with `frame_span` (fps maths) as the fallback; ffmpeg seeks each stream to that frame minus 1 ms, `setpts/asetpts=PTS-STARTPTS`, `-frames:v`. Sources without audio skip the audio filter. Falls back to the section download (below) on any failure |
+| **Any link** (YouTube, Twitch, X, Instagram, TikTok) | `url_exact_cut`: yt-dlp prints the chosen formats as JSON (`requested_formats` when it merges two), and each stream gets its own request headers and cookies (`exact_cut_streams`, `ffmpeg_http_args`; TikTok answers 403 without the session cookies, and its quoted cookie values must be unquoted); a refused stream (403) is retried twice with fresh links, after 3 s and 10 s; the frame rate comes from yt-dlp or the stream (`parse_frame_rate`, which also reads HLS output), never a guess; `frame_start_at` reads the real start time of the frame on screen at the In point from the stream's own timestamps (ffprobe `-read_intervals` with an absolute end; frames are not always on a clean grid, e.g. a Twitch VOD), with `frame_span` (fps maths) as the fallback; ffmpeg seeks each stream to that frame minus 1 ms, `setpts/asetpts=PTS-STARTPTS`, `-frames:v` (`frames_until`, with slack for ffprobe's 6-decimal timestamps so an Out mark on a frame boundary keeps its last frame). Sources without audio skip the audio filter. Falls back to the section download (below) on any failure |
+| **TikTok specifics** | Formats: the exact cut pairs the best video (often video-only HEVC, up to 1080p60) with the audio of a version that has sound (`ba*[vcodec!=none][acodec!=none][format_id!=download]`, needs `--video-multistreams`), never TikTok's `audio` MP3 (the post's sound: can be the song without the voice, and ~50 ms off). The fallback takes the best version with sound. Preview (`YT_PREVIEW_SELECTOR_WORST`): smallest H.264 version with sound, never the watermarked `download`. **Preview alignment** (`preview_alignment`): TikTok's versions of one post do not show the same picture at the same timestamp. Measured on 10 posts (22 Nov 2026): same frame rate as the preview, identical; a 60 fps version against a 30 fps preview, every picture one preview frame (33 ms) earlier. So: same rate, no change; double rate, snap both marks to the preview frame and move them back one preview frame; any other rate, pad one preview frame on each side (a few frames extra rather than a cut-off). The export reads the cached preview's frame rate |
 | **Local file** | the same frame lookup and cut, on the file |
-| **Fallback** | `yt-dlp --download-sections` per clip, then the padding is skipped by length difference. **Not frame exact** (can start a frame or two late, with a black first frame). Runs only when `url_exact_cut` fails |
+| **Fallback** | `yt-dlp --download-sections` per clip, then the padding is skipped by length difference and the clip is re-encoded in the chosen format (`.mov` for ProRes; until 23 Nov 2026 it stream-copied H.264 downloads and always wrote H.264). **Not frame exact** (can start a frame or two late). Runs only when `url_exact_cut` fails |
 
-Verified exact by `scripts/export-regression.sh` on 16 Nov 2026: YouTube (H.264, HEVC), Twitch
-clip and VOD, X, Instagram. ProRes and local cases were checked by hand (the automatic check
-could not tell neighbouring frames apart). **TikTok and Windows are not in the regression yet.**
+Verified by `scripts/export-regression.sh` on 23 Nov 2026, first and last frame (17 cases, 0
+failed): YouTube (H.264, HEVC), Twitch clip and VOD, X, TikTok (60 fps with a 30 fps preview,
+capped 720p, 30 fps throughout), local file; Instagram first frame. ProRes and some ends report
+n/a when neighbouring frames are too alike to tell apart. TikTok cases compare against the app's
+own preview. **Windows is not in the regression.** A full run costs about 17 clips: use a test
+account (a run on 23 Nov used up a Pro account's 120).
 
 For comparison (22 Nov 2026, same YouTube clip 10.3–14 s): a plain `yt-dlp --download-sections`
 copy held 5.02 s of hidden run-up behind its edit list and showed its first frame one frame late;
