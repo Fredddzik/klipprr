@@ -299,7 +299,9 @@ d = [sum(abs(a - b) for a, b in zip(last, trio[i * n:(i + 1) * n])) for i in ran
 best = min(range(3), key=d.__getitem__)
 if sorted(d)[1] < 1.1 * max(d[best], 1):
     print("n/a neighbouring frames too similar to tell apart"); sys.exit(1)
-print(["one frame short", "exact", "one frame long"][best])
+# At double rate the export pads instead of cutting off (download.rs, preview_alignment):
+# one reference frame long is the intended result where TikTok's versions line up.
+print(["one frame short", "exact", "padded one frame" if double else "one frame long"][best])
 LASTPY
 
 # A reference on the source's own timeline. Local cases already have the file; URL
@@ -454,7 +456,7 @@ PY
     esac
     last_check=$(FFMPEG="$FFMPEG" FFPROBE="$FFPROBE" python3 "$LASTF" "$f" "$ref" "$end")
     case $last_check in
-      exact|"n/a"*) ;;
+      exact|padded*|"n/a"*) ;;
       *) problems="$problems last frame is $last_check;" ;;
     esac
   fi

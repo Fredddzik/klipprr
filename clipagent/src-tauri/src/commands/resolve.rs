@@ -452,6 +452,17 @@ let parsed: Value = match serde_json::from_str(json_str) {
         preview_url.clear();
     }
 
+    // TikTok's stream links answer 403 without the cookies of the session that listed them.
+    // Record them so /preview-stream can fetch the preview, which then streams and seeks
+    // like any other platform instead of being downloaded first.
+    // Keyed by the decoded page link: that is what the export is given.
+    if decoded_url.contains("tiktok.com") && !preview_url.is_empty() {
+        if let Some(f) = formats.iter().find(|f| f["url"].as_str() == Some(preview_url.as_str())) {
+            crate::http::remember_preview_stream(&decoded_url, &preview_url, f);
+            log_to_file(&format!("[RESOLVE] recorded TikTok preview stream for {decoded_url}"));
+        }
+    }
+
     // YouTube no longer publishes muxed (audio+video) formats for many videos, so there is
     // often no single URL a <video> element can play. That is not a failure: the frontend
     // falls back to a locally merged preview built by /yt-preview-cache. Only a source with

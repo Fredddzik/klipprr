@@ -1872,35 +1872,60 @@ pub(super) fn parse_frame_rate(out: &str) -> Option<f64> {
 /// to Out).
 ///
 /// TikTok's versions of one post do not all show the same picture at the same timestamp.
-/// Measured on 10 posts (22 Nov 2026): versions with the preview's frame rate match it
-/// exactly; a 60 fps version made alongside a 30 fps preview shows each picture one preview
-/// frame (33 ms) earlier, on every frame; a variable or odd frame rate gave no clean answer.
-/// So: same rate, nothing; exactly double, snap each mark to the start of the preview frame
-/// the user saw, then move it back one preview frame (each preview frame is every second
-/// frame of the 60 fps version, so a mark moved without snapping can land between the two
-/// and keep one frame too many at the end); anything else, keep the quality and pad one
-/// preview frame on each side. A few frames too many is better than cutting off what the
-/// user marked. Returns the marks to cut at and a note for the log.
+/// Measured on 10 posts (22-23 Nov 2026): versions with the preview's frame rate match it
+/// exactly, on every frame. A 60 fps version made alongside a 30 fps preview shows each
+/// picture between 0 and one preview frame (33 ms) earlier, and which one can change within
+/// a post (a compilation was 33 ms at 0:15 and 0 ms at 3:00). A variable or odd frame rate
+/// gave no clean answer. A few frames too many is better than cutting off what the user
+/// marked, so: same rate, nothing; exactly double, snap both marks to the preview frame
+/// the user saw and move only the In point back one preview frame (exact, or one preview
+/// frame of padding at one end, never short); anything else, keep the quality and pad one
+/// preview frame on each side. Returns the marks to cut at and a note for the log.
 fn preview_alignment(url: &str, export_fps: f64, start: f64, end: f64) -> (f64, f64, &'static str) {
     if !url.contains("tiktok.com") {
         return (start, end, "none");
     }
-    let preview = crate::http::yt_preview_path(url, "lq");
-    let preview_fps: Option<f64> = preview.is_file().then(|| {
+    // The preview the user marked on: the downloaded copy when there is one (the fallback),
+    // otherwise the stream resolve recorded for it.
+    let probe = |extra: Vec<String>, input: String| -> Option<f64> {
+        let mut a: Vec<String> = ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0"]
+            .map(String::from)
+            .to_vec();
+        a.extend(extra);
+        a.push(input);
         crate::proc::command(ffprobe_path())
-            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate", "-of", "csv=p=0"])
-            .arg(&preview)
+            .args(&a)
             .output()
             .ok()
             .and_then(|o| parse_frame_rate(&String::from_utf8_lossy(&o.stdout)))
-    }).flatten();
+    };
+    let downloaded = Some(crate::http::yt_preview_path(url, "lqfull"))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| crate::http::yt_preview_path(url, "lq"));
+    let preview_fps: Option<f64> = if downloaded.is_file() {
+        probe(Vec::new(), downloaded.to_string_lossy().into_owned())
+    } else {
+        match crate::http::preview_stream_for_page(url) {
+            Some((stream, auth)) => {
+                let fps = probe(ffmpeg_http_args(&auth.headers, &auth.cookies), stream);
+                if fps.is_none() {
+                    log_to_file("[EXACT] preview stream found, but its frame rate could not be read");
+                }
+                fps
+            }
+            None => {
+                log_to_file(&format!("[EXACT] no preview recorded for {url}"));
+                None
+            }
+        }
+    };
     let snap = |t: f64, p: f64| (t * p + 1e-6).floor() / p;
     match preview_fps {
         Some(p) if (export_fps - p).abs() < 0.05 => (start, end, "same rate"),
         Some(p) if (export_fps - 2.0 * p).abs() < 0.1 => (
             (snap(start, p) - 1.0 / p).max(0.0),
-            snap(end, p) - 1.0 / p,
-            "double rate: snapped and moved back one preview frame",
+            snap(end, p),
+            "double rate: snapped, In moved back one preview frame",
         ),
         Some(p) => ((start - 1.0 / p).max(0.0), end + 1.0 / p, "other rate: padded one preview frame"),
         // No preview file to compare with (cache cleared): a 30 fps export or slower is the
@@ -1955,16 +1980,7 @@ pub(super) fn ffmpeg_http_args(headers: &serde_json::Map<String, Value>, cookies
     if !extra.is_empty() {
         args.extend(["-headers".to_string(), extra]);
     }
-    let mut jar: Vec<(String, String, String, String)> = Vec::new();
-    for tok in cookies.split(';').map(str::trim).filter(|t| !t.is_empty()) {
-        let (k, v) = tok.split_once('=').unwrap_or((tok, ""));
-        match k.to_ascii_lowercase().as_str() {
-            "domain" => { if let Some(c) = jar.last_mut() { c.2 = v.to_string(); } }
-            "path" => { if let Some(c) = jar.last_mut() { c.3 = v.to_string(); } }
-            "expires" | "max-age" | "samesite" | "secure" | "httponly" | "priority" | "partitioned" => {}
-            _ => jar.push((k.to_string(), v.trim_matches('"').to_string(), String::new(), "/".to_string())),
-        }
-    }
+    let jar = crate::http::parse_yt_dlp_cookies(cookies);
     let lines: String = jar
         .iter()
         .map(|(k, v, d, p)| if d.is_empty() { format!("{k}={v}; path={p};\n") } else { format!("{k}={v}; path={p}; domain={d};\n") })

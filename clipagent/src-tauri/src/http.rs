@@ -645,7 +645,79 @@ static PREVIEW_CLIENT: Lazy<Option<reqwest::Client>> = Lazy::new(|| {
 /// Largest slice read from the cache file per body chunk.
 const CACHE_READ_CHUNK: u64 = 256 * 1024;
 
+/// yt-dlp's `cookies` field for a format, as (name, value, domain, path). It reads like
+/// `a=1; Domain=.x.com; Path=/; Secure; Expires=…; b="2=="; Domain=…`: attributes follow
+/// the cookie they belong to, and a value with `=` in it comes quoted. TikTok refuses the
+/// quoted form.
+pub(crate) fn parse_yt_dlp_cookies(s: &str) -> Vec<(String, String, String, String)> {
+    let mut jar: Vec<(String, String, String, String)> = Vec::new();
+    for tok in s.split(';').map(str::trim).filter(|t| !t.is_empty()) {
+        let (k, v) = tok.split_once('=').unwrap_or((tok, ""));
+        match k.to_ascii_lowercase().as_str() {
+            "domain" => { if let Some(c) = jar.last_mut() { c.2 = v.to_string(); } }
+            "path" => { if let Some(c) = jar.last_mut() { c.3 = v.to_string(); } }
+            "expires" | "max-age" | "samesite" | "secure" | "httponly" | "priority" | "partitioned" => {}
+            _ => jar.push((k.to_string(), v.trim_matches('"').to_string(), String::new(), "/".to_string())),
+        }
+    }
+    jar
+}
+
+/// What a stream link needs on every request: yt-dlp's headers for its format and its
+/// cookies. Recorded by resolve for TikTok, whose links answer 403 without the cookies of
+/// the session that listed them, so the preview can stream through this proxy instead of
+/// being downloaded first. Keyed by stream link; `PREVIEW_STREAM_BY_PAGE` maps the page
+/// link to the stream the preview plays, for the export's frame alignment.
+#[derive(Clone)]
+pub(crate) struct StreamAuth {
+    pub(crate) headers: serde_json::Map<String, serde_json::Value>,
+    pub(crate) cookies: String,
+}
+static STREAM_AUTH: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<String, StreamAuth>>> =
+    once_cell::sync::Lazy::new(Default::default);
+static PREVIEW_STREAM_BY_PAGE: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    once_cell::sync::Lazy::new(Default::default);
+
+pub(crate) fn remember_preview_stream(page_url: &str, stream_url: &str, format: &serde_json::Value) {
+    let auth = StreamAuth {
+        headers: format.get("http_headers").and_then(|h| h.as_object()).cloned().unwrap_or_default(),
+        cookies: format.get("cookies").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+    };
+    if let (Ok(mut a), Ok(mut p)) = (STREAM_AUTH.lock(), PREVIEW_STREAM_BY_PAGE.lock()) {
+        // A session opens a few dozen videos at most; this only keeps it from growing forever.
+        if a.len() > 200 { a.clear(); p.clear(); }
+        a.insert(stream_url.to_string(), auth);
+        p.insert(page_url.to_string(), stream_url.to_string());
+    }
+}
+
+/// The stream the preview of `page_url` plays and what it needs to be fetched, if resolve
+/// recorded one.
+pub(crate) fn preview_stream_for_page(page_url: &str) -> Option<(String, StreamAuth)> {
+    let stream = PREVIEW_STREAM_BY_PAGE.lock().ok()?.get(page_url).cloned()?;
+    let auth = STREAM_AUTH.lock().ok()?.get(&stream).cloned()?;
+    Some((stream, auth))
+}
+
 fn with_preview_referer(rb: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+    let auth = STREAM_AUTH.lock().ok().and_then(|m| m.get(url).cloned());
+    if let Some(a) = auth {
+        let mut rb = rb;
+        for (k, v) in a.headers.iter() {
+            if let Some(v) = v.as_str() {
+                rb = rb.header(k.as_str(), v);
+            }
+        }
+        let cookie: String = parse_yt_dlp_cookies(&a.cookies)
+            .iter()
+            .map(|(k, v, _, _)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !cookie.is_empty() {
+            rb = rb.header("Cookie", cookie);
+        }
+        return rb;
+    }
     if url.contains("youtube.com") || url.contains("youtu.be") {
         rb.header("Referer", "https://www.youtube.com/")
     } else if url.contains("tiktok.com") {
@@ -1303,8 +1375,11 @@ pub async fn handle_http(
             Err(_) => return Ok(text_response(400, "bad_url_encoding")),
         };
 
+        // A whole-video TikTok copy gets its own name: copies made before 0.1.45 hold only
+        // the first 60 s, and must not be served when the whole video is asked for.
         let tier = match q_param {
             Some(h) => h.to_string(),
+            None if full => "lqfull".to_string(),
             None => "lq".to_string(),
         };
         let out_mp4 = yt_preview_path(&original_url, &tier);

@@ -1,6 +1,7 @@
 {
   "0.1.45": [
-    "Fixed: TikTok clips started and ended a few frames late, and some lost the creator's voice. They now start and end on the exact frames you mark, in full quality, with the video's own sound.",
+    "New: TikTok videos preview instantly and you can scrub the whole video. Before, the preview had to download first and stopped after one minute.",
+    "Fixed: TikTok clips started and ended a few frames late, and some lost the creator's voice. They now start and end where you mark them, in full quality, with the video's own sound.",
     "Fixed: a clip whose Out point sat exactly on a frame could lose its last frame.",
     "Fixed: when a site briefly refused a download, HEVC and ProRes exports could come out as H.264. Klipprr now tries again and keeps the format you picked."
   ],

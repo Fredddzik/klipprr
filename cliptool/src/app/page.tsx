@@ -426,8 +426,12 @@ useEffect(() => {
   const [previewUnavailable, setPreviewUnavailable] = useState(false);
   /** The streamed preview failed for this video; use the downloaded one instead. */
   const [dashFailed, setDashFailed] = useState(false);
+  /** TikTok streams through the agent, which adds the cookies TikTok's links need. When
+   *  that stream fails, the whole video is downloaded and played locally instead. */
+  const [tiktokStreamFailed, setTiktokStreamFailed] = useState(false);
   useEffect(() => {
     setDashFailed(false);
+    setTiktokStreamFailed(false);
   }, [resolvedUrl, videoData?.id]);
   /** Stream the preview (FR-7): the first frame arrives in a second or two whatever the
    *  video's length, and only what is watched is fetched. The download-then-play path
@@ -976,9 +980,11 @@ async function refreshUsage() {
     if (!resolvedUrl || !videoData || !isTauri) return;
     if (streamPreview) return;
 
-    // TikTok: CDN URLs can't be fetched by WKWebView, so a throwaway low-res copy is enough.
+    // TikTok streams like any other link (the agent adds the cookies its links need). Only
+    // when that fails is the whole video downloaded, so every second of it can be marked.
     const isTikTok =
-      resolvedUrl.includes("tiktok.com") || resolvedUrl.includes("tiktokcdn.com");
+      (resolvedUrl.includes("tiktok.com") || resolvedUrl.includes("tiktokcdn.com")) &&
+      (tiktokStreamFailed || !videoData.previewUrl);
     // DASH-only sources (YouTube): no muxed format exists, so the preview must be merged
     // locally. Fetch 360p first so playback starts quickly, and kick off a 720p download
     // in the background that gets swapped in when ready.
@@ -991,7 +997,7 @@ async function refreshUsage() {
 
     let params: string;
     if (isTikTok) {
-      params = `url=${encodeURIComponent(resolvedUrl)}`;
+      params = `url=${encodeURIComponent(resolvedUrl)}&full=1`;
     } else if (needsLocalPreview) {
       params = `url=${encodeURIComponent(resolvedUrl)}&q=360&full=1&hq=${upgradeHeight || 720}`;
     } else {
@@ -1037,7 +1043,7 @@ async function refreshUsage() {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedUrl, videoData?.id, streamPreview]);
+  }, [resolvedUrl, videoData?.id, streamPreview, tiktokStreamFailed]);
 
   // Background 720p preview polling for YouTube. Whatever is on screen — the 360p local
   // copy, or the 360p muxed stream when one is still published — gets swapped up once the
@@ -2153,7 +2159,7 @@ useEffect(() => {
                   }
                   // No local copy yet, and no direct URL to fall back on → placeholder
                   // while the download runs.
-                  if (isTikTok || videoData.requiresLocalPreview) return null;
+                  if ((isTikTok && (tiktokStreamFailed || !videoData.previewUrl)) || videoData.requiresLocalPreview) return null;
 
                   if (!videoData.previewUrl) return videoData.previewUrl;
                   const isRemote =
@@ -2189,6 +2195,13 @@ useEffect(() => {
                   trackEvent("preview_ready", loadContext());
                 }}
                 onPlaybackError={(details) => {
+                  const tiktok = resolvedUrl?.includes("tiktok.com") || resolvedUrl?.includes("tiktokcdn.com");
+                  if (tiktok && !tiktokStreamFailed && !ytPreviewPath) {
+                    // The stream was refused or broke off: download the video instead.
+                    trackEvent("preview_failed", { ...loadContext(), reason: "tiktok_stream_fallback", details: details ? scrubText(details) : null });
+                    setTiktokStreamFailed(true);
+                    return;
+                  }
                   trackEvent("preview_failed", {
                     ...loadContext(),
                     reason: "playback_error",
