@@ -22,6 +22,9 @@ const POSTHOG_KEY = process.env.NEXT_PUBLIC_POSTHOG_KEY ?? "";
 const POSTHOG_HOST = process.env.NEXT_PUBLIC_POSTHOG_HOST || "https://us.i.posthog.com";
 const CONSENT_KEY = "klipprr-analytics-consent";
 const CONSENT_EVENT = "klipprr-analytics-consent-changed";
+/** Set after the first successful export. The consent card waits for it: asked on first
+ *  launch, before the app had done anything, people waved it away. */
+const FIRST_EXPORT_KEY = "klipprr-first-export-done";
 
 export type AnalyticsConsent = "granted" | "denied" | null;
 
@@ -64,6 +67,57 @@ export function setAnalyticsConsent(consent: "granted" | "denied"): void {
     posthog.reset();
   }
   window.dispatchEvent(new Event(CONSENT_EVENT));
+}
+
+/** True once the user has exported at least one clip. */
+export function consentAskDue(): boolean {
+  try {
+    return localStorage.getItem(FIRST_EXPORT_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Records a successful export. Returns true the first time, and wakes the consent card. */
+export function markExportDone(): boolean {
+  try {
+    if (localStorage.getItem(FIRST_EXPORT_KEY) !== null) return false;
+    localStorage.setItem(FIRST_EXPORT_KEY, "1");
+  } catch {
+    return false;
+  }
+  window.dispatchEvent(new Event(CONSENT_EVENT));
+  return true;
+}
+
+/**
+ * Sends one error report the user asked to send with the "Send error report" button. It
+ * does not depend on the analytics choice: each report is its own explicit yes, and the
+ * button says what it sends. Without analytics consent it goes out anonymously (a fresh id,
+ * no person profile) and nothing else is stored or sent.
+ */
+export async function sendErrorReport(props: Record<string, unknown>): Promise<boolean> {
+  if (!ANALYTICS_AVAILABLE) return false;
+  const properties = { app: "desktop", ...superProps, ...props };
+  if (started && analyticsAllowed()) {
+    posthog.capture("error_report_sent", properties);
+    return true;
+  }
+  try {
+    const res = await fetch(`${POSTHOG_HOST.replace(/\/$/, "")}/i/v0/e/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: POSTHOG_KEY,
+        event: "error_report_sent",
+        distinct_id: crypto.randomUUID(),
+        properties: { ...properties, $process_person_profile: false },
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 export function onAnalyticsConsentChange(cb: () => void): () => void {

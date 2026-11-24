@@ -20,6 +20,15 @@ function AnalyticsBridge() {
     let cancelled = false;
     const platform = navigator.userAgent.toLowerCase().includes("win") ? "windows" : "mac";
     setAnalyticsContext({ platform });
+    // Read before consent too: an error report sent by someone who said no still needs
+    // to say which release it came from. Reading it sends nothing.
+    getVersion()
+      .then((version) => {
+        if (!cancelled) setAnalyticsContext({ app_version: version });
+      })
+      .catch(() => {
+        // Not in Tauri (dev in a browser): no version.
+      });
 
     const identifyCurrent = () =>
       supabase.auth.getSession().then(({ data: { session } }) => {
@@ -28,12 +37,6 @@ function AnalyticsBridge() {
 
     const begin = async () => {
       if (!analyticsAllowed()) return;
-      try {
-        const version = await getVersion();
-        if (!cancelled) setAnalyticsContext({ app_version: version });
-      } catch {
-        // Not in Tauri (dev in a browser): no version.
-      }
       startAnalytics();
       await identifyCurrent();
     };

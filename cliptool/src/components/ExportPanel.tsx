@@ -1,5 +1,5 @@
 "use client";
-import { track, describeLink, scrubText } from "@/lib/analytics";
+import { track, describeLink, scrubText, sendErrorReport, ANALYTICS_AVAILABLE } from "@/lib/analytics";
 import type { DefaultExportFormat } from "./SettingsModal";
 
 import { useEffect, useState, useRef } from "react";
@@ -224,7 +224,10 @@ export default function ExportPanel({
     total: number;
     okCount: number;
     context: string;
+    /** What "Send error report" sends: the link, the settings and the errors. */
+    report: Record<string, unknown> | null;
   } | null>(null);
+  const [reportState, setReportState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
 
   // The offer belongs to the video it was exported from; a retry must not cut a new one.
   useEffect(() => {
@@ -307,7 +310,22 @@ export default function ExportPanel({
     // Failed clips stay on screen with a Retry button instead of a dialog: the agent has
     // already retried them, so a failure here is usually a platform refusing for a while.
     if (failedClips.length > 0) {
-      setRetryOffer({ clips: failedClips, names: failedNames, total, okCount, context });
+      setReportState("idle");
+      setRetryOffer({
+        clips: failedClips,
+        names: failedNames,
+        total,
+        okCount,
+        context,
+        report: started
+          ? {
+              ...started.props,
+              ok_count: okCount,
+              failed_count: failedCount,
+              fail_reasons: failedIdx.map((i) => scrubText(String(failReasonsRef.current[i] ?? "failed"))).slice(0, 5),
+            }
+          : null,
+      });
     }
     if (okCount > 0) {
       if (onExportComplete && exportDir) onExportComplete(okCount, exportDir, hadWatermark, totalDuration);
@@ -930,6 +948,29 @@ export default function ExportPanel({
               Email us
             </button>
           </div>
+          {ANALYTICS_AVAILABLE && retryOffer.report && (
+            <div className="flex items-center gap-2 text-xs">
+              <button
+                type="button"
+                disabled={reportState === "sending" || reportState === "sent"}
+                onClick={async () => {
+                  setReportState("sending");
+                  const ok = await sendErrorReport(retryOffer.report ?? {});
+                  setReportState(ok ? "sent" : "failed");
+                }}
+                className="shrink-0 py-1 px-2 rounded text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-60 disabled:hover:bg-transparent transition"
+              >
+                {reportState === "sent" ? "Report sent, thank you" : reportState === "sending" ? "Sending…" : "Send error report"}
+              </button>
+              <span className="text-zinc-500">
+                {reportState === "failed"
+                  ? "Could not send. Check your connection."
+                  : localFilePath
+                  ? "Sends the error and export settings, never the file name."
+                  : "Sends this video's link and the error. Nothing else."}
+              </span>
+            </div>
+          )}
         </div>
       )}
 

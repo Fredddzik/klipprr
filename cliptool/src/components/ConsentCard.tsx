@@ -1,11 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ANALYTICS_AVAILABLE, getAnalyticsConsent, onAnalyticsConsentChange, setAnalyticsConsent } from "@/lib/analytics";
+import {
+  ANALYTICS_AVAILABLE,
+  consentAskDue,
+  getAnalyticsConsent,
+  onAnalyticsConsentChange,
+  setAnalyticsConsent,
+} from "@/lib/analytics";
 
 /**
- * Asks once whether the app may send usage data. Nothing is sent before a yes, and
- * "No thanks" is as easy as yes. The answer can be changed in Settings.
+ * Asks once whether the app may send usage data, after the first successful export: at
+ * that point people have seen what the app does. Nothing is sent before a yes, "No thanks"
+ * is as easy as yes and is never asked again, and the answer can be changed in Settings.
  */
 export default function ConsentCard() {
   const [open, setOpen] = useState(false);
@@ -13,7 +20,7 @@ export default function ConsentCard() {
   useEffect(() => {
     if (!ANALYTICS_AVAILABLE) return;
     if (!(window as { __TAURI__?: unknown }).__TAURI__) return;
-    const sync = () => setOpen(getAnalyticsConsent() === null);
+    const sync = () => setOpen(getAnalyticsConsent() === null && consentAskDue());
     sync();
     return onAnalyticsConsentChange(sync);
   }, []);

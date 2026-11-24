@@ -40,7 +40,7 @@ import {
   normalizePlan,
   PLAN_MONTHLY_CLIP_LIMIT,
 } from "@/lib/usage";
-import { track, trackOnExit, describeLink, fileExtension, scrubText, setAnalyticsContext, type LinkSource } from "@/lib/analytics";
+import { track, trackOnExit, describeLink, fileExtension, scrubText, setAnalyticsContext, markExportDone, type LinkSource } from "@/lib/analytics";
 import ConsentCard from "@/components/ConsentCard";
 import {
   fetchAppFeatureFlags,
@@ -2498,8 +2498,7 @@ useEffect(() => {
                     had_watermark: hadWatermark,
                     clip_duration_seconds: Math.round(totalDurationSeconds),
                   });
-                  if (!localStorage.getItem("klipprr-first-export-done")) {
-                    localStorage.setItem("klipprr-first-export-done", "1");
+                  if (markExportDone()) {
                     trackEvent("first_export", {
                       clip_count: count,
                       clip_duration_seconds: Math.round(totalDurationSeconds),
