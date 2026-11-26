@@ -51,6 +51,18 @@ pub fn all_cancelled(export_id: Option<&str>) -> bool {
     m.get(id).map_or(false, |e| e.all)
 }
 
+/// How many of an export's `total` clips the user cancelled (all of them after a cancel-all).
+pub fn cancelled_count(export_id: Option<&str>, total: usize) -> usize {
+    let (Some(id), Ok(m)) = (export_id, EXPORTS.lock()) else { return 0 };
+    m.get(id).map_or(0, |e| {
+        if e.all {
+            total
+        } else {
+            e.clips.iter().filter(|&&c| c != SHARED && c < total).count()
+        }
+    })
+}
+
 /// Runs the command in its own process group so a cancel reaches its children too.
 pub fn prepare(cmd: &mut Command) -> &mut Command {
     #[cfg(unix)]

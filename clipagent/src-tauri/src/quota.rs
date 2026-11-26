@@ -150,9 +150,37 @@ pub fn clip_done(export_id: Option<&str>) {
     }
 }
 
+/// How an export ended, for the clips that did not export: how many the user cancelled,
+/// and the app's internal code for the first failure. Recorded with the refund so a
+/// cancel can be told apart from a failure. Never a link, platform or file name: the
+/// server only accepts `[a-z0-9_]`, and Privacy Policy §3.2 promises exactly that.
+pub struct Ending {
+    pub cancelled: usize,
+    pub error_code: Option<String>,
+}
+
+/// The fixed outcome for `unused` clips of which `cancelled` were cancelled by the user.
+fn outcome(unused: usize, cancelled: usize) -> &'static str {
+    if cancelled >= unused {
+        "cancelled"
+    } else if cancelled == 0 {
+        "failed"
+    } else {
+        "mixed"
+    }
+}
+
+/// Keeps only an internal code (`yt_dlp_failed`); anything else becomes `other`.
+fn clean_code(code: Option<String>) -> Option<String> {
+    code.map(|c| {
+        let ok = !c.is_empty() && c.len() <= 40 && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if ok { c } else { "other".to_string() }
+    })
+}
+
 /// After an export: gives back every reserved clip that did not export. Runs in the
 /// background; a failed refund only costs the user that refund.
-pub fn settle(app: &AppHandle, export_id: Option<&str>, reservation: Reservation) {
+pub fn settle(app: &AppHandle, export_id: Option<&str>, reservation: Reservation, ending: Ending) {
     let done = export_id.and_then(|id| DONE.lock().unwrap().remove(id)).unwrap_or(0);
     let unused = reservation.clips.saturating_sub(done);
     // scripts/export-regression.sh waits for this line.
@@ -160,15 +188,29 @@ pub fn settle(app: &AppHandle, export_id: Option<&str>, reservation: Reservation
     if unused == 0 {
         return;
     }
+    let outcome = outcome(unused, ending.cancelled);
+    let error_code = if outcome == "cancelled" { None } else { clean_code(ending.error_code).or(Some("unknown".to_string())) };
+    log_to_file(&format!("[QUOTA] outcome={} error={}", outcome, error_code.as_deref().unwrap_or("-")));
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let token = reservation.access_token.clone();
         let result = with_token(&app, Some(&token), |t| {
             let id = reservation.id.clone();
+            let error_code = error_code.clone();
             async move {
                 match id {
                     Some(id) => {
-                        rpc("release_export_reservation", t, json!({ "p_reservation_id": id, "p_count": unused })).await
+                        rpc(
+                            "release_export_reservation",
+                            t,
+                            json!({
+                                "p_reservation_id": id,
+                                "p_count": unused,
+                                "p_outcome": outcome,
+                                "p_error_code": error_code,
+                            }),
+                        )
+                        .await
                     }
                     None => rpc("release_clip_exports", t, json!({ "p_count": unused })).await,
                 }
@@ -181,4 +223,26 @@ pub fn settle(app: &AppHandle, export_id: Option<&str>, reservation: Reservation
         }
         let _ = tauri::Emitter::emit(&app, "usage-changed", ());
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outcome_tells_cancels_from_failures() {
+        assert_eq!(outcome(2, 2), "cancelled");
+        assert_eq!(outcome(1, 3), "cancelled"); // cancel-all counts every clip
+        assert_eq!(outcome(2, 0), "failed");
+        assert_eq!(outcome(3, 1), "mixed");
+    }
+
+    #[test]
+    fn only_internal_codes_leave_the_machine() {
+        assert_eq!(clean_code(Some("yt_dlp_failed".into())).as_deref(), Some("yt_dlp_failed"));
+        assert_eq!(clean_code(Some("https://youtube.com/watch?v=x".into())).as_deref(), Some("other"));
+        assert_eq!(clean_code(Some("Bad Request".into())).as_deref(), Some("other"));
+        assert_eq!(clean_code(Some("a".repeat(41))).as_deref(), Some("other"));
+        assert_eq!(clean_code(None), None);
+    }
 }

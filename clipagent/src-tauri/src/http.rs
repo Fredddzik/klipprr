@@ -1694,14 +1694,41 @@ pub async fn handle_http(
             let error = serde_json::from_str::<serde_json::Value>(&result)
                 .ok()
                 .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from));
-            if let Some(error) = error {
+            if let Some(error) = &error {
                 download::log_to_file(&format!("[EXPORT] ended with error: {}", error));
                 let _ = app_for_export.emit("export-error", serde_json::json!({
                     "error": error,
                     "client_export_id": export_id,
                 }));
             }
-            crate::quota::settle(&app_for_export, export_id.as_deref(), reservation);
+            // Why the clips that did not export went unused: cancelled by the user, or the
+            // first failure's internal code (top-level error, else the first failed clip
+            // that was not cancelled). Read before export_control::end forgets the cancels.
+            let cancelled = crate::export_control::cancelled_count(export_id.as_deref(), clip_count);
+            let error_code = error.clone().or_else(|| {
+                let v: serde_json::Value = serde_json::from_str(&result).ok()?;
+                v.get("results")?.as_array()?.iter().find_map(|r| {
+                    if r.get("ok").and_then(|o| o.as_bool()) != Some(false) {
+                        return None;
+                    }
+                    let reason = r.get("reason").and_then(|x| x.as_str()).unwrap_or("unknown");
+                    let index = r.get("index").and_then(|x| x.as_u64()).map(|x| x as usize);
+                    let was_cancelled = reason == "cancelled"
+                        || index.map_or(false, |clip| {
+                            crate::export_control::is_cancelled(crate::export_control::Job {
+                                export_id: export_id.as_deref(),
+                                clip,
+                            })
+                        });
+                    (!was_cancelled).then(|| reason.to_string())
+                })
+            });
+            crate::quota::settle(
+                &app_for_export,
+                export_id.as_deref(),
+                reservation,
+                crate::quota::Ending { cancelled, error_code },
+            );
             if let Some(id) = &export_id {
                 crate::export_control::end(id);
             }
